@@ -191,7 +191,7 @@ public enum LongExposureScene: String, Codable, Sendable, CaseIterable, Identifi
         case .stars: return "Gathers light for a sky full of stars. Tripod, somewhere dark."
         case .northernLights: return "Short enough to keep the shapes in the sky. Needs a tripod."
         // Locking the phone ends the exposure early, and half an hour invites it.
-        case .starTrails: return "Stars draw arcs across the sky. Tripod, charger, phone unlocked. Tap again to stop early."
+        case .starTrails: return "Stars draw arcs across the sky. Tripod, charger, screen on. Tap again to stop early."
         case .fireworks: return "Start as the rocket goes up. Needs a tripod."
         // The panel's own line already says how a scene without a set time starts and stops. Focus is held from
         // the moment the shot starts, and in the dark autofocus has little to find, so it is set beforehand.

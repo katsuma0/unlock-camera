@@ -123,8 +123,8 @@ final class LongExposureSceneTests: XCTestCase {
     }
 
     func testTipsSayWhatTheShotNeedsBeforeItStarts() {
-        // Locking the phone ends the exposure early, and half an hour invites it.
-        XCTAssertTrue(LongExposureScene.starTrails.tip.contains("unlocked"), LongExposureScene.starTrails.tip)
+        // Turning the screen off ends the exposure early, and half an hour invites it.
+        XCTAssertTrue(LongExposureScene.starTrails.tip.contains("screen on"), LongExposureScene.starTrails.tip)
         // Focus is held from the moment the shot starts, and in the dark autofocus has little to find. Touch and
         // hold is what sets and keeps it in this scene.
         let painting = LongExposureScene.lightPainting.tip.lowercased()
