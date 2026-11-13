@@ -675,7 +675,7 @@ struct DialValueHeader: View {
         }
     }
 
-    /// The way back to the modes, mirroring AUTO: same capsule, same height, same 44 pt touch area.
+    /// The way out of the dial, mirroring AUTO: same capsule, same height, same 44 pt touch area.
     @ViewBuilder
     private var doneButton: some View {
         if let onDone {

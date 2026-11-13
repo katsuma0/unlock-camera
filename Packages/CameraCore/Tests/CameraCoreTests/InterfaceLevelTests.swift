@@ -204,7 +204,7 @@ final class InterfaceLevelTests: XCTestCase {
         for aspect in CameraSettings.simpleAspects {
             XCTAssertTrue(AspectRatio.presets.contains(aspect), aspect.label)
         }
-        XCTAssertEqual(CameraSettings.simpleDelays, [0, 3, 10])
+        XCTAssertEqual(CameraSettings.simpleDelays, [0, 3, 5, 10])
         for delay in CameraSettings.simpleDelays {
             XCTAssertTrue(CaptureSchedule.delayPresets.contains(delay), "\(delay)")
         }
@@ -384,8 +384,9 @@ final class InterfaceLevelTests: XCTestCase {
         XCTAssertEqual(simple(CaptureSchedule(delay: 600)), CaptureSchedule(delay: 10))
         // A delay the simple interface doesn't list goes down to one it does, never up: nobody waits longer than
         // they asked to.
-        XCTAssertEqual(simple(CaptureSchedule(delay: 7)), CaptureSchedule(delay: 3))
-        XCTAssertEqual(simple(CaptureSchedule(delay: 5)), CaptureSchedule(delay: 3))
+        XCTAssertEqual(simple(CaptureSchedule(delay: 7)), CaptureSchedule(delay: 5))
+        XCTAssertEqual(simple(CaptureSchedule(delay: 5)), CaptureSchedule(delay: 5))
+        XCTAssertEqual(simple(CaptureSchedule(delay: 4)), CaptureSchedule(delay: 3))
         XCTAssertEqual(simple(CaptureSchedule(delay: 2)), .off)
         // An intervalometer becomes one shot and keeps its timer.
         XCTAssertEqual(simple(CaptureSchedule(shots: 20, interval: 30)), .off)

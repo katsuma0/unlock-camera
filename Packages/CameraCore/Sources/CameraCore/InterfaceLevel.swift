@@ -9,7 +9,7 @@ extension CameraSettings {
     /// Aspect ratios the simple drawer offers.
     public static let simpleAspects: [AspectRatio] = [.fourThree, .square, .sixteenNine]
     /// Self timer choices of the simple drawer, in seconds.
-    public static let simpleDelays: [Double] = [0, 3, 10]
+    public static let simpleDelays: [Double] = [0, 3, 5, 10]
     public static let simpleGrids: [GridStyle] = [.off, .thirds]
     /// What the Camera Control carries in the simple interface: nothing that leads to MANUAL.
     public static let simpleCameraControlItems: [CameraControlItem] = [.zoom, .lens, .exposureBias]

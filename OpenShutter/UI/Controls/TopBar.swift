@@ -99,7 +99,7 @@ private struct BarTouchLayer: View {
             case .torch: TorchOptions(model: model)
             case .raw: RawOptions(model: model)
             case .resolution, .frameRate: VideoFormatOptions(model: model)
-            case .settings: SettingsOptions(model: model)
+            case .settings: SettingsButtonOptions(model: model)
             }
         }
     }
@@ -487,14 +487,14 @@ private struct TimerTouchLayer: View {
         MenuOnHoldLayer(press: press) {
             ScheduleBadge.openDrawer(model)
         } options: {
-            TimerOptions(model: model, timerSheetRequested: $timerSheetRequested)
+            TimerBadgeOptions(model: model, timerSheetRequested: $timerSheetRequested)
         }
     }
 }
 
 /// The self timer's delays. The simple interface offers the ones its drawer steps through; the advanced one adds
 /// the rest and the way into the timer sheet.
-private struct TimerOptions: View {
+private struct TimerBadgeOptions: View {
     let model: CameraModel
     @Binding var timerSheetRequested: Bool
 
@@ -745,7 +745,7 @@ private struct SettingsButton: View {
 }
 
 /// The switch between the simple and the advanced interface, without the trip through Settings.
-private struct SettingsOptions: View {
+private struct SettingsButtonOptions: View {
     let model: CameraModel
 
     var body: some View {

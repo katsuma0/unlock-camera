@@ -507,22 +507,22 @@ final class LongExposureSceneTests: XCTestCase {
               let painting = LongExposureScene.lightPainting.recipe else {
             return XCTFail("The Trails scenes have recipes")
         }
-        // Ten minutes of the longest frame the sensor takes.
+        // Half an hour of the longest frame the sensor takes.
         let trails = plan(starTrails, seconds: starTrails.seconds)
-        XCTAssertEqual(trails.frameCount, 600)
+        XCTAssertEqual(trails.frameCount, 1800)
         XCTAssertEqual(trails.frameSeconds, 1)
         XCTAssertEqual(trails.iso, 800)
         // On a camera whose longest frame is shorter, the frames shorten and the time stays.
         let thirds = ExposureRanges(seconds: (1.0 / 8000)...(1.0 / 3), iso: 50...6400, aperture: 2.2...2.2)
         let shorter = LongExposurePlanner.plan(totalSeconds: starTrails.seconds, blend: starTrails.blend, iso: 800,
                                                aperture: 2.2, frameSeconds: starTrails.frameSeconds, ranges: thirds)
-        XCTAssertEqual(shorter.frameCount, 1800)
-        XCTAssertEqual(shorter.estimatedDuration(), 600, accuracy: 1e-6)
+        XCTAssertEqual(shorter.frameCount, 5400)
+        XCTAssertEqual(shorter.estimatedDuration(), 1800, accuracy: 1e-6)
 
-        // Six seconds of video-rate frames, each one the whole thirtieth of a second.
+        // Six seconds of frames an eighth of a second long, back to back.
         let burst = plan(fireworks, seconds: fireworks.seconds)
-        XCTAssertEqual(burst.frameCount, 180)
-        XCTAssertEqual(burst.frameSeconds, 1.0 / 30)
+        XCTAssertEqual(burst.frameCount, 48)
+        XCTAssertEqual(burst.frameSeconds, 1.0 / 8)
         XCTAssertEqual(burst.iso, 50)
         XCTAssertEqual(fireworks.aperture(in: 1.4...4, variable: true), 4)
         XCTAssertNil(fireworks.aperture(in: phone.aperture, variable: phone.hasVariableAperture))

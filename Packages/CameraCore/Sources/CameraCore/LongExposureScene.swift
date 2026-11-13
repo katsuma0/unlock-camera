@@ -157,11 +157,11 @@ public enum LongExposureScene: String, Codable, Sendable, CaseIterable, Identifi
     /// One line under the scene picker: what the scene does and what it needs.
     public var tip: String {
         switch self {
-        case .water: return "Smooths moving water and clouds. Hold still or use a tripod."
+        case .water: return "Smooths moving water. Hold still or use a tripod."
         case .lightTrails: return "Draws car lights into lines. Needs a tripod."
         case .stars: return "Gathers light for a sky full of stars. Tripod, somewhere dark."
         case .northernLights: return "Short enough to keep the shapes in the sky. Needs a tripod."
-        case .starTrails: return "Stars draw arcs across the sky. Tripod, and keep the phone charging."
+        case .starTrails: return "Stars draw arcs across the sky. Tripod and charger. Tap again to stop early."
         case .fireworks: return "Start as the rocket goes up. Needs a tripod."
         // The panel's own line already says how a scene without a set time starts and stops.
         case .lightPainting: return "Draws the path of a light you move in the dark. Needs a tripod."
@@ -174,13 +174,16 @@ public enum LongExposureScene: String, Codable, Sendable, CaseIterable, Identifi
         switch self {
         case .water:
             // Averaging keeps one frame's brightness, so it works at noon. Aligned, because two seconds by hand
-            // is possible and the still parts of the picture should stay sharp.
-            return LongExposureRecipe(blend: .average, durations: [1, 2, 4, 8], seconds: 2, align: true, needsTripod: false)
+            // is possible and the still parts of the picture should stay sharp; for the same reason no frame runs
+            // longer than a hand can hold.
+            return LongExposureRecipe(blend: .average, durations: [1, 2, 4, 8], seconds: 2, maxAutoSeconds: 1.0 / 8.0,
+                                      align: true, needsTripod: false)
         case .lightTrails:
             // Lowest ISO with the frame on auto runs frames as long as the light allows, up to a second, so lights
-            // draw lines without gaps. A little dark, the way a night street should read.
+            // draw lines without gaps. A little dark, the way a night street should read. Brightest-pixel stacking
+            // keeps a shaken first frame as doubled street lights, hence the wait after the tap.
             return LongExposureRecipe(blend: .lighten, durations: [5, 10, 15, 30], seconds: 10, iso: .lowest, biasEV: -0.5,
-                                      maxAutoSeconds: 1)
+                                      maxAutoSeconds: 1, settleSeconds: 2)
         case .stars:
             // Fifteen seconds is about where stars start to streak on the main camera. The meter wants a grey sky,
             // so a stop under; 3200 is where the grain takes over. 4000 K keeps city glow from turning the sky brown.
@@ -192,13 +195,15 @@ public enum LongExposureScene: String, Codable, Sendable, CaseIterable, Identifi
                                       biasEV: -1, focusAtInfinity: true, kelvin: 3800, settleSeconds: 2)
         case .starTrails:
             // Each frame has to hold the stars on its own, hence one second at a fixed ISO. Brightest-pixel stacking
-            // also keeps the brightest noise, so the ISO stays moderate.
-            return LongExposureRecipe(blend: .lighten, durations: [300, 600, 1200, 1800], seconds: 600, frameSeconds: 1,
+            // also keeps the brightest noise, so the ISO stays moderate. Ten minutes only draws dashes on the main
+            // camera; half an hour is where arcs start, and a second tap keeps whatever is there.
+            return LongExposureRecipe(blend: .lighten, durations: [300, 600, 1200, 1800], seconds: 1800, frameSeconds: 1,
                                       iso: .fixed(800), focusAtInfinity: true, kelvin: 4000, settleSeconds: 2)
         case .fireworks:
             // A burst's streaks are exposed by aperture and ISO, not time, so both go as low as the phone allows.
-            // 1/30 s frames sit back to back at 30 frames a second. Daylight balance keeps the colours as fired.
-            return LongExposureRecipe(blend: .lighten, durations: [3, 6, 10, 15], seconds: 6, frameSeconds: 1.0 / 30.0,
+            // The frame length only sets how bright the skyline and the crowd come out: an eighth of a second keeps
+            // them in the picture. Daylight balance keeps the colours as fired.
+            return LongExposureRecipe(blend: .lighten, durations: [3, 6, 10, 15], seconds: 6, frameSeconds: 1.0 / 8.0,
                                       iso: .lowest, focusAtInfinity: true, kelvin: 5200, prefersSmallestAperture: true)
         case .lightPainting:
             return LongExposureRecipe(blend: .lighten, durations: [], seconds: 30, bulb: true, frameSeconds: 1.0 / 15.0,
