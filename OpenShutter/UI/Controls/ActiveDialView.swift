@@ -50,16 +50,18 @@ private struct DialPanel: View {
         VStack(spacing: 6) {
             // A shot in progress locks what would change the picture and never the way out: Done stays live, like
             // the swipe and the escape gesture below.
-            DialHeader(model: model, kind: kind, isLocked: locked)
+            DialHeader(model: model, kind: kind, isLocked: locked, isDimmed: dimmed)
             if kind == .whiteBalance {
                 WhiteBalancePresetRow(model: model)
                     .disabled(locked)
+                    .opacity(dimmed ? 0.45 : 1)
             }
             if scale.values.isEmpty {
                 Text(kind == .aperture ? "This lens has a fixed aperture." : "Not available on this camera.")
                     .font(.footnote)
                     .foregroundStyle(Theme.secondaryText)
                     .frame(height: 56)
+                    .opacity(dimmed ? 0.45 : 1)
             } else {
                 RulerDial(
                     values: scale.values,
@@ -85,14 +87,14 @@ private struct DialPanel: View {
                         .allowsHitTesting(false)
                 }
                 .disabled(locked)
+                .opacity(dimmed ? 0.45 : 1)
             }
         }
-        .opacity(dimmed ? 0.45 : 1)
         .task(id: resyncToken) {
             await resync()
         }
         // Outside the lock: closing the dial changes nothing in the picture.
-        .closesDial(named: DialValues.name(kind, model: model) + " dial") {
+        .closesDial(named: DialValues.name(kind, model: model) + " dial", isScrubbing: isEditing) {
             DialValues.close(model)
         }
     }
@@ -183,6 +185,7 @@ private struct DialHeader: View {
     let model: CameraModel
     let kind: DialKind
     let isLocked: Bool
+    let isDimmed: Bool
 
     var body: some View {
         let readout = DialValues.readout(kind, model: model)
@@ -201,6 +204,7 @@ private struct DialHeader: View {
                 if let refusal { model.showToast(refusal) }
             } : nil,
             isAutoEnabled: !isLocked,
+            isDimmed: isDimmed,
             autoHint: readout.autoHint,
             onDone: {
                 DialValues.close(model)

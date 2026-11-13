@@ -102,7 +102,7 @@ private struct CountdownHint: View {
     var body: some View {
         // A tripod scene's wait counts down like a self timer nobody set, so it says what it is for. The break falls
         // between the sentences rather than wherever the width runs out.
-        Text(model.isSettling ? "Letting the phone settle.\nTap the shutter to cancel." : "Tap the shutter to cancel")
+        Text(model.isSettling ? "Letting the phone settle.\nTap the shutter to cancel." : "Tap the shutter to cancel.")
             .font(.footnote.weight(.semibold))
             .foregroundStyle(Theme.secondaryText)
             .multilineTextAlignment(.center)

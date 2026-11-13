@@ -191,7 +191,7 @@ private struct NightDurationDial: View {
                     .allowsHitTesting(false)
             }
         }
-        .closesDial(named: "Night mode duration dial") {
+        .closesDial(named: "Night mode duration dial", isScrubbing: isEditing) {
             NightDial.close($isOpen)
         }
     }
@@ -482,9 +482,9 @@ private struct NightChipLook: ViewModifier {
 private enum NightText {
     static let handheldHint = "Hold still until it finishes."
     /// Stability stays on automatic here, which never assumes a tripod, so however still the phone is the
-    /// automatic duration stops at the steady limit. The longer times are on the moon's dial, up to the end of the
-    /// planner's range.
-    static let steadyHint = "Steady. Tap the moon to set up to \(Int(NightModePlanner.secondsRange.upperBound)) s."
+    /// automatic duration stops at the steady limit. The longer times are on the duration button's dial, up to the
+    /// end of the planner's range. Named by what it shows: the shutter wears a moon too.
+    static let steadyHint = "Steady. Tap the duration for up to \(Int(NightModePlanner.secondsRange.upperBound)) s."
 
     /// "Auto · 3s" or "10s".
     static func duration(_ seconds: Double, isAuto: Bool) -> String {

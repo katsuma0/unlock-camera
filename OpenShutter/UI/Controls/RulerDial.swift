@@ -579,6 +579,8 @@ struct DialValueHeader: View {
     /// False while a shot runs and a change would end up in the picture. Only AUTO locks: Done beside it changes
     /// nothing in the picture, so the way out stays open.
     var isAutoEnabled: Bool = true
+    /// Dims AUTO and the value with the rest of a locked dial. Done keeps full strength, so it doesn't look locked.
+    var isDimmed: Bool = false
     /// What VoiceOver says AUTO does while it is off. nil for the usual return to automatic.
     var autoHint: String? = nil
     var onDone: (() -> Void)? = nil
@@ -593,8 +595,10 @@ struct DialValueHeader: View {
         HStack(spacing: 0) {
             autoButton
                 .frame(width: Self.sideWidth, alignment: .leading)
+                .opacity(isDimmed ? 0.45 : 1)
             Spacer(minLength: 4)
             readout
+                .opacity(isDimmed ? 0.45 : 1)
             Spacer(minLength: 4)
             doneButton
                 .frame(width: Self.sideWidth, alignment: .trailing)
@@ -728,14 +732,18 @@ private struct StackBadge: View {
 
 extension View {
     /// The ways out of a dial panel besides its Done button: a swipe down on the panel, and VoiceOver's escape
-    /// gesture (a two-finger scrub). `name` is what VoiceOver calls the panel.
-    func closesDial(named name: String, perform close: @escaping () -> Void) -> some View {
-        modifier(DialDismissal(name: name, close: close))
+    /// gesture (a two-finger scrub). `name` is what VoiceOver calls the panel. `isScrubbing` is the panel's own
+    /// editing state, true from the moment its ruler takes a touch.
+    func closesDial(named name: String, isScrubbing: Bool, perform close: @escaping () -> Void) -> some View {
+        modifier(DialDismissal(name: name, isScrubbing: isScrubbing, close: close))
     }
 }
 
 private struct DialDismissal: ViewModifier {
     let name: String
+    /// The ruler takes a touch from 2 pt and this swipe reports from 10 pt, so a scrub can start before the swipe
+    /// sees any of it. The panel tells it instead.
+    let isScrubbing: Bool
     let close: () -> Void
 
     @GestureState private var isTouching = false
@@ -774,11 +782,11 @@ private struct DialDismissal: ViewModifier {
                     // a scrub.
                     swipesDown = down > across
                 }
-                // The ruler starts scrubbing the first time the same translation is at least as sideways as it is
-                // down. From then on the touch is the ruler's for good, so a swipe never both moves the value and
-                // closes the dial.
-                if across >= down { swipesDown = false }
-                guard swipesDown == true, down >= Self.closeDistance else { return }
+                // The ruler starts scrubbing the first time a translation is at least as sideways as it is down,
+                // which can happen before this gesture reports anything. From then on the touch is the ruler's, so
+                // a swipe never both moves the value and closes the dial.
+                if across >= down || isScrubbing { swipesDown = false }
+                guard swipesDown == true, !isScrubbing, down >= Self.closeDistance else { return }
                 // Once per touch: the panel stays under the finger while it animates away.
                 swipesDown = false
                 close()

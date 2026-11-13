@@ -700,8 +700,10 @@ private struct ExposureChip: View {
                     ExposureChipTouchLayer(model: model, press: press)
                 }
                 // Locked along with the strip and the dial it opens, menu included: a bracket takes each frame at the
-                // current exposure. Not dimmed, because every single photo passes through .capturing as well.
+                // current exposure. Not dimmed while capturing, because every single photo passes through it. Saving
+                // follows only stacks and recordings, long enough to show the chip is resting.
                 .disabled(locked)
+                .opacity(model.activity == .saving ? 0.45 : 1)
                 .transition(.opacity.combined(with: .scale(scale: 0.8)))
             }
         }
