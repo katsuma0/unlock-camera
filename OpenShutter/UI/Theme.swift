@@ -30,6 +30,15 @@ enum Theme {
     static let smallControlSize: CGFloat = 30
 }
 
+extension Image {
+    /// The first of `names` this iOS has as a system symbol. A symbol newer than the phone's iOS draws nothing, so
+    /// newer names come with older ones to fall back on.
+    init(firstAvailableSystemName names: [String]) {
+        let name = names.first(where: { UIImage(systemName: $0) != nil }) ?? names.last ?? "circle"
+        self.init(systemName: name)
+    }
+}
+
 extension View {
     /// Liquid Glass on iOS 26 and later, a material blur before that. Both read as the same control.
     @ViewBuilder
