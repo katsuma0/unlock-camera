@@ -29,6 +29,8 @@ final class CameraModel {
     private(set) var activity: CaptureActivity = .idle {
         didSet { if oldValue != activity { updateIdleTimer() } }
     }
+    /// The countdown running is only the wait a tripod scene takes after the tap, not a self timer.
+    private(set) var isSettling = false
     /// Photos from their request until they are saved. The session can't change lens or mode under them.
     private(set) var photosInFlight = 0
     /// Counts camera swaps started by select(): lens buttons, double tap, Camera Control Lens picks, flips, queued and
@@ -116,8 +118,9 @@ final class CameraModel {
     @ObservationIgnored private var pendingZoom: (value: Double, animated: Bool)?
     /// The newest lens chosen while a lens switch was reconfiguring the session or photos were still being saved.
     @ObservationIgnored private var pendingPreset: LensPreset?
-    /// A long press focused once and is holding that distance (the AF half of AE/AF LOCK).
-    @ObservationIgnored private var focusHeld = false
+    /// A long press focused once and is holding that distance (the AF half of AE/AF LOCK). Observed, because the
+    /// viewfinder shows a hold of the focus alone as well as one with the exposure.
+    private var focusHeld = false
     /// Counts photo captures, so a photo that finishes late can tell a newer one owns the shutter state.
     @ObservationIgnored private var photoGeneration = 0
     /// The newest photo frees the shutter as soon as it is exposed (cameraBackendWillCapture).
@@ -736,6 +739,10 @@ final class CameraModel {
             self.focusPoint = nil
         }
     }
+
+    /// A long press holds the focus distance it found, with the exposure (aeLocked) or, where the exposure has
+    /// nothing auto to hold, alone.
+    var focusLocked: Bool { focusHeld }
 
     /// The simple interface says it without the abbreviations.
     private func showLockToast(focus: Bool, exposure: Bool) {
@@ -1547,9 +1554,7 @@ final class CameraModel {
                 let locks = ExposureLocks(seconds: long.seconds, iso: iso, aperture: longAperture)
                 return ExposureRequest(locks: locks, bias: requestedBias, aeLocked: false, maxAutoSeconds: longMaxAuto)
             case .average, .lighten:
-                let range = capabilities.exposure.seconds
-                let frame = long.frameSeconds.map { min(max($0, range.lowerBound), range.upperBound) }
-                let locks = ExposureLocks(seconds: frame, iso: manual.iso ?? sceneISO, aperture: longAperture)
+                let locks = ExposureLocks(seconds: longFrameSeconds, iso: manual.iso ?? sceneISO, aperture: longAperture)
                 return ExposureRequest(locks: locks, bias: requestedBias, aeLocked: aeLocked && locks.isAllAuto,
                                        maxAutoSeconds: longMaxAuto)
             }
@@ -1590,6 +1595,19 @@ final class CameraModel {
     private var sceneAperture: Double? {
         guard capabilities.supportsVariableAperture else { return nil }
         return sceneRecipe?.aperture(in: capabilities.exposure.aperture, variable: true)
+    }
+
+    /// The frame of each Blur or Trails exposure in LONG, inside what this lens takes: the person's or the scene's.
+    /// A scene whose frame was chosen for a wider aperture than the one its iris closes to gets it lengthened by
+    /// the light the iris takes away (fireworks keep their skyline). nil leaves the frame to auto exposure. Worked
+    /// out here rather than stored, so the scene's own frame stays in the settings and the scene stays a scene.
+    var longFrameSeconds: Double? {
+        var frame = settings.longExposure.frameSeconds
+        if let recipe = sceneRecipe, settings.manual.aperture == nil, let aperture = sceneAperture {
+            frame = recipe.frameSeconds(at: aperture) ?? frame
+        }
+        let range = capabilities.exposure.seconds
+        return frame.map { min(max($0, range.lowerBound), range.upperBound) }
     }
 
     /// The aperture a stack is planned for: the locked one on a lens with an iris, else the one the lens has now.
@@ -1948,7 +1966,7 @@ final class CameraModel {
             // The planner clamps a chosen frame to this lens's range, as the request does.
             let iso = settings.manual.iso ?? sceneISOLock ?? readings.iso
             return LongExposurePlanner.plan(totalSeconds: long.seconds, blend: long.blend, iso: iso, aperture: aperture,
-                                            frameSeconds: long.frameSeconds ?? readings.exposureSeconds, ranges: caps,
+                                            frameSeconds: longFrameSeconds ?? readings.exposureSeconds, ranges: caps,
                                             align: long.align)
         }
     }

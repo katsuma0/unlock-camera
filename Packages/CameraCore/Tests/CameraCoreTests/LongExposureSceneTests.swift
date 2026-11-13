@@ -8,9 +8,9 @@ final class LongExposureSceneTests: XCTestCase {
     private let totalRange = 0.25...1800.0
 
     private func recipe(iso: SceneISO = .auto, durations: [Double] = [1, 2, 4, 8], seconds: Double = 2,
-                        maxAutoSeconds: Double? = nil, prefersSmallestAperture: Bool = false) -> LongExposureRecipe {
+                        maxAutoSeconds: Double? = nil, apertureChoice: SceneAperture = .auto) -> LongExposureRecipe {
         LongExposureRecipe(blend: .average, durations: durations, seconds: seconds, iso: iso,
-                           maxAutoSeconds: maxAutoSeconds, prefersSmallestAperture: prefersSmallestAperture)
+                           maxAutoSeconds: maxAutoSeconds, apertureChoice: apertureChoice)
     }
 
     /// Every preset with its recipe; a preset without one fails the test.
@@ -103,15 +103,13 @@ final class LongExposureSceneTests: XCTestCase {
     }
 
     func testTipsNameTheTripodWhereverOneIsNeeded() {
-        for (scene, recipe) in presetRecipes() where recipe.needsTripod {
+        // Water is the one scene that works in the hand, which is why it lines its frames up. On a tripod aligning
+        // could only follow the stars or the lights, so every other scene leaves it off and says it needs one.
+        let aligned = presetRecipes().filter(\.recipe.align)
+        XCTAssertEqual(aligned.map(\.scene), [.water])
+        for (scene, recipe) in presetRecipes() where !recipe.align {
             XCTAssertTrue(scene.tip.lowercased().contains("tripod"), scene.tip)
-            // Aligning is for a phone that moves; on a tripod it could only follow the stars or the lights.
-            XCTAssertFalse(recipe.align, scene.rawValue)
         }
-        // Water is the one scene that works in the hand, which is why it lines its frames up.
-        let handheld = presetRecipes().filter { !$0.recipe.needsTripod }
-        XCTAssertEqual(handheld.map(\.scene), [.water])
-        XCTAssertEqual(handheld.map(\.recipe.align), [true])
     }
 
     func testTipsLeaveStartingAndStoppingToThePanel() {
@@ -156,10 +154,10 @@ final class LongExposureSceneTests: XCTestCase {
         XCTAssertNil(plain.maxAutoSeconds)
         XCTAssertFalse(plain.focusAtInfinity)
         XCTAssertNil(plain.kelvin)
-        XCTAssertFalse(plain.prefersSmallestAperture)
+        XCTAssertEqual(plain.apertureChoice, .auto)
+        XCTAssertNil(plain.frameAperture)
         XCTAssertFalse(plain.align)
         XCTAssertEqual(plain.settleSeconds, 0)
-        XCTAssertTrue(plain.needsTripod)
     }
 
     func testEveryRecipeOffersItsOwnTime() {
@@ -318,14 +316,53 @@ final class LongExposureSceneTests: XCTestCase {
 
     // MARK: - Aperture and the auto exposure limit
 
-    func testApertureStopsDownOnlyOnALensWithAnIris() {
-        let stopped = recipe(prefersSmallestAperture: true)
+    func testApertureIsSetOnlyOnALensWithAnIris() {
+        let stopped = recipe(apertureChoice: .smallest)
         XCTAssertEqual(stopped.aperture(in: 1.4...16, variable: true), 16)
         XCTAssertNil(stopped.aperture(in: 1.4...16, variable: false))
         XCTAssertNil(stopped.aperture(in: 1.78...1.78, variable: false))
         XCTAssertEqual(stopped.aperture(in: 1.78...1.78, variable: true), 1.78)
+        let open = recipe(apertureChoice: .widest)
+        XCTAssertEqual(open.aperture(in: 1.48...4, variable: true), 1.48)
+        XCTAssertNil(open.aperture(in: 1.48...4, variable: false))
         XCTAssertNil(recipe().aperture(in: 1.4...16, variable: true))
         XCTAssertNil(recipe().aperture(in: 1.4...16, variable: false))
+    }
+
+    func testSkyScenesOpenTheIrisAndMovingLightsCloseIt() {
+        let iris = 1.48...4.0
+        for scene in [LongExposureScene.stars, .northernLights, .starTrails] {
+            XCTAssertEqual(scene.recipe?.aperture(in: iris, variable: true), 1.48, scene.rawValue)
+        }
+        for scene in [LongExposureScene.fireworks, .lightTrails, .lightPainting] {
+            XCTAssertEqual(scene.recipe?.aperture(in: iris, variable: true), 4, scene.rawValue)
+        }
+        XCTAssertNil(LongExposureScene.water.recipe?.aperture(in: iris, variable: true))
+        for (scene, recipe) in presetRecipes() {
+            XCTAssertNil(recipe.aperture(in: phone.aperture, variable: phone.hasVariableAperture), scene.rawValue)
+        }
+    }
+
+    func testFrameGrowsWithTheLightAStoppedDownIrisTakesAway() {
+        guard let fireworks = LongExposureScene.fireworks.recipe else { return XCTFail("Fireworks has a recipe") }
+        // An eighth of a second at f/1.78 lets in what about 0.63 s does at f/4.
+        let stopped = try? XCTUnwrap(fireworks.frameSeconds(at: 4))
+        XCTAssertEqual(stopped ?? 0, 0.125 * (4 / 1.78) * (4 / 1.78), accuracy: 1e-9)
+        XCTAssertEqual(stopped ?? 0, 0.63, accuracy: 0.01)
+        XCTAssertEqual(fireworks.frameSeconds(at: 1.78), 0.125)
+        XCTAssertLessThan(fireworks.frameSeconds(at: 1.48) ?? 1, 0.125)
+        // Without a usable aperture the frame is the recipe's.
+        for aperture in [nil, 0, -2, .nan, .infinity] as [Double?] {
+            XCTAssertEqual(fireworks.frameSeconds(at: aperture), 0.125, "\(String(describing: aperture))")
+        }
+        // A frame chosen for no aperture in particular stays as it is, and a scene with auto frames has none.
+        XCTAssertEqual(LongExposureScene.lightPainting.recipe?.frameSeconds(at: 4), 1.0 / 15)
+        XCTAssertEqual(LongExposureScene.starTrails.recipe?.frameSeconds(at: 1.48), 1)
+        XCTAssertNil(LongExposureScene.stars.recipe?.frameSeconds(at: 1.48) ?? nil)
+        XCTAssertNil(recipe().frameSeconds(at: 4))
+        for (scene, recipe) in presetRecipes() where recipe.frameAperture != nil {
+            XCTAssertNotNil(recipe.frameSeconds, scene.rawValue)
+        }
     }
 
     func testMaxAutoSecondsStaysInsideTheSensorsRange() {
