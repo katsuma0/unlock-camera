@@ -71,6 +71,8 @@ final class SimulatedCamera: CameraBackend {
     private var meterSpot: (point: CGPoint?, rect: CGRect?) = (nil, nil)
     private var zoomFactor = 1.0
     private var zoomTarget = 1.0
+    /// The rate of the ramp in progress, in doublings per second.
+    private var zoomRampRate = SimulatedSpec.zoomRampRate
     private var zoomRamps = false
     private var lensPosition = 0.5
     private var lensVelocity = 0.0
@@ -217,11 +219,14 @@ final class SimulatedCamera: CameraBackend {
         publishCapabilities()
     }
 
-    func setZoomFactor(_ factor: Double, animated: Bool) {
+    func setZoomFactor(_ factor: Double, rampRate: Double?) {
         guard factor.isFinite else { return }
         zoomTarget = SimulatedSpec.clampedZoom(factor)
-        zoomRamps = animated
-        if !animated {
+        if let rampRate, rampRate.isFinite, rampRate > 0 {
+            zoomRampRate = rampRate
+            zoomRamps = true
+        } else {
+            zoomRamps = false
             zoomFactor = zoomTarget
         }
     }
@@ -843,7 +848,7 @@ final class SimulatedCamera: CameraBackend {
             return
         }
         // Same units as AVCaptureDevice.ramp(toVideoZoomFactor:withRate:): doublings per second.
-        let step = pow(2, SimulatedSpec.zoomRampRate * elapsed)
+        let step = pow(2, zoomRampRate * elapsed)
         zoomFactor = zoomTarget > zoomFactor ? min(zoomTarget, zoomFactor * step) : max(zoomTarget, zoomFactor / step)
     }
 

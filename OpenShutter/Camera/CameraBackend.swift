@@ -37,7 +37,9 @@ protocol CameraBackend: AnyObject {
     /// exposure, focus, white balance and device options requests.
     func select(_ preset: LensPreset) async
     /// Device zoom factor on the active lens, clamped to capabilities.zoomRange.
-    func setZoomFactor(_ factor: Double, animated: Bool)
+    /// Zooms the active lens. A positive `rampRate` (doublings per second, as AVCaptureDevice ramps) glides there;
+    /// nil sets the factor at once.
+    func setZoomFactor(_ factor: Double, rampRate: Double?)
 
     func apply(exposure: ExposureRequest)
     func apply(focus: FocusRequest)

@@ -155,12 +155,56 @@ final class CameraModel {
         case floor, ceiling
     }
 
+    // MARK: - API added for the next feature set (stubs the model builder fills in)
+
+    /// A lens button's zoom that is still gliding to its value; nil when no transition runs.
+    private(set) var zoomTarget: Double?
+    /// A lens button is swapping cameras now, so the screen veils the picture for the swap.
+    private(set) var isSwitchingLensVisibly = false
+    /// How far the phone turned since a NIGHT or LONG shot began, for the crosshairs.
+    let drift = DriftState()
+    /// The battery saver's dimming.
+    let dimmer = ScreenDimmer()
+    /// Every photo and video taken with the app, for the gallery.
+    let library: CaptureLibrary
+
+    /// Display zoom the pinch, the zoom wheel and the zoom dial offer.
+    var zoomSpan: ClosedRange<Double> {
+        let lensZooms = lenses.filter { !$0.isFront && $0.kind != .external }.map(\.relativeZoom).filter { $0 > 0 }
+        let low = lensZooms.min() ?? 1
+        let high = max((lensZooms.max() ?? 1) * 5, low)
+        return low...high
+    }
+
+    /// Values the zoom wheel and the dial mark: the lens buttons' values.
+    var zoomMarks: [Double] {
+        backLensPresets.map(\.displayZoom)
+    }
+
+    /// The display zoom asked for last, which a gesture starts from.
+    var requestedZoom: Double {
+        readings.displayZoom
+    }
+
+    /// Steps the zoom along the wheel's ticks; VoiceOver and the hardware buttons use it.
+    func nudgeZoom(by steps: Int) {}
+
+    /// Wakes the screen the battery saver darkened.
+    func wakeScreen() {}
+
+    /// Moves the brightness by `stops` (a third of a stop per press of a hardware button).
+    func stepBias(by stops: Double) {}
+
+    /// The next back lens button, wrapping around.
+    func selectNextLens() {}
+
     // Default arguments run outside the main actor, so the main-actor helpers are built in the body.
     init(backend: CameraBackend, store: SettingsStore = SettingsStore(), motionMonitor: MotionMonitor? = nil, locationProvider: LocationProvider? = nil) {
         self.backend = backend
         self.store = store
         self.motionMonitor = motionMonitor ?? MotionMonitor()
         self.locationProvider = locationProvider ?? LocationProvider()
+        self.library = CaptureLibrary()
         let loaded = store.load()
         if loaded.interface.advanced || !loaded.interface.welcomed {
             // Until the first-launch question is answered nothing is simplified, so settings from a version before
@@ -463,7 +507,7 @@ final class CameraModel {
         scheduleSave()
         if haptic { Haptics.tap() }
         if current == preset.lensID {
-            backend.setZoomFactor(preset.zoomFactor, animated: true)
+            backend.setZoomFactor(preset.zoomFactor, rampRate: Double(CameraService.zoomRampRate))
             return
         }
         // The locked point and exposure belong to the lens being left.
@@ -481,7 +525,7 @@ final class CameraModel {
 
     /// Pinch and zoom dial. Display zoom is relative to the back wide camera; switches lenses when
     /// settings.controls.autoLensSwitching is on and the zoom crosses another lens.
-    func setDisplayZoom(_ zoom: Double, animated: Bool) {
+    func setDisplayZoom(_ zoom: Double, animated: Bool, continuing: Bool = false) {
         guard zoom.isFinite, zoom > 0 else { return }
         lastZoomCommand = Date()
         // A pinch or a flicked dial keeps going while the session switches lenses; dropping those values would
@@ -528,7 +572,7 @@ final class CameraModel {
                 refreshLenses()
                 let clamped = clampZoomFactor(factor)
                 settings.zoom = clamped
-                backend.setZoomFactor(clamped, animated: false)
+                backend.setZoomFactor(clamped, rampRate: nil)
                 updateActivePreset()
                 scheduleSave()
                 applyPendingLensChange()
@@ -538,7 +582,7 @@ final class CameraModel {
 
         let clamped = clampZoomFactor(factor)
         settings.zoom = clamped
-        backend.setZoomFactor(clamped, animated: animated)
+        backend.setZoomFactor(clamped, rampRate: animated ? Double(CameraService.zoomRampRate) : nil)
         updateActivePreset(factor: clamped)
         scheduleSave()
     }
@@ -1884,7 +1928,7 @@ final class CameraModel {
             try? await Task.sleep(nanoseconds: 600_000_000)
             guard !Task.isCancelled, let self, !self.lensSwitchInFlight, !self.activity.isBusy else { return }
             self.lastZoomCommand = Date()
-            self.backend.setZoomFactor(self.settings.zoom, animated: false)
+            self.backend.setZoomFactor(self.settings.zoom, rampRate: nil)
             self.scheduleApply(.exposure)
         }
     }

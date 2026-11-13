@@ -282,10 +282,10 @@ final class CameraService: NSObject, CameraBackend, @unchecked Sendable {
         }
     }
 
-    @MainActor func setZoomFactor(_ factor: Double, animated: Bool) {
+    @MainActor func setZoomFactor(_ factor: Double, rampRate: Double?) {
         sessionQueue.async {
             self.zoomTarget = factor
-            self.applyZoom(animated: animated)
+            self.applyZoom(rate: rampRate.map { Float($0) })
         }
     }
 
@@ -587,7 +587,7 @@ extension CameraService {
         session.commitConfiguration()
         activeCamera = camera
         observeDevice(camera.device)
-        applyZoom(animated: false)
+        applyZoom(rate: nil)
         return true
     }
 
@@ -709,7 +709,7 @@ extension CameraService {
         }
         if camera.lens.id == activeCamera?.lens.id {
             zoomTarget = preset.zoomFactor
-            applyZoom(animated: true)
+            applyZoom(rate: Self.zoomRampRate)
         } else if stackJob == nil, !recorder.isRecording {
             switchCamera(to: camera, zoomFactor: preset.zoomFactor)
         }
@@ -781,7 +781,7 @@ extension CameraService {
         applyFocus()
         applyWhiteBalance()
         applyTorch()
-        applyZoom(animated: false)
+        applyZoom(rate: nil)
         installedControls = nil
         installCameraControls()
         refreshCapabilities()
@@ -1577,7 +1577,7 @@ extension CameraService {
         // A zoom asked for during the stack goes on now. Otherwise the zoom stays where it is, which may be where
         // the Camera Control's system zoom slider put it.
         if zoomTarget != appliedZoomTarget {
-            applyZoom(animated: false)
+            applyZoom(rate: nil)
         }
     }
 

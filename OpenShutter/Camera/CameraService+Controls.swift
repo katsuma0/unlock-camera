@@ -211,7 +211,8 @@ extension CameraService {
 
     // MARK: Zoom
 
-    nonisolated func applyZoom(animated: Bool) {
+    /// `rate` in doublings per second glides to the target; nil or a rate that isn't positive sets it at once.
+    nonisolated func applyZoom(rate: Float?) {
         // Zoom belongs to the stack while it runs; the target is applied when it ends.
         guard let device = activeCamera?.device, !stackInProgress else { return }
         // Values outside this range raise; it is also the capabilities' zoom range, so the dial and the device agree.
@@ -220,8 +221,8 @@ extension CameraService {
         let factor = CGFloat(depthSafeZoom(wanted, device: device, within: range))
         guard Self.lockForChanges(device) else { return }
         defer { device.unlockForConfiguration() }
-        if animated {
-            device.ramp(toVideoZoomFactor: factor, withRate: Self.zoomRampRate)
+        if let rate, rate.isFinite, rate > 0 {
+            device.ramp(toVideoZoomFactor: factor, withRate: rate)
         } else if device.isRampingVideoZoom || abs(device.videoZoomFactor - factor) > 0.0001 {
             device.videoZoomFactor = factor
         }
