@@ -1452,6 +1452,9 @@ final class CameraModel {
             releaseLock()
             // A format past the hardware budget runs without the analysis output, and its last frame would stay up.
             analysis = nil
+            // The rebuilt session puts the old exposure back first, so its readings say nothing about these
+            // settings until applyAll sends them.
+            lastBiasCommand = .distantFuture
             Task {
                 await backend.configureForVideo(video)
                 // A frame the old format sent during the reconfiguration would otherwise stay up.
@@ -1526,7 +1529,9 @@ final class CameraModel {
 
     private func flushApply() {
         let kinds = pendingApply
-        if kinds.contains(.exposure) { lastBiasCommand = Date() }
+        // A start or a mode switch keeps its far-future mark until applyAll: a request sent now queues behind the
+        // session's rebuild, which first puts back the old mode's exposure, so readings until then still carry it.
+        if kinds.contains(.exposure), lastBiasCommand != .distantFuture { lastBiasCommand = Date() }
         pendingApply.removeAll()
         applyTask = nil
         if kinds.contains(.exposure) { backend.apply(exposure: currentExposureRequest()) }
