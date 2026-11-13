@@ -53,6 +53,17 @@ struct ManualControlStrip: View {
         .opacity(dimmed ? 0.45 : 1)
         .animation(Theme.spring, value: kinds)
         .animation(Theme.snappy, value: dimmed)
+        // VoiceOver stays on the chip that opened a dial, so its escape gesture has to work from here as well as
+        // from the dial.
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(Text("Manual controls"))
+        .accessibilityAction(.escape) {
+            guard model.activeDial != nil else { return }
+            Haptics.tick()
+            withAnimation(Theme.spring) {
+                model.activeDial = nil
+            }
+        }
     }
 }
 
@@ -62,15 +73,15 @@ private struct ParameterChip: View {
     let model: CameraModel
     let kind: DialKind
     let isSelected: Bool
-    @State private var isPressed = false
+    @State private var press = PressTracker()
 
     var body: some View {
         let content = ChipReader.content(kind, model: model)
-        ChipFace(content: content, isSelected: isSelected, isPressed: isPressed)
+        ChipFace(content: content, isSelected: isSelected, isPressed: press.isPressed)
             .frame(minHeight: 44)
             .contentShape(Rectangle())
             .overlay {
-                ChipTouchLayer(model: model, kind: kind, isPressed: $isPressed)
+                ChipTouchLayer(model: model, kind: kind, press: press)
             }
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(Text(kind.title))
@@ -90,15 +101,15 @@ private struct ParameterChip: View {
     }
 }
 
-/// A chip's tap and its touch and hold menu. Its own view with inputs that never change, so the face's redraws
-/// with every live reading leave the menu button alone.
+/// A chip's tap and its touch and hold menu, laid over the chip. Its own view with inputs that never change, so
+/// the face's redraws with every live reading leave the system's menu button alone.
 private struct ChipTouchLayer: View {
     let model: CameraModel
     let kind: DialKind
-    @Binding var isPressed: Bool
+    let press: PressTracker
 
     var body: some View {
-        HoldMenuLayer(isPressed: $isPressed) {
+        MenuOnHoldLayer(press: press) {
             ChipReader.toggleDial(kind, model: model)
         } options: {
             ChipMenu(model: model, kind: kind)
@@ -107,7 +118,9 @@ private struct ChipTouchLayer: View {
 }
 
 /// What a chip offers on touch and hold: the way back to auto first, where the control has one, then the values
-/// people reach for most. Its own view, so the rows are worked out for the menu and not with every reading.
+/// people reach for most. Where LONG's scene supplies the value, the first row is named for the scene, because that
+/// is where giving the value back leads. Its own view, so the rows are worked out for the menu and not with every
+/// reading.
 private struct ChipMenu: View {
     let model: CameraModel
     let kind: DialKind
@@ -164,7 +177,7 @@ private struct ChipMenu: View {
         let inRange = ChipPresets.isos.filter { $0 > lowest * 1.03 && $0 <= range.upperBound * 1.02 }
         return Section(kind.title) {
             HoldMenuChoice(ControlHolder.autoTitle(for: kind, model: model), isOn: holder != .person) {
-                model.setISO(nil)
+                if holder == .person { model.setISO(nil) }
             }
             HoldMenuChoice("Lowest (\(ISOScale.compactLabel(lowest)))", isOn: ChipPresets.isSame(fixed, lowest)) {
                 model.setISO(lowest)
@@ -186,7 +199,7 @@ private struct ChipMenu: View {
         let stops = ApertureScale.scale(min: range.lowerBound, max: range.upperBound, recommended: caps.apertureStops, step: .full)
         return Section(kind.title) {
             HoldMenuChoice(ControlHolder.autoTitle(for: kind, model: model), isOn: holder != .person) {
-                model.setAperture(nil)
+                if holder == .person { model.setAperture(nil) }
             }
             ForEach(stops, id: \.self) { value in
                 HoldMenuChoice(ApertureScale.label(value), isOn: ChipPresets.isSame(fixed, value)) {
@@ -216,7 +229,7 @@ private struct ChipMenu: View {
         let chosen: WhiteBalanceSetting = holder == .person ? model.effectiveWhiteBalance : .auto
         Section(kind.title) {
             HoldMenuChoice(ControlHolder.autoTitle(for: kind, model: model), isOn: holder != .person) {
-                model.setWhiteBalance(.auto)
+                if holder == .person { model.setWhiteBalance(.auto) }
             }
             ForEach(ChipPresets.whiteBalance) { preset in
                 HoldMenuChoice(preset.title, icon: Image(systemName: preset.symbolName),
@@ -247,7 +260,7 @@ private struct ChipMenu: View {
         let position = holder == .person ? model.effectiveFocus.lensPosition : nil
         return Section(kind.title) {
             HoldMenuChoice(ControlHolder.autoTitle(for: kind, model: model, auto: "Autofocus"), isOn: holder != .person) {
-                model.setManualFocus(nil)
+                if holder == .person { model.setManualFocus(nil) }
             }
             HoldMenuChoice("Nearest", icon: Image(systemName: "camera.macro"), isOn: position.map { $0 <= 0.005 } ?? false) {
                 model.setManualFocus(0)
@@ -264,7 +277,7 @@ private enum ChipPresets {
     static let shutters: [Double] = [1.0 / 1000, 1.0 / 250, 1.0 / 60, 1.0 / 15, 1.0 / 4, 1, 4, 30]
     static let longDurations: [Double] = [1, 4, 15, 30, 60, 300]
     static let isos: [Double] = [100, 400, 800, 1600, 3200]
-    /// Zero first: it is what touch and hold used to do.
+    /// Zero first, where the other menus have Auto: it gives the value back.
     static let biases: [Double] = [0, -2, -1, 1, 2]
     /// The dial's own preset row without Auto, which leads the menu. Candle sits below the 2000 K the camera can
     /// lock to.
@@ -470,9 +483,7 @@ private enum ChipReader {
             return !model.isManualExposure
         case .long:
             let long = model.settings.longExposure
-            // An ISO or aperture the scene fixes takes the lock away the same as one set by hand.
-            return long.blend != .additive && long.frameSeconds == nil
-                && ControlHolder.of(.iso, model: model) == .camera && ControlHolder.of(.aperture, model: model) == .camera
+            return long.blend != .additive && long.frameSeconds == nil && model.isISOAuto && model.isApertureAuto
         }
     }
 

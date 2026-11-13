@@ -570,9 +570,14 @@ struct DialValueHeader: View {
     let title: String
     let value: String
     var isAuto: Bool = false
+    /// False for a value that holds still without the person having set it, such as one LONG's scene fixes. It
+    /// shows in white like an auto value, without the A that auto gets.
+    var isSetByPerson: Bool = true
     /// The value is built from several frames, which the STACK badge beside it says.
     var isStacked: Bool = false
     var onAuto: (() -> Void)? = nil
+    /// What VoiceOver says AUTO does while it is off. nil for the usual return to automatic.
+    var autoHint: String? = nil
     var onDone: (() -> Void)? = nil
     /// What VoiceOver says Done does. The shared dial sits where the mode carousel was; a dial inside a panel
     /// leaves the carousel in view and passes its own words.
@@ -594,6 +599,7 @@ struct DialValueHeader: View {
         .padding(.horizontal, 12)
         .frame(height: 44)
         .animation(Theme.snappy, value: isAuto)
+        .animation(Theme.snappy, value: isSetByPerson)
         .animation(Theme.snappy, value: isStacked)
     }
 
@@ -610,7 +616,7 @@ struct DialValueHeader: View {
                 // would never stop rolling long enough to read. Switching to or from auto still rolls them.
                 Text(value)
                     .font(Theme.bigValueFont)
-                    .foregroundStyle(isAuto ? Theme.primaryText : Theme.accent)
+                    .foregroundStyle(isAuto || !isSetByPerson ? Theme.primaryText : Theme.accent)
                     .contentTransition(.numericText())
                 if isAuto {
                     Text("A")
@@ -663,7 +669,7 @@ struct DialValueHeader: View {
             .buttonStyle(.plain)
             .accessibilityLabel(Text("Auto"))
             .accessibilityValue(Text(isAuto ? "On" : "Off"))
-            .accessibilityHint(Text(isAuto ? "" : "Returns \(title.lowercased()) to automatic."))
+            .accessibilityHint(Text(isAuto ? "" : autoHint ?? "Returns \(title.lowercased()) to automatic."))
         } else {
             sidePlaceholder
         }
@@ -757,12 +763,14 @@ private struct DialDismissal: ViewModifier {
             }
             .onChanged { value in
                 let down = value.translation.height
+                let across = abs(value.translation.width)
                 if swipesDown == nil {
                     // Decided once per touch, by the way it set off. A scrub that wanders downward later stays
                     // a scrub.
-                    swipesDown = down > abs(value.translation.width)
+                    swipesDown = down > across
                 }
-                guard swipesDown == true, down >= Self.closeDistance else { return }
+                // Still mostly downward at the end: a swipe that turned into a scrub on the way is left to the ruler.
+                guard swipesDown == true, down >= Self.closeDistance, down > across else { return }
                 // Once per touch: the panel stays under the finger while it animates away.
                 swipesDown = false
                 close()

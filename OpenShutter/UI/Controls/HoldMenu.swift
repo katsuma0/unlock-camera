@@ -1,47 +1,8 @@
 import SwiftUI
 import CameraCore
 
-/// Touch and hold for a control whose tap does something else: a tap runs `action`, a hold lists the choices.
-///
-/// Laid over the control as a clear button, with the face an ordinary view underneath. A face that redraws many
-/// times a second (a chip showing a live reading) then never rebuilds the system's menu button, and VoiceOver
-/// reads the face, with its own label, value and actions, instead of this layer.
-struct HoldMenuLayer<Options: View>: View {
-    /// True while a finger is down on the layer, for the face's press feedback.
-    @Binding var isPressed: Bool
-    let action: () -> Void
-    @ViewBuilder let options: () -> Options
-
-    var body: some View {
-        Menu {
-            options()
-        } label: {
-            Color.clear
-                .contentShape(Rectangle())
-        } primaryAction: {
-            action()
-        }
-        .menuStyle(.button)
-        .buttonStyle(HoldMenuPressStyle(isPressed: $isPressed))
-        .menuIndicator(.hidden)
-        // Values run top to bottom the way their dial runs left to right, whichever way the menu opens.
-        .menuOrder(.fixed)
-        .accessibilityHidden(true)
-    }
-}
-
-/// Draws nothing of its own; it only tells the face underneath when to look pressed.
-private struct HoldMenuPressStyle: ButtonStyle {
-    @Binding var isPressed: Bool
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .contentShape(Rectangle())
-            .onChange(of: configuration.isPressed) { _, pressed in
-                isPressed = pressed
-            }
-    }
-}
+// The rows and the words of the menus that list a control's choices. The clear button that puts such a menu on
+// touch and hold, leaving the tap to the control, is Theme's MenuOnHoldLayer.
 
 /// One row of a menu of choices. The current choice carries the checkmark.
 struct HoldMenuChoice: View {
@@ -94,7 +55,7 @@ enum HoldMenuText {
         return whole % 60 == 0 ? "\(whole / 60) min" : speed.label
     }
 
-    /// "1 second", "30 seconds", "5 minutes": for VoiceOver, which would read "5m" as metres.
+    /// "1 second", "30 seconds", "5 minutes": for VoiceOver, which would read "5m" as five meters.
     static func spokenTime(_ seconds: Double) -> String {
         guard seconds.isFinite, seconds >= 1, seconds < 86_400, seconds == seconds.rounded() else {
             return ShutterSpeed(seconds: seconds).label

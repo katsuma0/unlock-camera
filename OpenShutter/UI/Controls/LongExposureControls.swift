@@ -53,7 +53,7 @@ private struct SimpleLongPanel: View {
             .frame(height: 44)
             // Overlaid, so the outgoing tip fades out in place instead of sharing the lines with the new one.
             ZStack {
-                Text(long.scene.tip)
+                Text(Self.tip(for: long.scene))
                     .font(.footnote)
                     .foregroundStyle(Theme.secondaryText)
                     .multilineTextAlignment(.center)
@@ -69,6 +69,12 @@ private struct SimpleLongPanel: View {
         // The controls sit in a fixed band above the shutter; the largest text sizes would push them up the picture.
         .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
         .animation(Theme.snappy, value: long.scene)
+    }
+
+    /// The simple interface has no Custom, and Custom's own tip speaks of blends and frames. Should the setting
+    /// ever arrive here anyway, the line points back to the strip.
+    private static func tip(for scene: LongExposureScene) -> String {
+        scene == .custom ? "Pick a scene to set up the shot." : scene.tip
     }
 }
 
@@ -108,8 +114,8 @@ private struct AdvancedLongPanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            // The scene leads, since it sets the rest. Its name needs the room the blend picker had here, so the
-            // picker moved down a row, to where its caption used to stand alone.
+            // The scene leads, since it sets the rest. Its name and the blend picker don't fit one row on a 375 pt
+            // screen, so the picker has the row below.
             HStack(spacing: 8) {
                 SceneMenu(model: model, scene: long.scene)
                 Spacer(minLength: 4)
@@ -118,9 +124,9 @@ private struct AdvancedLongPanel: View {
             }
             HStack(spacing: 8) {
                 BlendPicker(model: model, selection: long.blend)
-                // Real always exposes each frame as long as the sensor allows, so only Blur and Trails pick one.
-                // Their frame chip takes the room Real's caption has: beside the picker there is space for one of
-                // the two, and each segment's VoiceOver hint carries the caption either way.
+                // Real always exposes each frame as long as the sensor allows, so only Blur and Trails pick a frame
+                // shutter. Beside the picker there is room for one thing: Real's caption with its word about the
+                // tripod, or the frame chip of the other two. Every segment's VoiceOver hint carries its caption.
                 if long.blend == .additive {
                     Text(long.blend.detail)
                         .font(.footnote)
@@ -250,7 +256,7 @@ private struct DurationButton: View {
     let model: CameraModel
     let long: LongExposureSettings
     let isSelected: Bool
-    @State private var isPressed = false
+    @State private var press = PressTracker()
 
     var body: some View {
         let text = long.bulb ? "Max " + Formatting.compactDuration(long.maxBulbSeconds) : ShutterSpeed(seconds: long.seconds).label
@@ -259,11 +265,11 @@ private struct DurationButton: View {
             Text(text)
                 .contentTransition(.numericText(value: long.seconds))
         }
-        .modifier(LongChipLook(isActive: !long.bulb, isSelected: isSelected, isPressed: isPressed))
+        .modifier(LongChipLook(isActive: !long.bulb, isSelected: isSelected, isPressed: press.isPressed))
         .overlay {
             // With bulb the hold sets the length; the dial would only change the frame size.
             if !long.bulb {
-                DurationTouchLayer(model: model, isPressed: $isPressed)
+                DurationTouchLayer(model: model, press: press)
             }
         }
         .animation(Theme.snappy, value: text)
@@ -283,10 +289,10 @@ private struct DurationButton: View {
 /// The button's tap and its touch and hold menu, as a layer over the face.
 private struct DurationTouchLayer: View {
     let model: CameraModel
-    @Binding var isPressed: Bool
+    let press: PressTracker
 
     var body: some View {
-        HoldMenuLayer(isPressed: $isPressed) {
+        MenuOnHoldLayer(press: press) {
             LongDial.toggleDuration(model)
         } options: {
             DurationMenu(model: model)

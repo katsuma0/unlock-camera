@@ -391,10 +391,16 @@ final class CameraSettingsTests: XCTestCase {
         XCTAssertEqual(manual, before)
     }
 
+    /// What a saved `longExposure` object decodes to.
+    private func longExposure(saved json: String) -> LongExposureSettings {
+        CameraSettings.decoded(from: Data(#"{"longExposure":\#(json)}"#.utf8)).longExposure
+    }
+
     func testLongExposureSavedBeforeScenesIsCustom() {
         // As a version without scenes wrote it: every value, no scene.
-        let saved = #"{"longExposure":{"align":false,"blend":"lighten","bulb":true,"frameSeconds":0.25,"maxBulbSeconds":600,"seconds":120}}"#
-        let long = CameraSettings.decoded(from: Data(saved.utf8)).longExposure
+        let long = longExposure(saved: """
+            {"align":false,"blend":"lighten","bulb":true,"frameSeconds":0.25,"maxBulbSeconds":600,"seconds":120}
+            """)
         XCTAssertEqual(long.scene, .custom)
         XCTAssertNil(long.recipe)
         XCTAssertEqual(long.blend, .lighten)
@@ -405,31 +411,46 @@ final class CameraSettingsTests: XCTestCase {
         XCTAssertEqual(long.maxBulbSeconds, 600)
 
         // That version's own defaults, Real for 4 s, are still what its owner had on screen.
-        let untouched = #"{"longExposure":{"align":false,"blend":"additive","bulb":false,"maxBulbSeconds":1800,"seconds":4}}"#
-        let old = CameraSettings.decoded(from: Data(untouched.utf8)).longExposure
+        let old = longExposure(saved: """
+            {"align":false,"blend":"additive","bulb":false,"maxBulbSeconds":1800,"seconds":4}
+            """)
         XCTAssertEqual(old.scene, .custom)
         XCTAssertEqual(old.blend, .additive)
         XCTAssertEqual(old.seconds, 4)
         XCTAssertFalse(old.align)
         XCTAssertNil(old.frameSeconds)
 
-        // Either value alone is enough to tell a save with a choice in it.
-        XCTAssertEqual(CameraSettings.decoded(from: Data(#"{"longExposure":{"seconds":60}}"#.utf8)).longExposure.scene, .custom)
-        XCTAssertEqual(CameraSettings.decoded(from: Data(#"{"longExposure":{"blend":"lighten"}}"#.utf8)).longExposure.scene, .custom)
-        XCTAssertEqual(CameraSettings.decoded(from: Data(#"{"longExposure":{"maxBulbSeconds":600}}"#.utf8)).longExposure.scene, .water)
+        // Either value alone tells a save with a choice in it. Without one it is a fresh start.
+        XCTAssertEqual(longExposure(saved: #"{"seconds":60}"#).scene, .custom)
+        XCTAssertEqual(longExposure(saved: #"{"blend":"lighten"}"#).scene, .custom)
+        XCTAssertEqual(longExposure(saved: #"{"maxBulbSeconds":600}"#).scene, .water)
+        XCTAssertEqual(longExposure(saved: "{}"), LongExposureSettings())
     }
 
     func testAnUnreadableSceneKeepsItsSavedValuesAsCustom() {
         // A scene from a later version, saved with the blend and time it had loaded.
-        let later = #"{"longExposure":{"scene":"sunset","blend":"additive","seconds":8,"align":false}}"#
-        let long = CameraSettings.decoded(from: Data(later.utf8)).longExposure
-        XCTAssertEqual(long.scene, .custom)
-        XCTAssertEqual(long.blend, .additive)
-        XCTAssertEqual(long.seconds, 8)
-        XCTAssertFalse(long.align)
+        let later = longExposure(saved: #"{"scene":"sunset","blend":"additive","seconds":8,"align":false}"#)
+        XCTAssertEqual(later.scene, .custom)
+        XCTAssertEqual(later.blend, .additive)
+        XCTAssertEqual(later.seconds, 8)
+        XCTAssertFalse(later.align)
 
-        let wrongType = #"{"longExposure":{"scene":7,"blend":"lighten","seconds":30}}"#
-        XCTAssertEqual(CameraSettings.decoded(from: Data(wrongType.utf8)).longExposure.scene, .custom)
+        XCTAssertEqual(longExposure(saved: #"{"scene":7,"blend":"lighten","seconds":30}"#).scene, .custom)
+        XCTAssertEqual(longExposure(saved: #"{"scene":null,"blend":"lighten","seconds":30}"#).scene, .custom)
+        // With nothing saved beside it there is nothing to keep.
+        XCTAssertEqual(longExposure(saved: #"{"scene":"sunset"}"#), LongExposureSettings())
+    }
+
+    func testASavedSceneComesBackWithItsValues() {
+        let stars = longExposure(saved: """
+            {"align":false,"blend":"additive","bulb":false,"maxBulbSeconds":1800,"scene":"stars","seconds":20}
+            """)
+        var picked = LongExposureSettings()
+        picked.apply(.stars)
+        picked.seconds = 20
+        XCTAssertEqual(stars, picked)
+        // Custom is a scene of its own in a save, not the lack of one.
+        XCTAssertEqual(longExposure(saved: #"{"scene":"custom"}"#).scene, .custom)
     }
 
     func testEverySceneRoundTrips() throws {

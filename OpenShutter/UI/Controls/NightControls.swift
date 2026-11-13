@@ -30,6 +30,12 @@ struct NightControls: View {
         .onChange(of: locked) { _, isLocked in
             if isLocked { isDialOpen = false }
         }
+        // VoiceOver stays on the button that opened the dial, so its escape gesture has to work from there as well
+        // as from the dial.
+        .accessibilityElement(children: .contain)
+        .accessibilityAction(.escape) {
+            if isDialOpen { NightDial.close($isDialOpen) }
+        }
     }
 }
 
@@ -61,7 +67,7 @@ private struct NightHeaderRows: View {
 private struct NightDurationButton: View {
     let model: CameraModel
     @Binding var isDialOpen: Bool
-    @State private var isPressed = false
+    @State private var press = PressTracker()
 
     var body: some View {
         let manual = model.settings.night.seconds
@@ -75,9 +81,9 @@ private struct NightDurationButton: View {
                 .foregroundStyle(manual == nil ? Theme.primaryText : Theme.accent)
                 .contentTransition(.numericText(value: seconds))
         }
-        .modifier(NightChipLook(isSelected: isDialOpen, isPressed: isPressed))
+        .modifier(NightChipLook(isSelected: isDialOpen, isPressed: press.isPressed))
         .overlay {
-            NightDurationTouchLayer(model: model, isDialOpen: $isDialOpen, isPressed: $isPressed)
+            NightDurationTouchLayer(model: model, isDialOpen: $isDialOpen, press: press)
         }
         // Keyed to auto, not the text: a drag of the dial below changes the text on every tick.
         .animation(Theme.snappy, value: manual == nil)
@@ -104,10 +110,10 @@ private struct NightDurationButton: View {
 private struct NightDurationTouchLayer: View {
     let model: CameraModel
     @Binding var isDialOpen: Bool
-    @Binding var isPressed: Bool
+    let press: PressTracker
 
     var body: some View {
-        HoldMenuLayer(isPressed: $isPressed) {
+        MenuOnHoldLayer(press: press) {
             NightDial.toggle($isDialOpen, model: model)
         } options: {
             NightDurationMenu(model: model)

@@ -516,23 +516,23 @@ private struct DrawerMenuItem<Glyph: View, Options: View>: View {
     let primaryAction: () -> Void
     @ViewBuilder let options: () -> Options
     @ViewBuilder let glyph: () -> Glyph
+    @State private var press = PressTracker()
 
     var body: some View {
-        Menu {
-            options()
-        } label: {
+        // The same button as the items without a menu, with the menu laid over it. Every step changes the label,
+        // and a label inside the system's menu button would be redrawn through that button each time.
+        Button(action: primaryAction) {
             DrawerItemLabel(model: model, title: title, value: value, isActive: isActive, glyph: glyph())
-        } primaryAction: {
-            primaryAction()
         }
-        .menuStyle(.button)
-        .buttonStyle(DrawerPressStyle())
-        .menuIndicator(.hidden)
-        .disabled(!isEnabled)
-        .opacity(isEnabled ? 1 : 0.35)
+        .buttonStyle(DrawerPressStyle(isPressed: press.isPressed))
         .accessibilityLabel(title)
         .accessibilityValue(value)
         .accessibilityHint("Touch and hold for more options.")
+        .overlay {
+            MenuOnHoldLayer(press: press, action: primaryAction, options: options)
+        }
+        .disabled(!isEnabled)
+        .opacity(isEnabled ? 1 : 0.35)
     }
 }
 
@@ -572,10 +572,14 @@ private struct DrawerItemLabel<Glyph: View>: View {
 }
 
 private struct DrawerPressStyle: ButtonStyle {
+    /// A press that lands on the item's touch and hold layer.
+    var isPressed = false
+
     func makeBody(configuration: Configuration) -> some View {
+        let pressed = configuration.isPressed || isPressed
         configuration.label
-            .scaleEffect(configuration.isPressed ? 0.92 : 1)
-            .animation(Theme.snappy, value: configuration.isPressed)
+            .scaleEffect(pressed ? 0.92 : 1)
+            .animation(Theme.snappy, value: pressed)
     }
 }
 

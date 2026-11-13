@@ -77,7 +77,7 @@ private struct CameraLayout: View {
     @State private var bulbPressStart: Date?
     /// The drawer's timer sheet is up. It belongs to the drawer, so the drawer reports it as a preference.
     @State private var drawerSheetShown = false
-    /// The top bar's timer badge asked for that sheet. The drawer presents it, opening first if it has to.
+    /// The top bar's timer badge asked for that sheet. The badge opens the drawer, and the drawer presents it.
     @State private var timerSheetRequested = false
 
     static let topBarHeight: CGFloat = 48
@@ -114,7 +114,7 @@ private struct CameraLayout: View {
                     .allowsHitTesting(!fullscreen)
 
                 // Drawn last so the drawer slides out from underneath it.
-                TopBar(model: model, onTimerSheet: showTimerSheet)
+                TopBar(model: model, timerSheetRequested: $timerSheetRequested)
                     .opacity(fullscreen ? 0 : 1)
                     .allowsHitTesting(!fullscreen)
             }
@@ -180,11 +180,6 @@ private struct CameraLayout: View {
         case .countdown, .stacking, .recording: return true
         case .idle, .capturing, .saving: return false
         }
-    }
-
-    private func showTimerSheet() {
-        timerSheetRequested = true
-        withAnimation(Theme.spring) { model.isDrawerOpen = true }
     }
 
     private func showVeil(holdNanoseconds: UInt64) {
@@ -649,6 +644,7 @@ private struct LensPickerSlot: View {
 /// camera has nothing here to set.
 private struct ExposureChip: View {
     let model: CameraModel
+    @State private var press = PressTracker()
 
     var body: some View {
         let advanced = model.isAdvanced
@@ -659,31 +655,41 @@ private struct ExposureChip: View {
 
         ZStack {
             if isShown {
-                Menu {
-                    ExposureChipOptions(model: model)
-                } label: {
-                    HStack(spacing: 4) {
-                        // Only the glyph turns with the phone, as on the strip's chips; the whole chip turned
-                        // upright would stand out of its row. The simple interface wears the viewfinder's sun.
-                        Upright(model: model) {
-                            Image(systemName: advanced ? "plusminus.circle" : "sun.max.fill")
-                        }
-                        Text(EVFormat.label(bias))
-                            .contentTransition(.numericText(value: bias))
+                HStack(spacing: 4) {
+                    // Only the glyph turns with the phone, as on the strip's chips; the whole chip turned upright
+                    // would stand out of its row. The simple interface wears the viewfinder's sun.
+                    Upright(model: model) {
+                        Image(systemName: advanced ? "plusminus.circle" : "sun.max.fill")
                     }
-                } primaryAction: {
-                    toggleDial()
+                    Text(EVFormat.label(bias))
+                        .contentTransition(.numericText(value: bias))
                 }
-                .menuStyle(.button)
-                .buttonStyle(ExposureChipStyle(isLit: isAdjusted || isOpen, isOpen: isOpen))
-                .menuIndicator(.hidden)
-                .transition(.opacity.combined(with: .scale(scale: 0.8)))
+                .font(Theme.chipFont)
+                .foregroundStyle(isAdjusted || isOpen ? Theme.accent : Theme.primaryText)
+                .padding(.horizontal, 10)
+                .frame(height: 28)
+                .cameraGlass(in: Capsule())
+                .overlay {
+                    if isOpen {
+                        Capsule().strokeBorder(Theme.accent.opacity(0.8), lineWidth: 1)
+                    }
+                }
+                .scaleEffect(press.isPressed ? 0.94 : 1)
+                .animation(Theme.snappy, value: press.isPressed)
+                .frame(minWidth: 44, minHeight: 44)
+                .contentShape(Rectangle())
+                .accessibilityElement(children: .ignore)
+                .accessibilityAddTraits(.isButton)
                 .accessibilityLabel(advanced ? "Exposure compensation" : "Brightness")
                 .accessibilityValue(EVFormat.label(bias))
                 .accessibilityHint(advanced ? "Opens the exposure dial. Touch and hold for more options."
                                             : "Opens the brightness dial. Touch and hold for more options.")
-                .accessibilityAction { toggleDial() }
+                .accessibilityAction { Self.toggleDial(model) }
                 .accessibilityAction(named: "Reset") { Self.reset(model) }
+                .overlay {
+                    ExposureChipTouchLayer(model: model, press: press)
+                }
+                .transition(.opacity.combined(with: .scale(scale: 0.8)))
             }
         }
         // Keyed to adjusted or not, not the value: a drag of the EV dial changes it on every tick, and the digits
@@ -692,7 +698,7 @@ private struct ExposureChip: View {
         .animation(Theme.snappy, value: isShown)
     }
 
-    private func toggleDial() {
+    fileprivate static func toggleDial(_ model: CameraModel) {
         Haptics.tap()
         withAnimation(Theme.spring) {
             model.activeDial = model.activeDial == .bias ? nil : .bias
@@ -711,8 +717,22 @@ private struct ExposureChip: View {
     }
 }
 
-/// The chip's touch and hold menu: back to zero, then whole stops either way. Its own view, so the rows are only
-/// worked out when the menu is built, not with every tick of the dial.
+/// The chip's tap and its touch and hold menu, laid over the chip. Its own view with inputs that never change, so
+/// the chip's redraws with every tick of the dial leave the system's menu button alone.
+private struct ExposureChipTouchLayer: View {
+    let model: CameraModel
+    let press: PressTracker
+
+    var body: some View {
+        MenuOnHoldLayer(press: press) {
+            ExposureChip.toggleDial(model)
+        } options: {
+            ExposureChipOptions(model: model)
+        }
+    }
+}
+
+/// Back to zero, then whole stops either way.
 private struct ExposureChipOptions: View {
     let model: CameraModel
 
@@ -723,22 +743,19 @@ private struct ExposureChipOptions: View {
         let advanced = model.isAdvanced
         let bias = ExposureChip.bias(model)
         let range = model.capabilities.biasRange
-        Button {
-            ExposureChip.reset(model)
-        } label: {
-            Label("Reset", systemImage: "arrow.counterclockwise")
-        }
-        .disabled(abs(bias) < 0.05)
-        Section {
+        // Titled like the dial the chip opens.
+        Section(advanced ? "Exposure" : "Brightness") {
+            Button {
+                ExposureChip.reset(model)
+            } label: {
+                Label("Reset", systemImage: "arrow.counterclockwise")
+            }
+            .disabled(abs(bias) < 0.05)
             ForEach(Self.steps.filter { range.contains($0) }, id: \.self) { step in
                 Toggle(isOn: Binding(get: { abs(bias - step) < 0.05 }, set: { _ in choose(step) })) {
                     // The advanced interface names the unit; the simple one counts in steps of brightness.
                     Text(advanced ? EVFormat.label(step) + " EV" : EVFormat.label(step))
                 }
-            }
-        } header: {
-            if !advanced {
-                Text("Brightness")
             }
         }
     }
@@ -746,30 +763,6 @@ private struct ExposureChipOptions: View {
     private func choose(_ step: Double) {
         Haptics.tick()
         model.setBias(step)
-    }
-}
-
-/// The lens row's glass chip, yellow while the value is off zero or its dial is open, in a 44 pt touch area.
-private struct ExposureChipStyle: ButtonStyle {
-    var isLit: Bool
-    var isOpen: Bool
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(Theme.chipFont)
-            .foregroundStyle(isLit ? Theme.accent : Theme.primaryText)
-            .padding(.horizontal, 10)
-            .frame(height: 28)
-            .cameraGlass(in: Capsule())
-            .overlay {
-                if isOpen {
-                    Capsule().strokeBorder(Theme.accent.opacity(0.8), lineWidth: 1)
-                }
-            }
-            .scaleEffect(configuration.isPressed ? 0.94 : 1)
-            .animation(Theme.snappy, value: configuration.isPressed)
-            .frame(minWidth: 44, minHeight: 44)
-            .contentShape(Rectangle())
     }
 }
 
@@ -909,42 +902,38 @@ private struct ShutterSlot: View {
 
 private struct ThumbnailButton: View {
     let model: CameraModel
+    @State private var press = PressTracker()
 
     var body: some View {
         let capture = model.lastCapture
         let activity = model.activity
         let isHidden = activity == .recording || activity == .stacking
         let hasCaptures = !model.recentCaptures.isEmpty
-        Menu {
-            Button(action: openPhotos) {
-                Label("Open Photos", systemImage: "photo.on.rectangle")
-            }
-            Button(action: showRecent) {
-                Label("Show recent", systemImage: "clock")
-            }
-            .disabled(!hasCaptures)
+        Button {
+            Self.showRecent(model)
         } label: {
             Upright(model: model) {
                 ThumbnailImage(capture: capture)
             }
-        } primaryAction: {
-            showRecent()
         }
-        .menuStyle(.button)
-        // Before the first capture a tap has nothing to show, so only the menu answers and the square stays still.
-        .buttonStyle(PressScaleButtonStyle(scales: hasCaptures))
-        .menuIndicator(.hidden)
+        // Before the first capture a tap has nothing to show, so the square stays still under the finger.
+        .buttonStyle(PressScaleButtonStyle(isPressed: press.isPressed && hasCaptures))
+        .disabled(!hasCaptures)
+        .accessibilityLabel("Recent captures")
+        .accessibilityValue(Self.spokenValue(capture, detailed: model.isAdvanced))
+        .accessibilityHint("Touch and hold for more options.")
+        .accessibilityAction(named: "Open Photos") { Self.openPhotos(model) }
+        // Laid over the disabled button as well: Photos can be opened before anything has been captured.
+        .overlay {
+            ThumbnailTouchLayer(model: model, press: press)
+        }
         .opacity(isHidden ? 0 : 1)
         .allowsHitTesting(!isHidden)
         .animation(Theme.spring, value: capture?.id)
         .animation(.easeInOut(duration: 0.2), value: isHidden)
-        .accessibilityLabel("Recent captures")
-        .accessibilityValue(Self.spokenValue(capture, detailed: model.isAdvanced))
-        .accessibilityHint("Touch and hold for more options.")
-        .accessibilityAction(named: "Open Photos") { openPhotos() }
     }
 
-    private func showRecent() {
+    fileprivate static func showRecent(_ model: CameraModel) {
         guard !model.recentCaptures.isEmpty else { return }
         Haptics.tap()
         model.isDrawerOpen = false
@@ -952,7 +941,7 @@ private struct ThumbnailButton: View {
     }
 
     /// The review sheet's way into Photos, without the sheet.
-    private func openPhotos() {
+    fileprivate static func openPhotos(_ model: CameraModel) {
         Haptics.tap()
         model.isDrawerOpen = false
         PhotosApp.open { opened in
@@ -966,6 +955,39 @@ private struct ThumbnailButton: View {
     private static func spokenValue(_ capture: CaptureResult?, detailed: Bool) -> String {
         guard let capture else { return "None yet" }
         return detailed ? capture.summary : capture.kind.title(detailed: false)
+    }
+}
+
+/// The thumbnail's tap and its touch and hold menu, laid over it. Its own view with inputs that never change, so a
+/// new capture or a turn of the phone redraws the picture and leaves the system's menu button alone.
+private struct ThumbnailTouchLayer: View {
+    let model: CameraModel
+    let press: PressTracker
+
+    var body: some View {
+        MenuOnHoldLayer(press: press) {
+            ThumbnailButton.showRecent(model)
+        } options: {
+            ThumbnailOptions(model: model)
+        }
+    }
+}
+
+private struct ThumbnailOptions: View {
+    let model: CameraModel
+
+    var body: some View {
+        Button {
+            ThumbnailButton.openPhotos(model)
+        } label: {
+            Label("Open Photos", systemImage: "photo.on.rectangle")
+        }
+        Button {
+            ThumbnailButton.showRecent(model)
+        } label: {
+            Label("Show recent", systemImage: "clock")
+        }
+        .disabled(model.recentCaptures.isEmpty)
     }
 }
 
@@ -1048,12 +1070,14 @@ private struct Upright<Content: View>: View {
 }
 
 private struct PressScaleButtonStyle: ButtonStyle {
-    var scales = true
+    /// A press that lands on a layer above the button, such as its touch and hold menu.
+    var isPressed = false
 
     func makeBody(configuration: Configuration) -> some View {
+        let pressed = configuration.isPressed || isPressed
         configuration.label
-            .scaleEffect(configuration.isPressed && scales ? 0.92 : 1)
-            .animation(Theme.snappy, value: configuration.isPressed)
+            .scaleEffect(pressed ? 0.92 : 1)
+            .animation(Theme.snappy, value: pressed)
             .contentShape(Rectangle())
     }
 }

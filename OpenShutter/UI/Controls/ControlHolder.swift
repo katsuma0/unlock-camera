@@ -4,10 +4,10 @@ import CameraCore
 enum ControlHolder: Equatable {
     /// The person set it. Yellow, and auto gives it back.
     case person
-    /// LONG's scene fixes it, because the person set nothing. The value holds still, but it isn't the person's to
-    /// give back: auto leads here, so it shows as the control's resting state.
+    /// LONG's scene fixes it, because the person set nothing. Not auto, since it holds still, and not yellow,
+    /// since there is nothing of the person's to give back: giving a value back in a scene leads here.
     case scene
-    /// The camera picks it.
+    /// The camera picks it as the light changes. White with the A.
     case camera
 }
 
@@ -39,7 +39,8 @@ extension ControlHolder {
         return supplies ? model.settings.longExposure.scene.title : nil
     }
 
-    /// "Auto", or the scene's name where auto hands the control to the scene: "Stars setting".
+    /// The first row of a control's menu: "Auto", or "Stars setting" where giving the value back leaves it to
+    /// the scene.
     static func autoTitle(for kind: DialKind, model: CameraModel, auto: String = "Auto") -> String {
         sceneName(for: kind, model: model).map { $0 + " setting" } ?? auto
     }

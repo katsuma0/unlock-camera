@@ -70,7 +70,9 @@ final class CameraModel {
             guard oldValue != activeDial else { return }
             // The simple interface dials brightness and zoom. Any other dial would edit a value it keeps on auto.
             if let dial = activeDial, !isAdvanced, dial != .bias, dial != .zoom {
+                // Runs this observer again for the closed dial, which does the rest.
                 activeDial = nil
+                return
             }
             // Peaking follows the focus dial in "manual focus" peaking mode.
             applyAnalysis()
@@ -104,7 +106,6 @@ final class CameraModel {
     @ObservationIgnored private var toastTask: Task<Void, Never>?
     @ObservationIgnored private var reticleTask: Task<Void, Never>?
     @ObservationIgnored private var externalSyncTask: Task<Void, Never>?
-    @ObservationIgnored private var controlsRefreshTask: Task<Void, Never>?
     @ObservationIgnored private var microphoneNoticeShown = false
     @ObservationIgnored private var lastBackPresetID: String?
     @ObservationIgnored private var adoptNextWhiteBalanceReading = false
@@ -340,9 +341,6 @@ final class CameraModel {
         settings = answered
         // Saved at once, so quitting right after the answer doesn't bring the question back.
         saveNow()
-        // Read here so the screen goes straight to the camera where access was given earlier, instead of showing
-        // the permission page for the moment start() takes to get going.
-        authorization = backend.authorizationStatus()
         Task { await start() }
     }
 
@@ -612,14 +610,11 @@ final class CameraModel {
         }
     }
 
+    /// nil = auto, or in LONG the ISO the scene fixes.
     func setISO(_ iso: Double?) {
         let value = iso.map { min(max($0, capabilities.exposure.iso.lowerBound), capabilities.exposure.iso.upperBound) }
         switch settings.mode {
         case .manual, .long, .video:
-            if value == nil, settings.manual.iso == nil, sceneISOLock != nil {
-                noteSceneHolds("This scene sets the ISO. Choose Custom for auto ISO.")
-                return
-            }
             updateSettings { $0.manual.iso = value }
         case .photo, .night:
             guard let value else { return }
@@ -627,17 +622,13 @@ final class CameraModel {
         }
     }
 
-    /// nil = auto (or the fixed f-number on lenses without an iris).
+    /// nil = auto, or in LONG the aperture the scene asks for. Does nothing on lenses without an iris.
     func setAperture(_ fNumber: Double?) {
         guard capabilities.supportsVariableAperture else { return }
         let range = capabilities.exposure.aperture
         let value = fNumber.map { min(max($0, range.lowerBound), range.upperBound) }
         switch settings.mode {
         case .manual, .long, .video:
-            if value == nil, settings.manual.aperture == nil, sceneAperture != nil {
-                noteSceneHolds("This scene sets the aperture. Choose Custom for auto.")
-                return
-            }
             updateSettings { $0.manual.aperture = value }
         case .photo, .night:
             guard let value else { return }
@@ -686,14 +677,10 @@ final class CameraModel {
 
     // MARK: - Focus
 
-    /// nil = continuous autofocus, or the distance a long exposure scene holds.
+    /// nil = continuous autofocus, or in LONG the distance the scene holds.
     func setManualFocus(_ lensPosition: Double?) {
         guard lensPosition == nil || capabilities.supportsManualFocus else { return }
         let value = lensPosition.map { min(max($0, 0), 1) }
-        if value == nil, settings.focus.lensPosition == nil, effectiveFocus.lensPosition != nil {
-            noteSceneHolds("This scene focuses at infinity. Choose Custom for autofocus.")
-            return
-        }
         updateSettings { $0.focus = value.map { FocusSetting.manual(lensPosition: $0) } ?? .auto }
     }
 
@@ -794,11 +781,8 @@ final class CameraModel {
 
     // MARK: - White balance
 
+    /// Auto gives the white balance back to the camera, or in LONG to the scene where it holds one.
     func setWhiteBalance(_ setting: WhiteBalanceSetting) {
-        if setting.isAuto, settings.whiteBalance.isAuto, !effectiveWhiteBalance.isAuto {
-            noteSceneHolds("This scene sets the white balance. Choose Custom for auto.")
-            return
-        }
         updateSettings { $0.whiteBalance = setting }
     }
 
@@ -860,37 +844,23 @@ final class CameraModel {
         settings.mode == .long ? settings.longExposure.recipe : nil
     }
 
-    // A blend, frame or bulb set by hand is no longer the scene's recipe, so these three leave the scene for Custom.
-    // The simple interface has no Custom and no control for any of them.
+    // A blend, frame or bulb set by hand is no longer the scene's recipe, so a change in one of these three leaves
+    // the scene for Custom (commit). The simple interface has no Custom and no control for any of them: there the
+    // settings go back to the scene's own whatever is written.
 
     func setLongExposureBlend(_ blend: StackBlend) {
-        guard isAdvanced else { return }
-        updateSettings {
-            guard $0.longExposure.blend != blend else { return }
-            $0.longExposure.blend = blend
-            $0.longExposure.scene = .custom
-        }
+        updateSettings { $0.longExposure.blend = blend }
     }
 
     /// Shutter for each Blur or Trails frame; nil leaves it to auto exposure.
     func setLongExposureFrameSeconds(_ seconds: Double?) {
-        guard isAdvanced else { return }
         let range = capabilities.exposure.seconds
         let frame = seconds.map { min(max($0, range.lowerBound), range.upperBound) }
-        updateSettings {
-            guard $0.longExposure.frameSeconds != frame else { return }
-            $0.longExposure.frameSeconds = frame
-            $0.longExposure.scene = .custom
-        }
+        updateSettings { $0.longExposure.frameSeconds = frame }
     }
 
     func setBulb(_ enabled: Bool) {
-        guard isAdvanced else { return }
-        updateSettings {
-            guard $0.longExposure.bulb != enabled else { return }
-            $0.longExposure.bulb = enabled
-            $0.longExposure.scene = .custom
-        }
+        updateSettings { $0.longExposure.bulb = enabled }
     }
 
     // MARK: - Capture
@@ -1318,6 +1288,13 @@ final class CameraModel {
         // Until the first-launch question is answered nothing is simplified (see init).
         let simple = !proposed.interface.advanced && proposed.interface.welcomed
         var next = simple ? proposed.simplified() : proposed
+        // A blend, frame or bulb that isn't the scene's own was set by hand, and that is what Custom means. Checked
+        // here for every way in: the LONG panel's setters and the blend picker in Settings.
+        let long = next.longExposure
+        if let recipe = long.recipe,
+           long.blend != recipe.blend || long.bulb != recipe.bulb || long.frameSeconds != recipe.frameSeconds {
+            next.longExposure.scene = .custom
+        }
         if !next.capture.isValid {
             next.capture.processedFormat = .heif
         }
@@ -1377,10 +1354,6 @@ final class CameraModel {
         if old.controls.cameraControlItems != new.controls.cameraControlItems || levelChanged
             || (controlValuesChanged && activeDial == nil && !applyingControlChange) {
             applyCameraControls()
-        } else if old.manual.bias != new.manual.bias, isoPickerShowsSceneISO {
-            // Exposure compensation moves a scene's ISO. A drag changes it on every tick, so the picker follows
-            // once it rests.
-            scheduleControlsRefresh()
         }
         if old.controls.haptics != new.controls.haptics {
             Haptics.isEnabled = new.controls.haptics
@@ -1502,9 +1475,12 @@ final class CameraModel {
             // LONG's shutter picker sets the duration, which Blur and Trails have as well; it is never Auto there.
             shutter: settings.mode == .long ? settings.longExposure.seconds : (isShutterAuto ? nil : displayShutter),
             isoStops: isoScale,
-            iso: isISOAuto ? nil : displayISO,
+            // Auto on the ISO and aperture pickers is wherever the person has set nothing, which in LONG can be a
+            // value the scene fixes: Auto leads back to it, as the dial's does.
+            iso: locksByHand && settings.manual.iso != nil ? displayISO : nil,
             apertureStops: apertureScale,
-            aperture: isApertureAuto ? nil : displayAperture,
+            aperture: locksByHand && capabilities.supportsVariableAperture && settings.manual.aperture != nil
+                ? displayAperture : nil,
             kelvin: effectiveWhiteBalance.kelvinValue,
             lensPosition: effectiveFocus.lensPosition,
             mode: settings.mode,
@@ -1514,20 +1490,11 @@ final class CameraModel {
         backend.configureCameraControls(state)
     }
 
-    /// The Camera Control's ISO picker is on an ISO a scene fixed, which follows exposure compensation.
-    private var isoPickerShowsSceneISO: Bool {
-        isAdvanced && settings.controls.cameraControlItems.contains(.iso) && settings.manual.iso == nil && sceneISOLock != nil
-    }
-
-    /// Brings the Camera Control's pickers up to date a moment after a change that comes many times a second, or
-    /// after a pick that changed nothing. Later than the 0.7 s for which a control just touched ignores new values.
-    private func scheduleControlsRefresh() {
-        controlsRefreshTask?.cancel()
-        controlsRefreshTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 800_000_000)
-            // An open dial sends the state itself when it closes.
-            guard !Task.isCancelled, let self, self.activeDial == nil else { return }
-            self.applyCameraControls()
+    /// MANUAL, LONG and VIDEO expose with the shared manual values. PHOTO and NIGHT leave them alone.
+    private var locksByHand: Bool {
+        switch settings.mode {
+        case .manual, .long, .video: return true
+        case .photo, .night: return false
         }
     }
 
@@ -1621,14 +1588,6 @@ final class CameraModel {
     private var stackAperture: Double {
         guard capabilities.supportsVariableAperture else { return readings.aperture }
         return settings.manual.aperture ?? sceneAperture ?? readings.aperture
-    }
-
-    /// A scene holds this value and the person has set none of their own, so there is no auto to go back to.
-    /// Says so instead of doing nothing. A Camera Control picker left on Auto by the pick shows the scene's value
-    /// again a moment later.
-    private func noteSceneHolds(_ message: String) {
-        showToast(message, symbol: "info.circle")
-        scheduleControlsRefresh()
     }
 
     /// Shutter priority at the longest frame previews a stack with auto ISO only while the ISO for the whole time
@@ -1804,10 +1763,6 @@ final class CameraModel {
             self.lastZoomCommand = Date()
             self.backend.setZoomFactor(self.settings.zoom, animated: false)
             self.scheduleApply(.exposure)
-            // An adopted compensation moved a scene's ISO.
-            if self.isoPickerShowsSceneISO, self.activeDial == nil {
-                self.applyCameraControls()
-            }
         }
     }
 
@@ -2253,8 +2208,8 @@ extension CameraModel: CameraBackendDelegate {
     func cameraBackend(_ backend: CameraBackend, didReceiveControl change: CameraControlChange) {
         applyingControlChange = true
         defer { applyingControlChange = false }
-        // The simple interface puts none of these on the Camera Control, so such a pick was made just before the
-        // switch. Everything it could set is hidden there, or leads to MANUAL.
+        // The simple interface puts none of these on the Camera Control, so such a pick was on its way when the
+        // interface switched. Everything it could set is hidden there, or leads to MANUAL.
         if !isAdvanced {
             switch change {
             case .shutter, .iso, .aperture, .kelvin, .focus: return

@@ -114,6 +114,16 @@ final class LongExposureSceneTests: XCTestCase {
         XCTAssertEqual(handheld.map(\.recipe.align), [true])
     }
 
+    func testTipsLeaveStartingAndStoppingToThePanel() {
+        // Under a scene without a set time the panel has its own line on how it starts and stops. A tip that said
+        // it too would put the same sentence on screen twice.
+        let untimed = presetRecipes().filter(\.recipe.bulb)
+        XCTAssertEqual(untimed.map(\.scene), [.lightPainting])
+        for (scene, _) in untimed {
+            XCTAssertFalse(scene.tip.lowercased().contains("tap"), scene.tip)
+        }
+    }
+
     func testSymbolListsAreUsable() {
         for scene in LongExposureScene.allCases {
             let names = scene.symbolNames
@@ -406,6 +416,7 @@ final class LongExposureSceneTests: XCTestCase {
                     // Whole frames, so up to one frame over and never short.
                     XCTAssertGreaterThanOrEqual(run, seconds - 1e-9, "\(scene.rawValue) \(seconds)")
                     XCTAssertLessThan(run, seconds + max(stack.frameSeconds, 1.0 / 30), "\(scene.rawValue) \(seconds)")
+                    // Under the planner's frame cap, where a stack would end before its time.
                     XCTAssertLessThan(stack.frameCount, 216_000, "\(scene.rawValue) \(seconds)")
                 }
             }
@@ -424,6 +435,14 @@ final class LongExposureSceneTests: XCTestCase {
             XCTAssertEqual(Double(stack.frameCount), seconds * 30, accuracy: 1e-6)
             XCTAssertTrue(stack.align)
         }
+    }
+
+    func testWaterStaysWithinWhatNightModeCallsHandheld() {
+        guard let water = LongExposureScene.water.recipe else { return XCTFail("Water has a recipe") }
+        // The one scene that says it works in the hand opens on a time night mode itself plans for a phone in the
+        // hand, and offers none longer than night mode gives a phone held steady.
+        XCTAssertLessThanOrEqual(water.seconds, NightModePlanner.recommendedMaxSeconds(for: .handheld))
+        XCTAssertLessThanOrEqual(water.durations.last ?? 0, NightModePlanner.recommendedMaxSeconds(for: .steady))
     }
 
     func testSkyScenesAddWholeFramesUnderTheirISOCeiling() {
@@ -483,7 +502,7 @@ final class LongExposureSceneTests: XCTestCase {
         XCTAssertEqual(lit.estimatedDuration(), 10, accuracy: 1e-9)
     }
 
-    func testStarTrailsAndFireworksPlansOnAPhone() {
+    func testTrailsScenesWithASetFramePlanOnAPhone() {
         guard let starTrails = LongExposureScene.starTrails.recipe, let fireworks = LongExposureScene.fireworks.recipe,
               let painting = LongExposureScene.lightPainting.recipe else {
             return XCTFail("The Trails scenes have recipes")
@@ -493,13 +512,12 @@ final class LongExposureSceneTests: XCTestCase {
         XCTAssertEqual(trails.frameCount, 600)
         XCTAssertEqual(trails.frameSeconds, 1)
         XCTAssertEqual(trails.iso, 800)
-        // On a camera with a shorter longest frame the frames shorten and the time stays.
-        let shortFrames = ExposureRanges(seconds: (1.0 / 8000)...(1.0 / 3), iso: 50...6400, aperture: 2.2...2.2)
-        let ultraWide = LongExposurePlanner.plan(totalSeconds: starTrails.seconds, blend: starTrails.blend, iso: 800,
-                                                 aperture: 2.2, frameSeconds: starTrails.frameSeconds,
-                                                 ranges: shortFrames)
-        XCTAssertEqual(ultraWide.frameCount, 1800)
-        XCTAssertEqual(ultraWide.estimatedDuration(), 600, accuracy: 1e-6)
+        // On a camera whose longest frame is shorter, the frames shorten and the time stays.
+        let thirds = ExposureRanges(seconds: (1.0 / 8000)...(1.0 / 3), iso: 50...6400, aperture: 2.2...2.2)
+        let shorter = LongExposurePlanner.plan(totalSeconds: starTrails.seconds, blend: starTrails.blend, iso: 800,
+                                               aperture: 2.2, frameSeconds: starTrails.frameSeconds, ranges: thirds)
+        XCTAssertEqual(shorter.frameCount, 1800)
+        XCTAssertEqual(shorter.estimatedDuration(), 600, accuracy: 1e-6)
 
         // Six seconds of video-rate frames, each one the whole thirtieth of a second.
         let burst = plan(fireworks, seconds: fireworks.seconds)
@@ -509,7 +527,8 @@ final class LongExposureSceneTests: XCTestCase {
         XCTAssertEqual(fireworks.aperture(in: 1.4...4, variable: true), 4)
         XCTAssertNil(fireworks.aperture(in: phone.aperture, variable: phone.hasVariableAperture))
 
-        // Light painting runs until the second tap; its time only stands in when the tap never comes.
+        // Light painting runs until the second tap. Its time is only what is left on show should bulb be turned
+        // off by hand.
         XCTAssertTrue(painting.bulb)
         XCTAssertEqual(plan(painting, seconds: painting.seconds).frameSeconds, 1.0 / 15)
         XCTAssertEqual(painting.isoLock(in: phone.iso), 50)

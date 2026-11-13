@@ -393,9 +393,11 @@ final class InterfaceLevelTests: XCTestCase {
         XCTAssertEqual(simple(CaptureSchedule(delay: 30, shots: 5)), CaptureSchedule(delay: 10))
         for delay in CaptureSchedule.delayPresets + [1, 4, 45] {
             let kept = simple(CaptureSchedule(delay: delay, shots: 3, interval: 2))
+            XCTAssertEqual(kept, CaptureSchedule(delay: kept.delay), "\(delay)")
+            // The longest listed delay that is no longer than the one asked for.
             XCTAssertTrue(CameraSettings.simpleDelays.contains(kept.delay), "\(delay)")
             XCTAssertLessThanOrEqual(kept.delay, delay, "\(delay)")
-            XCTAssertEqual(kept, CaptureSchedule(delay: kept.delay), "\(delay)")
+            XCTAssertFalse(CameraSettings.simpleDelays.contains { $0 > kept.delay && $0 <= delay }, "\(delay)")
         }
     }
 
@@ -434,7 +436,7 @@ final class InterfaceLevelTests: XCTestCase {
             XCTAssertEqual(long.scene, .stars)
         }
 
-        // The rest follows the recipe again: alignment turned on in Settings would smear a sky on a tripod.
+        // The rest follows the recipe again, alignment turned on in Settings included.
         settings.longExposure.seconds = 15
         settings.longExposure.align = true
         var picked = LongExposureSettings()
@@ -444,6 +446,18 @@ final class InterfaceLevelTests: XCTestCase {
         // A scene without times keeps running until the second tap.
         settings.longExposure.apply(.lightPainting)
         XCTAssertEqual(settings.simplified().longExposure, settings.longExposure)
+
+        // Whatever the time was, every scene ends on one of the times its row of chips shows.
+        for scene in LongExposureScene.presets {
+            guard let recipe = scene.recipe else { return XCTFail("\(scene.rawValue) has a recipe") }
+            for seconds in [0.25, 3, 25, 90, 700, 1800] {
+                settings.longExposure.apply(scene)
+                settings.longExposure.seconds = seconds
+                let kept = settings.simplified().longExposure.seconds
+                XCTAssertTrue(recipe.durations.contains(kept) || (recipe.durations.isEmpty && kept == recipe.seconds),
+                              "\(scene.rawValue) \(seconds)")
+            }
+        }
     }
 
     // MARK: - Going advanced
@@ -513,12 +527,28 @@ final class InterfaceLevelTests: XCTestCase {
     }
 
     func testGoingAdvancedTwiceChangesNothingMore() {
-        for snapshot in [nil, everythingChanged(), advancedSetup(), adjustedScene()] {
-            for current in [CameraSettings.default.simplified(), advancedSetup().simplified(), everythingChanged()] {
+        let setups = [CameraSettings.default, everythingChanged(), advancedSetup(), adjustedScene()]
+        for snapshot in setups + [nil] {
+            // From the simple interface, as the model does it, and from settings that never were simple.
+            for current in setups.map({ $0.simplified() }) + setups {
                 let once = current.restoringAdvanced(from: snapshot)
+                XCTAssertTrue(once.interface.advanced)
+                XCTAssertTrue(once.capture.isValid)
                 XCTAssertEqual(once.restoringAdvanced(from: snapshot), once)
             }
         }
+    }
+
+    func testTheBulbLimitHasNoSayInWhatComesBack() {
+        // The limit is an advanced setting kept among the long exposure's values. Settings holding another limit
+        // than the simple interface runs still count as untouched, the first time and every time after.
+        var snapshot = advancedSetup()
+        snapshot.longExposure.maxBulbSeconds = 1800
+        var current = snapshot.simplified()
+        current.longExposure.maxBulbSeconds = 600
+        let restored = current.restoringAdvanced(from: snapshot)
+        XCTAssertEqual(restored.longExposure, snapshot.longExposure)
+        XCTAssertEqual(restored.restoringAdvanced(from: snapshot), restored)
     }
 
     func testGoingAdvancedAlwaysLeavesAFormatToSave() {
@@ -545,10 +575,18 @@ final class InterfaceLevelTests: XCTestCase {
             // The mode is where the person is, not a setting: it stays where the simple interface put it.
             expected.mode = simple.mode
             XCTAssertEqual(simple.restoringAdvanced(from: settings), expected)
-            // And the same simple settings again, should they turn it off once more.
-            XCTAssertEqual(simple.restoringAdvanced(from: settings).simplified(), simple)
         }
         XCTAssertEqual(advancedSetup().simplified().mode, .photo)
+    }
+
+    func testOnAndOffAgainLeavesTheSimpleInterfaceAsItWas() {
+        let setups = [CameraSettings.default, everythingChanged(), advancedSetup(), adjustedScene()]
+        for simple in setups.map({ $0.simplified() }) {
+            // Whatever the snapshot holds, its own or someone else's or none.
+            for snapshot in setups + [nil] {
+                XCTAssertEqual(simple.restoringAdvanced(from: snapshot).simplified(), simple)
+            }
+        }
     }
 
     func testWhatGoingSimpleNarrowedComesBack() {

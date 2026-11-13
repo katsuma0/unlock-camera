@@ -115,9 +115,10 @@ extension CameraSettings {
 
     /// These settings with the advanced interface on, taking back every advanced-only setting from `snapshot`,
     /// the settings as they were when the advanced interface was last turned off. Without a snapshot they start
-    /// from the defaults. Settings both interfaces share keep their current values, except where going simple had
-    /// to narrow one (a frame shape, timer or grid it doesn't offer, a RAW-only format, a long exposure set by
-    /// hand): that comes back too while it is still where narrowing left it. The mode stays where it is.
+    /// from the defaults. Settings both interfaces share keep their current values, except what going simple had
+    /// to narrow: a frame shape, timer or grid it doesn't offer, a RAW-only format, a long exposure set by hand or
+    /// a scene's time off its list. Each of those comes back while it is still where narrowing left it. The mode
+    /// stays where it is.
     public func restoringAdvanced(from snapshot: CameraSettings?) -> CameraSettings {
         var settings = self
         settings.copyAdvancedFields(from: snapshot ?? .default)
@@ -125,9 +126,12 @@ extension CameraSettings {
         if let snapshot {
             // A value that differs from the narrowed one was picked in the simple interface since, and stays.
             // The long exposure goes as a whole: a scene with another setup's blend or frame would be neither.
+            // Its bulb limit is an advanced setting, which like the rest of them has no say in the comparison.
             let narrowed = snapshot.simplified()
+            var current = self
+            current.copyAdvancedFields(from: narrowed)
             func restore<Value: Equatable>(_ path: WritableKeyPath<CameraSettings, Value>) {
-                if self[keyPath: path] == narrowed[keyPath: path] {
+                if current[keyPath: path] == narrowed[keyPath: path] {
                     settings[keyPath: path] = snapshot[keyPath: path]
                 }
             }

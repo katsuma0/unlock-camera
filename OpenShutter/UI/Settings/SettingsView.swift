@@ -1284,6 +1284,9 @@ private struct AboutSection: View {
             // readout. The simple one gets the defaults the way it runs them.
             settings = fresh.interface.advanced ? fresh : fresh.simplified()
         }
+        // The simple interface keeps the advanced one's settings put away for its switch to bring back. They are
+        // reset too, or turning the switch on later would undo this reset.
+        model.forgetAdvancedSettings()
         // An open dial would keep editing a value that just went back to auto, or a tint that no longer applies.
         model.activeDial = nil
         Haptics.success()

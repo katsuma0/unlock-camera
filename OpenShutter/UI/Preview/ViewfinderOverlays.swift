@@ -667,7 +667,8 @@ private struct ClippingBadge: View {
     private var analysisIsRunning: Bool {
         guard model.sessionState == .running else { return false }
         let display = model.settings.display
-        // Focus as the camera runs it, like the options: a scene that holds the lens at infinity counts as manual.
+        // Focus as the camera runs it, like the model's options: a scene that holds the lens at infinity counts
+        // as manual focus.
         let manualFocus = model.effectiveFocus.lensPosition != nil || model.activeDial == .focus
         let peaking = display.peaking == .always || (display.peaking == .manualFocus && manualFocus)
         return display.histogram != .off || display.zebras || display.falseColor || peaking || display.clippingWarnings

@@ -163,7 +163,8 @@ public enum LongExposureScene: String, Codable, Sendable, CaseIterable, Identifi
         case .northernLights: return "Short enough to keep the shapes in the sky. Needs a tripod."
         case .starTrails: return "Stars draw arcs across the sky. Tripod, and keep the phone charging."
         case .fireworks: return "Start as the rocket goes up. Needs a tripod."
-        case .lightPainting: return "Tap to start, draw with a light, tap to stop. Needs a tripod."
+        // The panel's own line already says how a scene without a set time starts and stops.
+        case .lightPainting: return "Draws the path of a light you move in the dark. Needs a tripod."
         case .custom: return "Your own blend, frame and exposure."
         }
     }

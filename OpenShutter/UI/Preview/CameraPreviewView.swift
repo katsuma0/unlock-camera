@@ -38,7 +38,8 @@ private struct ViewfinderAccessibility: ViewModifier {
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("Viewfinder")
             // Without a value VoiceOver says nothing after a swipe, so the change would go unheard.
-            .accessibilityValue((advanced ? "Exposure " : "Brightness ") + EVFormat.label(ViewfinderInteraction.currentBias(model)))
+            .accessibilityValue((advanced ? "Exposure " : "Brightness ")
+                + EVFormat.label(ViewfinderInteraction.currentBias(model)))
             .accessibilityHint(advanced
                 ? "Double tap to focus in the middle. Swipe up or down to change exposure."
                 : "Double tap to focus in the middle. Swipe up or down to change brightness.")
@@ -600,7 +601,8 @@ private struct AnalysisOverlay: View {
     private var showsOverlay: Bool {
         guard model.sessionState == .running else { return false }
         let display = model.settings.display
-        // Focus as the camera runs it: a scene that holds the lens at infinity is focused by hand as well.
+        // Focus as the camera runs it, like the model's options: a scene that holds the lens at infinity counts
+        // as manual focus.
         let manualFocus = model.effectiveFocus.lensPosition != nil || model.activeDial == .focus
         let peaking = display.peaking == .always || (display.peaking == .manualFocus && manualFocus)
         return display.zebras || display.falseColor || peaking

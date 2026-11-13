@@ -94,15 +94,18 @@ private struct UprightRotation: ViewModifier {
 struct GlassCircleButtonStyle: ButtonStyle {
     var size: CGFloat = Theme.controlSize
     var isActive = false
+    /// A press that lands on a layer above the button, such as its touch and hold menu.
+    var isPressed = false
 
     func makeBody(configuration: Configuration) -> some View {
+        let pressed = configuration.isPressed || isPressed
         configuration.label
             .font(.system(size: size * 0.42, weight: .semibold))
             .foregroundStyle(isActive ? Theme.accent : Theme.primaryText)
             .frame(width: size, height: size)
             .cameraGlass(in: Circle())
-            .scaleEffect(configuration.isPressed ? 0.9 : 1)
-            .animation(Theme.snappy, value: configuration.isPressed)
+            .scaleEffect(pressed ? 0.9 : 1)
+            .animation(Theme.snappy, value: pressed)
             .contentShape(Circle())
     }
 }
@@ -110,16 +113,70 @@ struct GlassCircleButtonStyle: ButtonStyle {
 /// Capsule glass chip for values like "ISO 400" or "4:3".
 struct GlassChipButtonStyle: ButtonStyle {
     var isActive = false
+    /// A press that lands on a layer above the chip, such as its touch and hold menu.
+    var isPressed = false
 
     func makeBody(configuration: Configuration) -> some View {
+        let pressed = configuration.isPressed || isPressed
         configuration.label
             .font(Theme.chipFont)
             .foregroundStyle(isActive ? Theme.accent : Theme.primaryText)
             .padding(.horizontal, 10)
             .frame(height: 28)
             .cameraGlass(in: Capsule())
-            .scaleEffect(configuration.isPressed ? 0.94 : 1)
-            .animation(Theme.snappy, value: configuration.isPressed)
+            .scaleEffect(pressed ? 0.94 : 1)
+            .animation(Theme.snappy, value: pressed)
             .contentShape(Capsule())
+    }
+}
+
+/// Touch and hold for a control whose tap does something else: a tap runs `action`, a hold lists `options`.
+///
+/// A clear button to lay over the control, which stays the ordinary view it was: its icon still turns with the
+/// phone, its value still rolls, and VoiceOver reads it with its own label, value and actions. Give the layer a
+/// view of its own whose inputs never change, and the control's redraws never reach the system's menu button.
+struct MenuOnHoldLayer<Options: View>: View {
+    let press: PressTracker
+    let action: () -> Void
+    @ViewBuilder let options: () -> Options
+
+    var body: some View {
+        Menu {
+            options()
+        } label: {
+            Color.clear
+                .contentShape(Rectangle())
+        } primaryAction: {
+            action()
+        }
+        .menuStyle(.button)
+        .buttonStyle(MenuOnHoldPressStyle(press: press))
+        .menuIndicator(.hidden)
+        // Rows read top to bottom in the order they are written, whichever way the menu opens.
+        .menuOrder(.fixed)
+        .accessibilityHidden(true)
+        // A layer that goes away under a finger never reports the lift.
+        .onDisappear { press.isPressed = false }
+    }
+}
+
+/// Whether a finger is down on a control's touch and hold layer, for the control's press feedback. A reference, so
+/// a press redraws the control and leaves the layer, with the menu button in it, as it was.
+@MainActor
+@Observable
+final class PressTracker {
+    var isPressed = false
+}
+
+/// Draws nothing of its own; it tells the control underneath when to look pressed.
+private struct MenuOnHoldPressStyle: ButtonStyle {
+    let press: PressTracker
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .contentShape(Rectangle())
+            .onChange(of: configuration.isPressed) { _, pressed in
+                press.isPressed = pressed
+            }
     }
 }
