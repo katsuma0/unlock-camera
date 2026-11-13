@@ -453,6 +453,37 @@ final class CameraSettingsTests: XCTestCase {
         XCTAssertEqual(longExposure(saved: #"{"scene":"custom"}"#).scene, .custom)
     }
 
+    func testASavedSceneTakesItsValuesFromTheRecipe() throws {
+        // As a version with another Fireworks recipe saved it. The scene, its time and the bulb limit are the
+        // save's; the rest is the recipe as it is now, so nothing reads as changed by hand and turns it into Custom.
+        let older = longExposure(saved: """
+            {"align":true,"blend":"average","bulb":true,"frameSeconds":0.25,"maxBulbSeconds":600,"scene":"fireworks","seconds":10}
+            """)
+        var expected = LongExposureSettings()
+        expected.apply(.fireworks)
+        expected.seconds = 10
+        expected.maxBulbSeconds = 600
+        XCTAssertEqual(older, expected)
+
+        // Every scene, from values none of them uses.
+        for scene in LongExposureScene.presets {
+            guard let recipe = scene.recipe else { return XCTFail("\(scene.rawValue) has a recipe") }
+            var settings = CameraSettings()
+            settings.longExposure.apply(scene)
+            settings.longExposure.seconds = 77
+            settings.longExposure.maxBulbSeconds = 600
+            settings.longExposure.blend = recipe.blend == .lighten ? .average : .lighten
+            settings.longExposure.bulb = !recipe.bulb
+            settings.longExposure.align = !recipe.align
+            settings.longExposure.frameSeconds = recipe.frameSeconds == nil ? 0.5 : nil
+            var wanted = LongExposureSettings()
+            wanted.apply(scene)
+            wanted.seconds = 77
+            wanted.maxBulbSeconds = 600
+            XCTAssertEqual(CameraSettings.decoded(from: try settings.encoded()).longExposure, wanted, scene.rawValue)
+        }
+    }
+
     func testEverySceneRoundTrips() throws {
         for scene in LongExposureScene.allCases {
             var settings = CameraSettings()

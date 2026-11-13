@@ -566,6 +566,15 @@ public struct LongExposureSettings: Codable, Hashable, Sendable {
         align = c.value(.align, default: d.align)
         maxBulbSeconds = c.value(.maxBulbSeconds, default: d.maxBulbSeconds)
         frameSeconds = c.value(.frameSeconds, default: d.frameSeconds)
+        // A scene is only ever saved with its recipe's values (anything else is Custom), so they come from the
+        // recipe as this version has it. One retuned since the save would otherwise read as set by hand, and the
+        // scene would turn into Custom at the next change of any setting.
+        if let recipe = scene.recipe {
+            blend = recipe.blend
+            bulb = recipe.bulb
+            frameSeconds = recipe.frameSeconds
+            align = recipe.align
+        }
     }
 }
 

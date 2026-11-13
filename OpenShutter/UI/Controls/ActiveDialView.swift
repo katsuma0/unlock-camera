@@ -48,9 +48,12 @@ private struct DialPanel: View {
         let locked = DialValues.isLocked(model.activity)
         let dimmed = DialValues.isDimmed(model.activity)
         VStack(spacing: 6) {
-            DialHeader(model: model, kind: kind)
+            // A shot in progress locks what would change the picture and never the way out: Done stays live, like
+            // the swipe and the escape gesture below.
+            DialHeader(model: model, kind: kind, isLocked: locked)
             if kind == .whiteBalance {
                 WhiteBalancePresetRow(model: model)
+                    .disabled(locked)
             }
             if scale.values.isEmpty {
                 Text(kind == .aperture ? "This lens has a fixed aperture." : "Not available on this camera.")
@@ -81,9 +84,9 @@ private struct DialPanel: View {
                     DialFollower(model: model, kind: kind, scale: scale, onTarget: follow)
                         .allowsHitTesting(false)
                 }
+                .disabled(locked)
             }
         }
-        .disabled(locked)
         .opacity(dimmed ? 0.45 : 1)
         .task(id: resyncToken) {
             await resync()
@@ -179,6 +182,7 @@ private struct DialFollower: View {
 private struct DialHeader: View {
     let model: CameraModel
     let kind: DialKind
+    let isLocked: Bool
 
     var body: some View {
         let readout = DialValues.readout(kind, model: model)
@@ -190,8 +194,13 @@ private struct DialHeader: View {
             isStacked: readout.isStacked,
             onAuto: readout.offersAuto ? {
                 Haptics.tap()
+                // Asked before the setter: once a value of the person's is given back the scene holds the control,
+                // and that tap did what AUTO says. The setter runs either way; it clears a value equal to the scene's.
+                let refusal = ControlHolder.autoRefusal(for: kind, model: model)
                 DialValues.setAuto(kind, model: model)
+                if let refusal { model.showToast(refusal) }
             } : nil,
+            isAutoEnabled: !isLocked,
             autoHint: readout.autoHint,
             onDone: {
                 DialValues.close(model)
@@ -257,7 +266,10 @@ private struct WhiteBalancePresetRow: View {
                 PresetButton(model: model, systemName: preset.symbolName, title: preset.title,
                              isSelected: Self.isSelected(preset, current: current)) {
                     Haptics.tick()
+                    // Auto answers like the header's AUTO while the scene holds the temperature.
+                    let refusal = preset == .auto ? ControlHolder.autoRefusal(for: .whiteBalance, model: model) : nil
                     model.setWhiteBalance(preset == .auto ? .auto : .preset(preset))
+                    if let refusal { model.showToast(refusal) }
                 }
             }
             PresetButton(model: model, systemName: "eyedropper", title: "Gray card", isSelected: false) {
@@ -470,7 +482,8 @@ private enum DialValues {
 
     /// The header of a control LONG's scene can hold. While the scene holds it, the value is neither auto nor the
     /// person's: the title names the scene ("Focus · Stars"), the value shows in white, and AUTO stays off. A tap
-    /// on AUTO then gets the model's word on why, and with a value of the person's it leads back to the scene's.
+    /// on AUTO then says that the scene sets the value and that Custom gives auto back; with a value of the
+    /// person's, AUTO leads back to the scene's.
     private static func sceneAware(_ kind: DialKind, value: String, offersAuto: Bool, model: CameraModel) -> Readout {
         let holder = ControlHolder.of(kind, model: model)
         var readout = Readout(title: kind.title, value: value, isAuto: holder == .camera, offersAuto: offersAuto, isStacked: false)
@@ -478,7 +491,7 @@ private enum DialValues {
         if holder == .scene {
             readout.title = kind.title + " \u{00B7} " + scene
             readout.isSetByPerson = false
-            readout.autoHint = "Has no effect while the scene sets this value."
+            readout.autoHint = ControlHolder.autoRefusal(for: kind, model: model)
         } else {
             readout.autoHint = "Returns \(kind.title.lowercased()) to the scene's setting."
         }

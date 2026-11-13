@@ -251,9 +251,12 @@ private struct ChipMenu: View {
     }
 
     private var tint: some View {
-        Section(kind.title) {
-            HoldMenuChoice("0", isOn: Formatting.tint(model.displayTint) == "0") {
-                model.setTint(0)
+        // A tint that already reads 0 is left alone: writing it would store the scene's or a preset's temperature as
+        // a white balance of the person's, which outlives the scene and holds in every mode.
+        let isZero = Formatting.tint(model.displayTint) == "0"
+        return Section(kind.title) {
+            HoldMenuChoice("0", isOn: isZero) {
+                if !isZero { model.setTint(0) }
             }
         }
     }

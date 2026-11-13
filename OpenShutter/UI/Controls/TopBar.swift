@@ -14,6 +14,8 @@ struct TopBar: View {
         let isRecording = activity == .recording
         // A focus or white balance bracket is one long capture that reads the settings again for every frame.
         let isHeld = Self.holdsControls(activity) || model.bracketInProgress
+        // The level switch brings the RAW chip in or out, animated like the controls under the viewfinder.
+        let advanced = model.isAdvanced
 
         ZStack {
             HStack(spacing: 0) {
@@ -58,6 +60,7 @@ struct TopBar: View {
         .animation(Theme.snappy, value: mode)
         .animation(Theme.snappy, value: isRecording)
         .animation(Theme.snappy, value: isHeld)
+        .animation(Theme.snappy, value: advanced)
     }
 
     /// Countdown, stacks and saving keep the bar visible but inert, so nothing changes under a running shot.
@@ -185,6 +188,13 @@ private struct TorchButton: View {
             .accessibilityLabel("Flashlight")
             .accessibilityValue(TorchBrightness.current(isOn: isOn, level: model.torchLevel).spokenValue)
             .accessibilityHint("Touch and hold for more options.")
+            // The menu layer is hidden from VoiceOver, and the tap only turns the light on or off, so the
+            // brightness steps would otherwise be out of reach.
+            .accessibilityActions {
+                ForEach(TorchBrightness.allCases) { choice in
+                    Button(choice.title) { Self.choose(choice, model: model) }
+                }
+            }
             .overlay {
                 BarTouchLayer(model: model, control: .torch, press: press)
             }
@@ -196,6 +206,15 @@ private struct TorchButton: View {
         // setTorch plays its own click.
         model.setTorch(!model.torchOn)
     }
+
+    /// The model clicks for both.
+    fileprivate static func choose(_ brightness: TorchBrightness, model: CameraModel) {
+        if let level = brightness.level {
+            model.setTorchLevel(level)
+        } else {
+            model.setTorch(false)
+        }
+    }
 }
 
 private struct TorchOptions: View {
@@ -203,21 +222,12 @@ private struct TorchOptions: View {
 
     var body: some View {
         let brightness = TorchBrightness.current(isOn: model.torchOn, level: model.torchLevel)
-        Picker("Flashlight", selection: Binding(get: { brightness }, set: { choose($0) })) {
+        Picker("Flashlight", selection: Binding(get: { brightness }, set: { TorchButton.choose($0, model: model) })) {
             ForEach(TorchBrightness.allCases) { choice in
                 Text(choice.title).tag(choice)
             }
         }
         .pickerStyle(.inline)
-    }
-
-    /// The model clicks for both.
-    private func choose(_ brightness: TorchBrightness) {
-        if let level = brightness.level {
-            model.setTorchLevel(level)
-        } else {
-            model.setTorch(false)
-        }
     }
 }
 
@@ -506,7 +516,8 @@ private struct TimerBadgeOptions: View {
             // A burst or an intervalometer is none of the plain delays, so no row is marked for it.
             let isCurrent = schedule.shots == 1 && abs(schedule.delay - delay) < 0.01
             Toggle(isOn: Binding(get: { isCurrent }, set: { _ in choose(delay) })) {
-                Text(delay > 0 ? Formatting.compactDuration(delay) : "Off")
+                // Worded like the other touch and hold menus; the badge itself keeps the compact "3s".
+                Text(delay > 0 ? HoldMenuText.time(delay) : "Off")
             }
         }
         if advanced {
@@ -753,6 +764,9 @@ private struct SettingsButtonOptions: View {
         Toggle(isOn: Binding(get: { advanced }, set: { setAdvanced($0) })) {
             Label("Advanced controls", systemImage: "slider.horizontal.3")
         }
+        // Off whenever the model would refuse, like the switch in Settings, so the menu never offers a change that
+        // only ends in a warning.
+        .disabled(!model.canChangeInterface)
         Button {
             SettingsButton.open(model)
         } label: {
@@ -763,7 +777,7 @@ private struct SettingsButtonOptions: View {
     private func setAdvanced(_ wanted: Bool) {
         Haptics.tap()
         model.setAdvanced(wanted)
-        // The model refuses while a shot is running and says so itself.
+        // A shot that starts while the menu is open still makes the model refuse, and it says so itself.
         guard model.isAdvanced == wanted else { return }
         // The menu is gone by now and the change can be easy to miss, so it is said, and read out by VoiceOver.
         model.showToast(wanted ? "Advanced controls on" : "Advanced controls off", symbol: "slider.horizontal.3")

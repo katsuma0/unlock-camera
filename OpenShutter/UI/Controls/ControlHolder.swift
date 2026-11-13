@@ -45,6 +45,16 @@ extension ControlHolder {
         sceneName(for: kind, model: model).map { $0 + " setting" } ?? auto
     }
 
+    /// What a tap on AUTO says while the scene holds the value. Giving the value back leaves it with the scene, so
+    /// nothing on screen would change; the message says who holds it and where auto is. nil wherever AUTO does
+    /// what it says.
+    static func autoRefusal(for kind: DialKind, model: CameraModel) -> String? {
+        guard of(kind, model: model) == .scene, let scene = sceneName(for: kind, model: model) else { return nil }
+        // ISO keeps its capitals. Only the advanced interface has the dials a scene can hold.
+        let control = kind == .iso ? "ISO" : kind.title.lowercased()
+        return "\(scene) sets the \(control). Pick Custom in the scene menu for auto."
+    }
+
     private static func isSetByPerson(_ kind: DialKind, model: CameraModel) -> Bool {
         let settings = model.settings
         // PHOTO and NIGHT expose on auto, whatever MANUAL left in the shared values.
@@ -58,7 +68,8 @@ extension ControlHolder {
             return exposesByHand && model.capabilities.supportsVariableAperture && settings.manual.aperture != nil
         case .whiteBalance, .tint:
             // Judged from what the camera runs, as everything on screen is. A value equal to the scene's own
-            // counts as the scene's: giving it back would change nothing.
+            // counts as the scene's: giving it back would change nothing. The model never stores such a value
+            // while the scene runs, so one that is there was set before the scene came on.
             let running = model.effectiveWhiteBalance
             if running.isAuto { return false }
             guard sceneName(for: kind, model: model) != nil, let scene = model.sceneRecipe?.kelvin,
@@ -67,7 +78,7 @@ extension ControlHolder {
         case .focus:
             guard let position = model.effectiveFocus.lensPosition else { return false }
             guard sceneName(for: kind, model: model) != nil else { return true }
-            // Scenes that hold focus park the lens at the far end.
+            // Scenes that hold focus park the lens at the far end, so a far end counts as theirs, as above.
             return position < 1
         case .bias, .zoom:
             return false

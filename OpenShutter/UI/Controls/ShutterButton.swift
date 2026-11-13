@@ -278,7 +278,8 @@ struct ShutterButton: View {
         case .stacking: return "Stop exposure"
         case .night: return "Take night photo"
         case .long: return "Take long exposure"
-        case .countdown: return "Cancel timer"
+        // A scene's wait for the phone to settle counts down here too, with no timer set.
+        case .countdown: return "Cancel"
         }
     }
 

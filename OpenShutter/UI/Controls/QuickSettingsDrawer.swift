@@ -407,8 +407,9 @@ struct QuickSettingsDrawer: View {
         return "\(schedule.shots) shots"
     }
 
+    /// A menu row, worded like the other touch and hold menus ("3 s"); the item's own value stays compact.
     private static func delayTitle(_ delay: Double) -> String {
-        delay > 0 ? Formatting.compactDuration(delay) : "Off"
+        delay > 0 ? HoldMenuText.time(delay) : "Off"
     }
 
     private static func formatValue(_ format: ProcessedFormat) -> String {

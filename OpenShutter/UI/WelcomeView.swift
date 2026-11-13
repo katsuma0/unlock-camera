@@ -5,17 +5,21 @@ import SwiftUI
 struct WelcomeView: View {
     let model: CameraModel
     @State private var isShown = false
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
         GeometryReader { proxy in
             // Large text sizes can outgrow the screen, so the page scrolls; when it fits, it sits in the middle.
             ScrollView {
                 VStack(spacing: 0) {
-                    Image(systemName: "camera.aperture")
-                        .font(.system(size: 56, weight: .light))
-                        .foregroundStyle(Theme.accent)
-                        .padding(.bottom, 20)
-                        .accessibilityHidden(true)
+                    // Decoration only. At accessibility sizes it would push the answers further below the fold.
+                    if !dynamicTypeSize.isAccessibilitySize {
+                        Image(systemName: "camera.aperture")
+                            .font(.system(size: 56, weight: .light))
+                            .foregroundStyle(Theme.accent)
+                            .padding(.bottom, 20)
+                            .accessibilityHidden(true)
+                    }
                     Text("Open Shutter")
                         .font(.largeTitle.weight(.bold))
                         .foregroundStyle(Theme.primaryText)
@@ -51,6 +55,8 @@ struct WelcomeView: View {
                 .frame(maxWidth: .infinity, minHeight: proxy.size.height)
             }
             .scrollBounceBehavior(.basedOnSize)
+            // A scroll view shows no indicator until it moves, and at the largest sizes both cards start off screen.
+            .scrollIndicatorsFlash(onAppear: true)
         }
         .background(Theme.background.ignoresSafeArea())
         .opacity(isShown ? 1 : 0)

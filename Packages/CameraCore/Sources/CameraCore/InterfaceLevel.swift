@@ -116,9 +116,9 @@ extension CameraSettings {
     /// These settings with the advanced interface on, taking back every advanced-only setting from `snapshot`,
     /// the settings as they were when the advanced interface was last turned off. Without a snapshot they start
     /// from the defaults. Settings both interfaces share keep their current values, except what going simple had
-    /// to narrow: a frame shape, timer or grid it doesn't offer, a RAW-only format, a long exposure set by hand or
-    /// a scene's time off its list. Each of those comes back while it is still where narrowing left it. The mode
-    /// stays where it is.
+    /// to narrow: MANUAL mode, a frame shape, timer or grid it doesn't offer, a RAW-only format or a scene's time
+    /// off its list. Each of those comes back while it is still where narrowing left it, MANUAL while the mode is
+    /// still PHOTO. A long exposure set by hand comes back whatever the simple interface picked since.
     public func restoringAdvanced(from snapshot: CameraSettings?) -> CameraSettings {
         var settings = self
         settings.copyAdvancedFields(from: snapshot ?? .default)
@@ -135,11 +135,19 @@ extension CameraSettings {
                     settings[keyPath: path] = snapshot[keyPath: path]
                 }
             }
+            // MANUAL is the one mode narrowing changes.
+            restore(\.mode)
             restore(\.capture.processedFormat)
             restore(\.capture.aspect)
             restore(\.capture.schedule)
             restore(\.display.grid)
-            restore(\.longExposure)
+            // Custom can't be picked in the simple interface, so like a manual ISO it is the advanced interface's
+            // own and comes back whatever scene or time the simple one picked since. A scene keeps the rule above.
+            if snapshot.longExposure.scene == .custom {
+                settings.longExposure = snapshot.longExposure
+            } else {
+                restore(\.longExposure)
+            }
         }
         if !settings.capture.isValid {
             settings.capture.processedFormat = .heif

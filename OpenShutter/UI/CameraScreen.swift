@@ -660,6 +660,7 @@ private struct ExposureChip: View {
         let isAdjusted = abs(bias) >= 0.05
         let isOpen = model.activeDial == .bias
         let isShown = advanced || isAdjusted || isOpen
+        let locked = Self.isLocked(model.activity)
 
         ZStack {
             if isShown {
@@ -698,6 +699,9 @@ private struct ExposureChip: View {
                 .overlay {
                     ExposureChipTouchLayer(model: model, press: press)
                 }
+                // Locked along with the strip and the dial it opens, menu included: a bracket takes each frame at the
+                // current exposure. Not dimmed, because every single photo passes through .capturing as well.
+                .disabled(locked)
                 .transition(.opacity.combined(with: .scale(scale: 0.8)))
             }
         }
@@ -723,6 +727,14 @@ private struct ExposureChip: View {
     /// NIGHT keeps its own compensation; setBias and the dial follow the mode the same way.
     fileprivate static func bias(_ model: CameraModel) -> Double {
         model.settings.mode == .night ? model.settings.night.biasEV : model.settings.manual.bias
+    }
+
+    /// Changing exposure while a shot, a stack or a bracket runs would end up in the picture.
+    private static func isLocked(_ activity: CaptureActivity) -> Bool {
+        switch activity {
+        case .capturing, .stacking, .saving: return true
+        case .idle, .countdown, .recording: return false
+        }
     }
 }
 

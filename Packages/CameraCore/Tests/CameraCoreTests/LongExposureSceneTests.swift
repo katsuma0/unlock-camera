@@ -122,6 +122,23 @@ final class LongExposureSceneTests: XCTestCase {
         }
     }
 
+    func testTipsSayWhatTheShotNeedsBeforeItStarts() {
+        // Locking the phone ends the exposure early, and half an hour invites it.
+        XCTAssertTrue(LongExposureScene.starTrails.tip.contains("unlocked"), LongExposureScene.starTrails.tip)
+        // Focus is held from the moment the shot starts, and in the dark autofocus has little to find. Touch and
+        // hold is what sets and keeps it in this scene.
+        let painting = LongExposureScene.lightPainting.tip.lowercased()
+        XCTAssertTrue(painting.contains("touch and hold") && painting.contains("focus"), painting)
+    }
+
+    func testTipsFitTheTwoLinesUnderTheScenes() {
+        // Two lines of a 375 point wide phone hold about 90 characters at the largest text the panel allows,
+        // shrunk as far as it lets them.
+        for scene in LongExposureScene.allCases {
+            XCTAssertLessThanOrEqual(scene.tip.count, 90, scene.tip)
+        }
+    }
+
     func testSymbolListsAreUsable() {
         for scene in LongExposureScene.allCases {
             let names = scene.symbolNames

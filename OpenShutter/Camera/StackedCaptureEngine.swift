@@ -125,7 +125,7 @@ final class StackedCaptureEngine: @unchecked Sendable {
             throw CameraError.cancelled
         }
         if current.isDelivered {
-            throw CameraError.captureFailed("The merged photo was already delivered.")
+            throw CameraError.captureFailed("The picture was already made.")
         }
         if let failure = current.failure {
             releaseResources()
@@ -133,7 +133,7 @@ final class StackedCaptureEngine: @unchecked Sendable {
         }
         guard let accumulator, current.framesAccumulated > 0 else {
             releaseResources()
-            throw CameraError.captureFailed("No frames were captured.")
+            throw CameraError.captureFailed("Nothing was captured.")
         }
 
         let plan = configuration.plan
@@ -167,7 +167,7 @@ final class StackedCaptureEngine: @unchecked Sendable {
         guard let rendered else {
             // The frames stay for another try (see renderFinal); cancel() or the engine's release frees them.
             Self.log.error("Final render of \(current.framesAccumulated) stacked frames failed; they are kept")
-            throw CameraError.captureFailed("Couldn't render the merged photo.")
+            throw CameraError.captureFailed("The picture couldn't be put together.")
         }
         // The photo is about to be encoded, which needs memory of its own, so the float buffer goes now.
         releaseResources()
@@ -262,7 +262,7 @@ final class StackedCaptureEngine: @unchecked Sendable {
         // Only the first frame may create it: a fresh accumulator later would blend frames into nothing.
         if accumulator == nil, framesSoFar == 0 {
             guard let made = Self.makeAccumulator(extent: extent, blend: plan.blend) else {
-                return .failed("There isn't enough memory to merge the frames.")
+                return .failed("There isn't enough memory for this exposure.")
             }
             accumulator = made
         }

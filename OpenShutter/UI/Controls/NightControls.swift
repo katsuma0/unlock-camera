@@ -481,8 +481,10 @@ private struct NightChipLook: ViewModifier {
 
 private enum NightText {
     static let handheldHint = "Hold still until it finishes."
-    /// The longest duration follows the planner's range.
-    static let steadyHint = "On a tripod it can run up to \(Int(NightModePlanner.secondsRange.upperBound)) s."
+    /// Stability stays on automatic here, which never assumes a tripod, so however still the phone is the
+    /// automatic duration stops at the steady limit. The longer times are on the moon's dial, up to the end of the
+    /// planner's range.
+    static let steadyHint = "Steady. Tap the moon to set up to \(Int(NightModePlanner.secondsRange.upperBound)) s."
 
     /// "Auto · 3s" or "10s".
     static func duration(_ seconds: Double, isAuto: Bool) -> String {

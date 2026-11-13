@@ -13,7 +13,8 @@ struct ViewfinderOverlays: View {
     /// The focus point the flags around it describe. A model.focusPoint that differs is a tap this view hasn't
     /// caught up with yet (change handlers run after the frame that shows it), so that frame reads the model alone.
     @State private var trackedFocusPoint: CGPoint?
-    /// The long press that placed the tracked point also locked exposure, so the square carries the lock.
+    /// The long press that placed the tracked point also locked the focus, the exposure or both, so the square
+    /// carries the lock.
     @State private var lockIsAtFocusPoint = false
 
     var body: some View {
@@ -34,12 +35,12 @@ struct ViewfinderOverlays: View {
         .onChange(of: model.focusPoint, initial: true) { _, point in
             trackedFocusPoint = point
             if focusPointIsStale { focusPointIsStale = false }
-            let locked = point != nil && model.aeLocked
+            let locked = point != nil && isLocked
             if lockIsAtFocusPoint != locked { lockIsAtFocusPoint = locked }
         }
         // The model keeps the point of a released lock. Locking again later (the AE-L chip) isn't tied to that old
         // square: it shows as the corner badge and must not bring the square back.
-        .onChange(of: model.aeLocked) { _, locked in
+        .onChange(of: isLocked) { _, locked in
             if !locked && lockIsAtFocusPoint { lockIsAtFocusPoint = false }
         }
         // The square marks a spot in the picture; zooming or switching lens moves the picture under it.
@@ -64,13 +65,19 @@ struct ViewfinderOverlays: View {
         var lensID: String?
     }
 
+    /// Either half of a lock keeps the square: a long press in a scene that fixes the ISO holds the focus alone,
+    /// and the shots after it are taken at that distance.
+    private var isLocked: Bool {
+        model.aeLocked || model.focusLocked
+    }
+
     /// The focus square to draw, or nil.
     private var focusSquare: FocusSquare? {
         guard let point = model.focusPoint else { return nil }
-        // A tap clears the AE lock and a long press sets it, so a new point that arrives locked is a long press.
-        guard point == trackedFocusPoint else { return FocusSquare(point: point, isLocked: model.aeLocked) }
+        // A tap clears the lock and a long press sets it, so a new point that arrives locked is a long press.
+        guard point == trackedFocusPoint else { return FocusSquare(point: point, isLocked: isLocked) }
         guard !focusPointIsStale else { return nil }
-        return FocusSquare(point: point, isLocked: model.aeLocked && lockIsAtFocusPoint)
+        return FocusSquare(point: point, isLocked: isLocked && lockIsAtFocusPoint)
     }
 
     /// Photos are cropped to the chosen ratio; video keeps the whole frame.
@@ -407,10 +414,38 @@ private struct LevelGraphic: View {
 
 // MARK: - Focus reticle
 
-/// Where the focus square sits and whether it carries the AE/AF lock.
+/// Where the focus square sits and whether it carries the long press's lock.
 private struct FocusSquare: Equatable {
     var point: CGPoint
     var isLocked: Bool
+}
+
+/// Names a lock by what it holds, in the words of the model's lock toasts: the advanced interface the way cameras
+/// do, the simple one in plain words. A long press holds the focus and the exposure, or only the one of them still
+/// left to the camera; the AE-L chip holds the exposure alone.
+private struct LockWording {
+    let focus: Bool
+    let exposure: Bool
+    let advanced: Bool
+
+    var badgeLabel: String {
+        if advanced {
+            return focus && exposure ? "AE/AF LOCK" : (exposure ? "AE LOCK" : "AF LOCK")
+        }
+        return focus && exposure ? "Focus and brightness locked" : (exposure ? "Brightness locked" : "Focus locked")
+    }
+
+    /// One short word on the square for a full lock in the simple interface: the square and the sun beside it
+    /// show what is held, and a longer label would run off the picture next to its edges. A lock of only one of
+    /// them names it, because the square and the sun would claim both.
+    var squareLabel: String {
+        !advanced && focus && exposure ? "Locked" : badgeLabel
+    }
+
+    var spokenLabel: String {
+        guard advanced else { return badgeLabel }
+        return focus && exposure ? "Exposure and focus locked" : (exposure ? "Exposure locked" : "Focus locked")
+    }
 }
 
 private struct FocusReticleLayer: View {
@@ -425,7 +460,7 @@ private struct FocusReticleLayer: View {
                 let turns = model.motion.quarterTurns
                 FocusReticle(
                     isLocked: square.isLocked,
-                    isAdvanced: model.isAdvanced,
+                    lock: LockWording(focus: model.focusLocked, exposure: model.aeLocked, advanced: model.isAdvanced),
                     bias: Self.bias(model),
                     quarterTurns: turns,
                     labelBelow: labelBelow(square.point, turns: turns)
@@ -457,8 +492,8 @@ private struct FocusReticleLayer: View {
 
 private struct FocusReticle: View {
     let isLocked: Bool
-    /// The advanced interface names the lock the way cameras do; the simple one says it in plain words.
-    let isAdvanced: Bool
+    /// The label says what is held, so a hold of the focus alone doesn't read as one of the brightness too.
+    let lock: LockWording
     /// Exposure compensation. The square stays bright while it changes, as the Camera app's does while its sun
     /// is dragged; CameraPreviewView keeps the sun up by the same rule.
     let bias: Double
@@ -481,9 +516,7 @@ private struct FocusReticle: View {
                 .opacity(faded ? (isLocked ? 0.6 : 0) : 1)
                 .accessibilityHidden(true)
             if isLocked {
-                // One short word in the simple interface: the square and the sun beside it show what is held, and
-                // a longer label would run off the picture next to its edges.
-                Text(isAdvanced ? "AE/AF LOCK" : "Locked")
+                Text(lock.squareLabel)
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(Color.black)
                     .padding(.horizontal, 8)
@@ -493,7 +526,7 @@ private struct FocusReticle: View {
                     .offset(y: (labelBelow ? 1 : -1) * (Self.side / 2 + 16))
                     .transition(.opacity)
                     // The corner lock badge steps aside while this label shows, so VoiceOver needs this one.
-                    .accessibilityLabel(isAdvanced ? "Exposure and focus locked" : "Focus and brightness locked")
+                    .accessibilityLabel(lock.spokenLabel)
             }
         }
         .shadow(color: .black.opacity(0.3), radius: 1)
@@ -545,7 +578,7 @@ private struct ReticleShape: Shape {
 private struct StatusBadges: View {
     let model: CameraModel
     let rect: CGRect
-    /// The focus square is on screen with its own AE/AF LOCK label.
+    /// The focus square is on screen with its own lock label.
     let reticleShowsLock: Bool
 
     var body: some View {
@@ -553,7 +586,10 @@ private struct StatusBadges: View {
         // How a long shutter is built is the advanced interface's business. In the simple one LONG would wear this
         // badge nearly all the time, for a word it never explains.
         let stacked = advanced && model.shutterIsStacked
-        let exposureLocked = model.aeLocked && !reticleShowsLock
+        let lock = LockWording(focus: model.focusLocked, exposure: model.aeLocked, advanced: advanced)
+        // Stands in for the square's label when the square is gone: a zoom moved the picture under it, or the AE-L
+        // chip locked without one.
+        let showsLock = (lock.focus || lock.exposure) && !reticleShowsLock
         let turns = model.motion.quarterTurns
         VStack(alignment: .trailing, spacing: 0) {
             if stacked {
@@ -561,10 +597,8 @@ private struct StatusBadges: View {
                     .padding(.bottom, 6)
                     .transition(.opacity)
             }
-            if exposureLocked {
-                // The simple interface only locks with touch and hold, which holds the focus too.
-                StatusBadge(symbol: "lock.fill", text: advanced ? "AE LOCK" : "Focus and brightness locked",
-                            tint: Theme.accent, quarterTurns: turns)
+            if showsLock {
+                StatusBadge(symbol: "lock.fill", text: lock.badgeLabel, tint: Theme.accent, quarterTurns: turns)
                     .padding(.bottom, 6)
                     .transition(.opacity)
             }
@@ -576,7 +610,7 @@ private struct StatusBadges: View {
         .frame(width: max(rect.width, 0), height: max(rect.height, 0), alignment: .topTrailing)
         .position(x: rect.midX, y: rect.midY)
         .animation(Theme.snappy, value: stacked)
-        .animation(Theme.snappy, value: exposureLocked)
+        .animation(Theme.snappy, value: showsLock)
         // The Camera Control overlay takes over the screen; the badges step aside while it shows.
         .opacity(model.controlsFullscreen ? 0 : 1)
         .animation(Theme.snappy, value: model.controlsFullscreen)

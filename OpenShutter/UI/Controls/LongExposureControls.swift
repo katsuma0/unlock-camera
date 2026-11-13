@@ -137,7 +137,9 @@ private struct AdvancedLongPanel: View {
                         .transition(.opacity)
                 } else {
                     Spacer(minLength: 4)
-                    FrameMenu(model: model, frameSeconds: long.frameSeconds, range: model.capabilities.exposure.seconds)
+                    // The frame the shot will use, which for a scene that closes the iris is longer than its own.
+                    FrameMenu(model: model, frameSeconds: model.longFrameSeconds,
+                              range: model.capabilities.exposure.seconds)
                         .transition(.opacity)
                 }
             }
@@ -374,7 +376,9 @@ private struct FrameMenu: View {
         let fixed = clamped.map { ShutterSpeed(seconds: $0) }
         let text = fixed?.label ?? "Auto"
         Menu {
-            Picker("Frame shutter", selection: Binding(get: { checked }, set: select)) {
+            // The checked stop can stand for a scene's frame that sits between stops. Picking it again keeps the
+            // scene instead of turning it into Custom at that stop.
+            Picker("Frame shutter", selection: Binding(get: { checked }, set: { if $0 != checked { select($0) } })) {
                 Text("Auto").tag(Double?.none)
                 ForEach(speeds, id: \.self) { speed in
                     Text(speed.label).tag(Double?.some(speed.seconds))

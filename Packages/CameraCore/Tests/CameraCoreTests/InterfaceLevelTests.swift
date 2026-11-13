@@ -113,13 +113,13 @@ final class InterfaceLevelTests: XCTestCase {
         return s
     }
 
-    /// A scene left as picked, apart from a time off its list and alignment turned on in Settings.
+    /// A scene left as picked, apart from a time off its list from the advanced dial. Any other value changed by
+    /// hand would have made it Custom.
     private func adjustedScene() -> CameraSettings {
         var s = everythingChanged()
         s.mode = .long
         s.longExposure.apply(.stars)
         s.longExposure.seconds = 25
-        s.longExposure.align = true
         return s
     }
 
@@ -503,7 +503,9 @@ final class InterfaceLevelTests: XCTestCase {
         let before = leaves(of: current)
         for snapshot in [everythingChanged(), advancedSetup(), adjustedScene(), nil] {
             let after = leaves(of: current.restoringAdvanced(from: snapshot))
-            for path in shared.sorted() {
+            // Apart from a long exposure set by hand, which only the advanced interface makes (tested below).
+            let handMade = snapshot?.longExposure.scene == .custom
+            for path in shared.sorted() where !(handMade && path.hasPrefix("longExposure.")) {
                 XCTAssertEqual(after[path], before[path], path)
             }
         }
@@ -542,8 +544,9 @@ final class InterfaceLevelTests: XCTestCase {
 
     func testTheBulbLimitHasNoSayInWhatComesBack() {
         // The limit is an advanced setting kept among the long exposure's values. Settings holding another limit
-        // than the simple interface runs still count as untouched, the first time and every time after.
-        var snapshot = advancedSetup()
+        // than the simple interface runs still count as untouched, the first time and every time after. On a
+        // scene, since a long exposure set by hand comes back either way.
+        var snapshot = adjustedScene()
         snapshot.longExposure.maxBulbSeconds = 1800
         var current = snapshot.simplified()
         current.longExposure.maxBulbSeconds = 600
@@ -571,11 +574,8 @@ final class InterfaceLevelTests: XCTestCase {
         var advancedDefaults = CameraSettings.default
         advancedDefaults.interface.advanced = true
         for settings in [everythingChanged(), advancedSetup(), adjustedScene(), advancedDefaults] {
-            let simple = settings.simplified()
-            var expected = settings
-            // The mode is where the person is, not a setting: it stays where the simple interface put it.
-            expected.mode = simple.mode
-            XCTAssertEqual(simple.restoringAdvanced(from: settings), expected)
+            // MANUAL included: the simple interface put it on PHOTO, and nothing has moved it since.
+            XCTAssertEqual(settings.simplified().restoringAdvanced(from: settings), settings)
         }
         XCTAssertEqual(advancedSetup().simplified().mode, .photo)
     }
@@ -585,7 +585,13 @@ final class InterfaceLevelTests: XCTestCase {
         for simple in setups.map({ $0.simplified() }) {
             // Whatever the snapshot holds, its own or someone else's or none.
             for snapshot in setups + [nil] {
-                XCTAssertEqual(simple.restoringAdvanced(from: snapshot).simplified(), simple)
+                var expected = simple
+                // Apart from a long exposure set by hand: it comes back over the simple interface's own, and going
+                // simple again puts it on Water, as the first time.
+                if let snapshot, snapshot.longExposure.scene == .custom {
+                    expected.longExposure = snapshot.simplified().longExposure
+                }
+                XCTAssertEqual(simple.restoringAdvanced(from: snapshot).simplified(), expected)
             }
         }
     }
@@ -593,6 +599,7 @@ final class InterfaceLevelTests: XCTestCase {
     func testWhatGoingSimpleNarrowedComesBack() {
         let snapshot = advancedSetup()
         let simple = snapshot.simplified()
+        XCTAssertEqual(simple.mode, .photo)
         XCTAssertEqual(simple.capture.aspect, .fourThree)
         XCTAssertEqual(simple.capture.schedule, CaptureSchedule(delay: 10))
         XCTAssertEqual(simple.display.grid, .thirds)
@@ -600,6 +607,7 @@ final class InterfaceLevelTests: XCTestCase {
         XCTAssertEqual(simple.capture.processedFormat, .heif)
 
         let restored = simple.restoringAdvanced(from: snapshot)
+        XCTAssertEqual(restored.mode, .manual)
         XCTAssertEqual(restored.capture.aspect, .xpan)
         XCTAssertEqual(restored.capture.schedule, CaptureSchedule(delay: 30, shots: 20, interval: 30))
         XCTAssertEqual(restored.display.grid, .goldenRatio)
@@ -608,7 +616,7 @@ final class InterfaceLevelTests: XCTestCase {
         XCTAssertEqual(restored.capture.processedFormat, .none)
         XCTAssertEqual(restored.capture.rawFormat, .proRAW)
 
-        // A scene's own time and alignment too.
+        // A scene's own time too.
         let scene = adjustedScene()
         XCTAssertEqual(scene.simplified().longExposure.seconds, 20)
         XCTAssertEqual(scene.simplified().restoringAdvanced(from: scene).longExposure, scene.longExposure)
@@ -621,25 +629,47 @@ final class InterfaceLevelTests: XCTestCase {
         let partly = simple.restoringAdvanced(from: snapshot)
         XCTAssertEqual(partly.capture.aspect, .square)
         // The ones left alone still come back.
+        XCTAssertEqual(partly.mode, .manual)
         XCTAssertEqual(partly.display.grid, .goldenRatio)
         XCTAssertEqual(partly.capture.schedule, snapshot.capture.schedule)
         XCTAssertEqual(partly.longExposure, snapshot.longExposure)
         XCTAssertEqual(partly.capture.processedFormat, .none)
 
+        simple.mode = .night
         simple.capture.processedFormat = .jpeg
         simple.capture.schedule = .off
         simple.display.grid = .off
         simple.longExposure.apply(.stars)
         let changed = simple.restoringAdvanced(from: snapshot)
+        XCTAssertEqual(changed.mode, .night)
         XCTAssertEqual(changed.capture.aspect, .square)
         XCTAssertEqual(changed.capture.processedFormat, .jpeg)
         XCTAssertEqual(changed.capture.rawFormat, .proRAW)
         XCTAssertEqual(changed.capture.schedule, .off)
         XCTAssertEqual(changed.display.grid, .off)
-        XCTAssertEqual(changed.longExposure.scene, .stars)
-        XCTAssertEqual(changed.longExposure.blend, .additive)
-        // The bulb limit is an advanced setting of its own and comes back either way.
-        XCTAssertEqual(changed.longExposure.maxBulbSeconds, 600)
+        // Except the long exposure set by hand, which the simple interface has no way to make: it comes back over
+        // the scene picked since.
+        XCTAssertEqual(changed.longExposure, snapshot.longExposure)
+    }
+
+    func testManualComesBackWhileTheModeIsStillPhoto() {
+        // Going simple put MANUAL on PHOTO. Another mode picked since is where the person is now, and stays.
+        let snapshot = advancedSetup()
+        for mode in CaptureMode.carouselOrder(advanced: false) {
+            var simple = snapshot.simplified()
+            simple.mode = mode
+            XCTAssertEqual(simple.restoringAdvanced(from: snapshot).mode, mode == .photo ? .manual : mode, mode.rawValue)
+        }
+        // A snapshot in any other mode leaves the mode where it is.
+        for saved in CaptureMode.allCases where saved != .manual {
+            var other = snapshot
+            other.mode = saved
+            for mode in CaptureMode.carouselOrder(advanced: false) {
+                var simple = other.simplified()
+                simple.mode = mode
+                XCTAssertEqual(simple.restoringAdvanced(from: other).mode, mode, "\(saved.rawValue) \(mode.rawValue)")
+            }
+        }
     }
 
     func testALongExposureComesBackWholeOrNotAtAll() {
@@ -650,8 +680,51 @@ final class InterfaceLevelTests: XCTestCase {
         let restored = simple.restoringAdvanced(from: snapshot).longExposure
         XCTAssertEqual(restored.scene, .stars)
         XCTAssertEqual(restored.seconds, 30)
-        // Bringing back alignment alone would mix two setups.
-        XCTAssertFalse(restored.align)
+
+        // Another scene on the time narrowing left: bringing back the time alone would give Fireworks the 12 s
+        // that Light trails had.
+        var trails = everythingChanged()
+        trails.longExposure.apply(.lightTrails)
+        trails.longExposure.seconds = 12
+        var fireworks = trails.simplified()
+        XCTAssertEqual(fireworks.longExposure.seconds, 10)
+        fireworks.longExposure.apply(.fireworks)
+        fireworks.longExposure.seconds = 10
+        let picked = fireworks.restoringAdvanced(from: trails).longExposure
+        XCTAssertEqual(picked.scene, .fireworks)
+        XCTAssertEqual(picked.seconds, 10)
+    }
+
+    func testALongExposureSetByHandComesBackWhateverWasPickedSince() {
+        // Trails for twenty minutes, one second frames, no alignment: five controls on the advanced panel, where a
+        // scene or a time on the simple one takes a tap to have again.
+        var snapshot = everythingChanged()
+        snapshot.mode = .long
+        snapshot.longExposure.scene = .custom
+        snapshot.longExposure.blend = .lighten
+        snapshot.longExposure.seconds = 1200
+        snapshot.longExposure.bulb = false
+        snapshot.longExposure.frameSeconds = 1
+        snapshot.longExposure.align = false
+        let simple = snapshot.simplified()
+        XCTAssertEqual(simple.longExposure.scene, .water)
+        var longer = simple
+        longer.longExposure.seconds = 4
+        var stars = simple
+        stars.longExposure.apply(.stars)
+        for current in [simple, longer, stars] {
+            let restored = current.restoringAdvanced(from: snapshot)
+            XCTAssertEqual(restored.longExposure, snapshot.longExposure)
+            XCTAssertEqual(restored.restoringAdvanced(from: snapshot), restored)
+        }
+
+        // A scene the advanced interface was left on is the simple interface's to change, and the change stays.
+        let scene = adjustedScene()
+        var picked = scene.simplified()
+        picked.longExposure.apply(.fireworks)
+        let kept = picked.restoringAdvanced(from: scene).longExposure
+        XCTAssertEqual(kept.scene, .fireworks)
+        XCTAssertEqual(kept.seconds, LongExposureScene.fireworks.recipe?.seconds)
     }
 
     func testASaveFromBeforeTheSimpleInterfaceComesBackWhole() throws {
@@ -669,7 +742,6 @@ final class InterfaceLevelTests: XCTestCase {
         XCTAssertEqual(simple.longExposure, LongExposureSettings())
 
         var expected = loaded
-        expected.mode = .photo
         expected.interface.advanced = true
         expected.interface.welcomed = true
         XCTAssertEqual(simple.restoringAdvanced(from: loaded), expected)

@@ -576,6 +576,9 @@ struct DialValueHeader: View {
     /// The value is built from several frames, which the STACK badge beside it says.
     var isStacked: Bool = false
     var onAuto: (() -> Void)? = nil
+    /// False while a shot runs and a change would end up in the picture. Only AUTO locks: Done beside it changes
+    /// nothing in the picture, so the way out stays open.
+    var isAutoEnabled: Bool = true
     /// What VoiceOver says AUTO does while it is off. nil for the usual return to automatic.
     var autoHint: String? = nil
     var onDone: (() -> Void)? = nil
@@ -667,6 +670,7 @@ struct DialValueHeader: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .disabled(!isAutoEnabled)
             .accessibilityLabel(Text("Auto"))
             .accessibilityValue(Text(isAuto ? "On" : "Off"))
             .accessibilityHint(Text(isAuto ? "" : autoHint ?? "Returns \(title.lowercased()) to automatic."))
@@ -735,7 +739,8 @@ private struct DialDismissal: ViewModifier {
     let close: () -> Void
 
     @GestureState private var isTouching = false
-    /// Whether this touch set off downward. nil until it has moved far enough to tell.
+    /// Whether this touch can still close the panel: it set off downward and the ruler hasn't taken it. nil until
+    /// it has moved far enough to tell.
     @State private var swipesDown: Bool?
 
     /// How far down a swipe travels before the panel closes.
@@ -769,8 +774,11 @@ private struct DialDismissal: ViewModifier {
                     // a scrub.
                     swipesDown = down > across
                 }
-                // Still mostly downward at the end: a swipe that turned into a scrub on the way is left to the ruler.
-                guard swipesDown == true, down >= Self.closeDistance, down > across else { return }
+                // The ruler starts scrubbing the first time the same translation is at least as sideways as it is
+                // down. From then on the touch is the ruler's for good, so a swipe never both moves the value and
+                // closes the dial.
+                if across >= down { swipesDown = false }
+                guard swipesDown == true, down >= Self.closeDistance else { return }
                 // Once per touch: the panel stays under the finger while it animates away.
                 swipesDown = false
                 close()
