@@ -86,6 +86,7 @@ final class CameraSettingsTests: XCTestCase {
         s.night.alignFrames = false
         s.night.maxISO = 1600
         s.night.biasEV = 0.3
+        s.longExposure.scene = .custom
         s.longExposure.seconds = 120
         s.longExposure.blend = .lighten
         s.longExposure.bulb = true
@@ -105,6 +106,8 @@ final class CameraSettingsTests: XCTestCase {
         s.controls.cameraControlItems = [.lens, .shutter, .aperture]
         s.controls.haptics = false
         s.controls.autoLensSwitching = false
+        s.interface.advanced = true
+        s.interface.welcomed = true
 
         let decoded = CameraSettings.decoded(from: try s.encoded())
         XCTAssertEqual(decoded, s)
@@ -217,6 +220,18 @@ final class CameraSettingsTests: XCTestCase {
         XCTAssertFalse(CaptureMode.manual.usesStacking)
     }
 
+    func testCarouselOrderForEachInterface() {
+        XCTAssertEqual(CaptureMode.carouselOrder(advanced: true), CaptureMode.carouselOrder)
+        XCTAssertEqual(Set(CaptureMode.carouselOrder(advanced: true)), Set(CaptureMode.allCases))
+        // The simple carousel is the same row without MANUAL, so the other modes keep their neighbours.
+        XCTAssertEqual(CaptureMode.carouselOrder(advanced: false), [.night, .long, .photo, .video])
+        XCTAssertEqual(CaptureMode.carouselOrder(advanced: false), CaptureMode.carouselOrder.filter { $0 != .manual })
+        // Both start on the mode a fresh install opens in.
+        for advanced in [false, true] {
+            XCTAssertTrue(CaptureMode.carouselOrder(advanced: advanced).contains(CameraSettings.default.mode))
+        }
+    }
+
     func testEnumsHaveTitlesAndUniqueIDs() {
         func check<T: CaseIterable & Identifiable>(_ type: T.Type, title: (T) -> String) where T.ID == String {
             let ids = T.allCases.map(\.id)
@@ -261,5 +276,175 @@ final class CameraSettingsTests: XCTestCase {
         XCTAssertEqual(PhotoResolution.automatic.title, "Largest")
         XCTAssertTrue(VideoCodecChoice.proRes422.isProRes)
         XCTAssertFalse(VideoCodecChoice.hevc.isProRes)
+    }
+
+    // MARK: - Interface level
+
+    func testInterfaceStartsSimpleWithTheQuestionOpen() {
+        let interface = InterfaceOptions()
+        XCTAssertFalse(interface.advanced)
+        XCTAssertFalse(interface.welcomed)
+        XCTAssertEqual(CameraSettings.default.interface, interface)
+        // Settings saved before the interface level existed: the first-launch question is still to be asked.
+        let older = CameraSettings.decoded(from: Data(#"{"mode":"manual","manual":{"iso":400}}"#.utf8))
+        XCTAssertEqual(older.interface, interface)
+        XCTAssertEqual(older.mode, .manual)
+        XCTAssertEqual(older.manual.iso, 400)
+    }
+
+    func testInterfaceOptionsRoundTripAndDecodeTolerantly() throws {
+        for (advanced, welcomed) in [(false, false), (false, true), (true, false), (true, true)] {
+            var settings = CameraSettings()
+            settings.interface.advanced = advanced
+            settings.interface.welcomed = welcomed
+            XCTAssertEqual(CameraSettings.decoded(from: try settings.encoded()).interface, settings.interface)
+        }
+
+        let partial = CameraSettings.decoded(from: Data(#"{"interface":{"welcomed":true}}"#.utf8))
+        XCTAssertFalse(partial.interface.advanced)
+        XCTAssertTrue(partial.interface.welcomed)
+
+        // A wrong type or a key from a later version costs that one value only.
+        let odd = CameraSettings.decoded(from: Data(#"{"interface":{"advanced":"yes","welcomed":true,"level":3}}"#.utf8))
+        XCTAssertFalse(odd.interface.advanced)
+        XCTAssertTrue(odd.interface.welcomed)
+        let unreadable = CameraSettings.decoded(from: Data(#"{"interface":"advanced","zoom":2}"#.utf8))
+        XCTAssertEqual(unreadable.interface, InterfaceOptions())
+        XCTAssertEqual(unreadable.zoom, 2)
+    }
+
+    // MARK: - Long exposure scenes
+
+    func testFreshLongExposureIsWaterAsItsRecipeSetsIt() {
+        let fresh = LongExposureSettings()
+        XCTAssertEqual(fresh.scene, .water)
+        XCTAssertEqual(fresh.recipe, LongExposureScene.water.recipe)
+        var picked = fresh
+        picked.apply(.water)
+        XCTAssertEqual(picked, fresh)
+        // A first long exposure in daylight can't come out white: Blur keeps one frame's brightness.
+        XCTAssertEqual(fresh.blend, .average)
+        XCTAssertFalse(fresh.bulb)
+        XCTAssertEqual(CameraSettings.default.longExposure, fresh)
+        XCTAssertEqual(CameraSettings.decoded(from: Data("{}".utf8)).longExposure, fresh)
+        XCTAssertEqual(CameraSettings.decoded(from: Data(#"{"longExposure":{}}"#.utf8)).longExposure, fresh)
+    }
+
+    func testApplyLoadsEveryValueOfTheRecipe() {
+        for scene in LongExposureScene.presets {
+            guard let recipe = scene.recipe else { return XCTFail("\(scene.rawValue) has a recipe") }
+            // Starts from values this recipe doesn't use, so each one has to be written.
+            var long = LongExposureSettings()
+            long.seconds = 77
+            long.blend = recipe.blend == .lighten ? .average : .lighten
+            long.bulb = !recipe.bulb
+            long.align = !recipe.align
+            long.frameSeconds = recipe.frameSeconds == nil ? 0.5 : nil
+            long.maxBulbSeconds = 600
+            long.apply(scene)
+
+            XCTAssertEqual(long.scene, scene)
+            XCTAssertEqual(long.recipe, recipe)
+            XCTAssertEqual(long.blend, recipe.blend, scene.rawValue)
+            XCTAssertEqual(long.seconds, recipe.seconds, scene.rawValue)
+            XCTAssertEqual(long.bulb, recipe.bulb, scene.rawValue)
+            XCTAssertEqual(long.frameSeconds, recipe.frameSeconds, scene.rawValue)
+            XCTAssertEqual(long.align, recipe.align, scene.rawValue)
+            // The bulb limit is the person's own, whatever the scene.
+            XCTAssertEqual(long.maxBulbSeconds, 600, scene.rawValue)
+
+            // Compared by name as well, so a value added to both types later can't be left out of apply(_:).
+            let wanted = Dictionary(uniqueKeysWithValues: Mirror(reflecting: recipe).children.compactMap { child in
+                child.label.map { ($0, String(reflecting: child.value)) }
+            })
+            var loaded: [String] = []
+            for child in Mirror(reflecting: long).children {
+                guard let name = child.label, let value = wanted[name] else { continue }
+                XCTAssertEqual(String(reflecting: child.value), value, "\(scene.rawValue).\(name)")
+                loaded.append(name)
+            }
+            XCTAssertEqual(loaded.sorted(), ["align", "blend", "bulb", "frameSeconds", "seconds"])
+        }
+    }
+
+    func testApplyingCustomKeepsEveryValue() {
+        var long = LongExposureSettings()
+        long.apply(.starTrails)
+        long.seconds = 900
+        long.maxBulbSeconds = 600
+        var expected = long
+        expected.scene = .custom
+        long.apply(.custom)
+        XCTAssertEqual(long, expected)
+        XCTAssertNil(long.recipe)
+
+        // From the hand-set values of an older save, too.
+        var manual = LongExposureSettings()
+        manual.scene = .custom
+        manual.blend = .additive
+        manual.seconds = 240
+        manual.bulb = true
+        manual.align = false
+        manual.frameSeconds = 0.25
+        let before = manual
+        manual.apply(.custom)
+        XCTAssertEqual(manual, before)
+    }
+
+    func testLongExposureSavedBeforeScenesIsCustom() {
+        // As a version without scenes wrote it: every value, no scene.
+        let saved = #"{"longExposure":{"align":false,"blend":"lighten","bulb":true,"frameSeconds":0.25,"maxBulbSeconds":600,"seconds":120}}"#
+        let long = CameraSettings.decoded(from: Data(saved.utf8)).longExposure
+        XCTAssertEqual(long.scene, .custom)
+        XCTAssertNil(long.recipe)
+        XCTAssertEqual(long.blend, .lighten)
+        XCTAssertEqual(long.seconds, 120)
+        XCTAssertTrue(long.bulb)
+        XCTAssertFalse(long.align)
+        XCTAssertEqual(long.frameSeconds, 0.25)
+        XCTAssertEqual(long.maxBulbSeconds, 600)
+
+        // That version's own defaults, Real for 4 s, are still what its owner had on screen.
+        let untouched = #"{"longExposure":{"align":false,"blend":"additive","bulb":false,"maxBulbSeconds":1800,"seconds":4}}"#
+        let old = CameraSettings.decoded(from: Data(untouched.utf8)).longExposure
+        XCTAssertEqual(old.scene, .custom)
+        XCTAssertEqual(old.blend, .additive)
+        XCTAssertEqual(old.seconds, 4)
+        XCTAssertFalse(old.align)
+        XCTAssertNil(old.frameSeconds)
+
+        // Either value alone is enough to tell a save with a choice in it.
+        XCTAssertEqual(CameraSettings.decoded(from: Data(#"{"longExposure":{"seconds":60}}"#.utf8)).longExposure.scene, .custom)
+        XCTAssertEqual(CameraSettings.decoded(from: Data(#"{"longExposure":{"blend":"lighten"}}"#.utf8)).longExposure.scene, .custom)
+        XCTAssertEqual(CameraSettings.decoded(from: Data(#"{"longExposure":{"maxBulbSeconds":600}}"#.utf8)).longExposure.scene, .water)
+    }
+
+    func testAnUnreadableSceneKeepsItsSavedValuesAsCustom() {
+        // A scene from a later version, saved with the blend and time it had loaded.
+        let later = #"{"longExposure":{"scene":"sunset","blend":"additive","seconds":8,"align":false}}"#
+        let long = CameraSettings.decoded(from: Data(later.utf8)).longExposure
+        XCTAssertEqual(long.scene, .custom)
+        XCTAssertEqual(long.blend, .additive)
+        XCTAssertEqual(long.seconds, 8)
+        XCTAssertFalse(long.align)
+
+        let wrongType = #"{"longExposure":{"scene":7,"blend":"lighten","seconds":30}}"#
+        XCTAssertEqual(CameraSettings.decoded(from: Data(wrongType.utf8)).longExposure.scene, .custom)
+    }
+
+    func testEverySceneRoundTrips() throws {
+        for scene in LongExposureScene.allCases {
+            var settings = CameraSettings()
+            settings.longExposure.apply(scene)
+            let decoded = CameraSettings.decoded(from: try settings.encoded())
+            XCTAssertEqual(decoded.longExposure.scene, scene)
+            // Frame shutters like 1/30 s come back to the last bit, or the scene would read as changed.
+            XCTAssertEqual(decoded, settings, scene.rawValue)
+        }
+        var custom = CameraSettings()
+        custom.longExposure.apply(.fireworks)
+        custom.longExposure.blend = .average
+        custom.longExposure.scene = .custom
+        XCTAssertEqual(CameraSettings.decoded(from: try custom.encoded()), custom)
     }
 }

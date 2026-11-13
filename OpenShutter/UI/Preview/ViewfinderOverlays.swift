@@ -425,6 +425,7 @@ private struct FocusReticleLayer: View {
                 let turns = model.motion.quarterTurns
                 FocusReticle(
                     isLocked: square.isLocked,
+                    isAdvanced: model.isAdvanced,
                     bias: Self.bias(model),
                     quarterTurns: turns,
                     labelBelow: labelBelow(square.point, turns: turns)
@@ -456,6 +457,8 @@ private struct FocusReticleLayer: View {
 
 private struct FocusReticle: View {
     let isLocked: Bool
+    /// The advanced interface names the lock the way cameras do; the simple one says it in plain words.
+    let isAdvanced: Bool
     /// Exposure compensation. The square stays bright while it changes, as the Camera app's does while its sun
     /// is dragged; CameraPreviewView keeps the sun up by the same rule.
     let bias: Double
@@ -478,7 +481,9 @@ private struct FocusReticle: View {
                 .opacity(faded ? (isLocked ? 0.6 : 0) : 1)
                 .accessibilityHidden(true)
             if isLocked {
-                Text("AE/AF LOCK")
+                // One short word in the simple interface: the square and the sun beside it show what is held, and
+                // a longer label would run off the picture next to its edges.
+                Text(isAdvanced ? "AE/AF LOCK" : "Locked")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(Color.black)
                     .padding(.horizontal, 8)
@@ -487,8 +492,8 @@ private struct FocusReticle: View {
                     .fixedSize()
                     .offset(y: (labelBelow ? 1 : -1) * (Self.side / 2 + 16))
                     .transition(.opacity)
-                    // The corner AE LOCK badge steps aside while this label shows, so VoiceOver needs this one.
-                    .accessibilityLabel("Exposure and focus locked")
+                    // The corner lock badge steps aside while this label shows, so VoiceOver needs this one.
+                    .accessibilityLabel(isAdvanced ? "Exposure and focus locked" : "Focus and brightness locked")
             }
         }
         .shadow(color: .black.opacity(0.3), radius: 1)
@@ -544,7 +549,10 @@ private struct StatusBadges: View {
     let reticleShowsLock: Bool
 
     var body: some View {
-        let stacked = model.shutterIsStacked
+        let advanced = model.isAdvanced
+        // How a long shutter is built is the advanced interface's business. In the simple one LONG would wear this
+        // badge nearly all the time, for a word it never explains.
+        let stacked = advanced && model.shutterIsStacked
         let exposureLocked = model.aeLocked && !reticleShowsLock
         let turns = model.motion.quarterTurns
         VStack(alignment: .trailing, spacing: 0) {
@@ -554,7 +562,9 @@ private struct StatusBadges: View {
                     .transition(.opacity)
             }
             if exposureLocked {
-                StatusBadge(symbol: "lock.fill", text: "AE LOCK", tint: Theme.accent, quarterTurns: turns)
+                // The simple interface only locks with touch and hold, which holds the focus too.
+                StatusBadge(symbol: "lock.fill", text: advanced ? "AE LOCK" : "Focus and brightness locked",
+                            tint: Theme.accent, quarterTurns: turns)
                     .padding(.bottom, 6)
                     .transition(.opacity)
             }
@@ -627,10 +637,13 @@ private struct ClippingBadge: View {
 
     var body: some View {
         let clipping = analysisIsRunning && model.showsClippingWarning
+        // The hold below is for clipping that comes and goes. A warning that is switched off goes at once, which
+        // is also what leaving the advanced interface does to it.
+        let isOn = model.settings.display.clippingWarnings
         ZStack(alignment: .topTrailing) {
             // Keeps the view alive while the badge is hidden, so the task below keeps watching.
             Color.clear.frame(width: 0, height: 0)
-            if isShown {
+            if isShown && isOn {
                 StatusBadge(symbol: "exclamationmark.triangle.fill", text: "CLIPPING", tint: Theme.accent,
                             quarterTurns: quarterTurns)
                     .padding(.bottom, 6)
@@ -654,7 +667,8 @@ private struct ClippingBadge: View {
     private var analysisIsRunning: Bool {
         guard model.sessionState == .running else { return false }
         let display = model.settings.display
-        let manualFocus = model.settings.focus.lensPosition != nil || model.activeDial == .focus
+        // Focus as the camera runs it, like the options: a scene that holds the lens at infinity counts as manual.
+        let manualFocus = model.effectiveFocus.lensPosition != nil || model.activeDial == .focus
         let peaking = display.peaking == .always || (display.peaking == .manualFocus && manualFocus)
         return display.histogram != .off || display.zebras || display.falseColor || peaking || display.clippingWarnings
     }

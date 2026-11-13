@@ -100,7 +100,9 @@ struct ReadoutHUD: View {
     }
 
     private func biasItem(_ settings: CameraSettings) -> ReadoutItem {
-        let bias = settings.mode == .night ? settings.night.biasEV : settings.manual.bias
+        // A long exposure scene adds its own compensation to the person's, and the camera runs on the sum.
+        let own = settings.mode == .night ? settings.night.biasEV : settings.manual.bias
+        let bias = own + (model.sceneRecipe?.biasEV ?? 0)
         let label = EVFormat.label(bias)
         return ReadoutItem(kind: .bias, text: "EV " + label, template: "EV +8.8", value: bias,
                            isManual: abs(bias) >= 0.05, marksAuto: false, reservesMark: false,

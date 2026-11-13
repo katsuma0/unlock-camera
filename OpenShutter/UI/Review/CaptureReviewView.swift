@@ -1,13 +1,15 @@
 import SwiftUI
 import UIKit
 
-/// The captures from this session with their exposure summaries, and a way into Photos.
+/// The captures from this session, with their exposure summaries in the advanced interface, and a way into Photos.
 struct CaptureReviewView: View {
     @Bindable var model: CameraModel
     @Environment(\.dismiss) private var dismiss
     @State private var openFailed = false
 
     var body: some View {
+        // The summaries are shutter speeds and ISO values, which belong to the advanced interface.
+        let detailed = model.isAdvanced
         NavigationStack {
             Group {
                 if model.recentCaptures.isEmpty {
@@ -20,7 +22,7 @@ struct CaptureReviewView: View {
                     List {
                         Section {
                             ForEach(model.recentCaptures) { capture in
-                                CaptureRow(capture: capture)
+                                CaptureRow(capture: capture, detailed: detailed)
                             }
                         } header: {
                             Text(Self.countLabel(model.recentCaptures.count))
@@ -82,26 +84,10 @@ struct CaptureReviewView: View {
     }
 
     private func openPhotos() {
-        guard let url = URL(string: "photos-redirect://") else {
-            openFailed = true
-            return
-        }
-        let application = UIApplication.shared
-        // canOpenURL only answers for schemes listed in LSApplicationQueriesSchemes and says no to the rest,
-        // so it can rule Photos out only when the app declared the scheme. open(_:) needs no declaration.
-        if Self.photosSchemeDeclared, !application.canOpenURL(url) {
-            openFailed = true
-            return
-        }
         openFailed = false
-        application.open(url, options: [:]) { success in
-            openFailed = !success
+        PhotosApp.open { opened in
+            openFailed = !opened
         }
-    }
-
-    private static var photosSchemeDeclared: Bool {
-        let schemes = Bundle.main.object(forInfoDictionaryKey: "LSApplicationQueriesSchemes") as? [String]
-        return schemes?.contains("photos-redirect") ?? false
     }
 
     private static func countLabel(_ count: Int) -> String {
@@ -109,17 +95,61 @@ struct CaptureReviewView: View {
     }
 }
 
+/// The way into the Photos app, shared by the review sheet's button and the thumbnail's menu.
+@MainActor
+enum PhotosApp {
+    /// Opens Photos and reports whether that worked.
+    static func open(completion: @escaping @MainActor (Bool) -> Void) {
+        guard let url = URL(string: "photos-redirect://") else {
+            completion(false)
+            return
+        }
+        let application = UIApplication.shared
+        // canOpenURL only answers for schemes listed in LSApplicationQueriesSchemes and says no to the rest,
+        // so it can rule Photos out only when the app declared the scheme. open(_:) needs no declaration.
+        if schemeDeclared, !application.canOpenURL(url) {
+            completion(false)
+            return
+        }
+        application.open(url, options: [:]) { success in
+            completion(success)
+        }
+    }
+
+    private static var schemeDeclared: Bool {
+        let schemes = Bundle.main.object(forInfoDictionaryKey: "LSApplicationQueriesSchemes") as? [String]
+        return schemes?.contains("photos-redirect") ?? false
+    }
+}
+
+extension CaptureResult.Kind {
+    /// What a capture is called in the review sheet and by VoiceOver on the thumbnail. The simple interface tells
+    /// photos from videos and leaves it there.
+    func title(detailed: Bool) -> String {
+        guard detailed else { return self == .video ? "Video" : "Photo" }
+        switch self {
+        case .photo: return "Photo"
+        case .raw: return "RAW photo"
+        case .bracket: return "Bracket frame"
+        case .stack: return "Stacked exposure"
+        case .video: return "Video"
+        }
+    }
+}
+
 private struct CaptureRow: View {
     let capture: CaptureResult
+    /// The advanced interface names the kind of capture and shows its exposure.
+    let detailed: Bool
 
     var body: some View {
         HStack(spacing: 14) {
             thumbnail
             VStack(alignment: .leading, spacing: 3) {
-                Text(Self.title(for: capture.kind))
+                Text(capture.kind.title(detailed: detailed))
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(Theme.primaryText)
-                if !capture.summary.isEmpty {
+                if detailed, !capture.summary.isEmpty {
                     Text(capture.summary)
                         .font(.footnote.monospacedDigit())
                         .foregroundStyle(Theme.secondaryText)
@@ -167,16 +197,6 @@ private struct CaptureRow: View {
         }
         .frame(width: 64, height: 64)
         .accessibilityHidden(true)
-    }
-
-    private static func title(for kind: CaptureResult.Kind) -> String {
-        switch kind {
-        case .photo: return "Photo"
-        case .raw: return "RAW photo"
-        case .bracket: return "Bracket frame"
-        case .stack: return "Stacked exposure"
-        case .video: return "Video"
-        }
     }
 
     private static func symbol(for kind: CaptureResult.Kind) -> String {

@@ -5,7 +5,7 @@ import AVKit
 import _AVKit_SwiftUI
 import CameraCore
 
-/// The whole camera: viewfinder, controls, mode carousel, shutter.
+/// The whole camera: viewfinder, controls, mode carousel, shutter. The first launch starts with the welcome question.
 struct CameraScreen: View {
     @Bindable var model: CameraModel
     @Environment(\.scenePhase) private var scenePhase
@@ -18,15 +18,8 @@ struct CameraScreen: View {
                 .sheet(isPresented: $model.isReviewPresented) {
                     CaptureReviewView(model: model)
                 }
-            if model.authorization == .authorized {
-                CameraLayout(model: model)
-                    .transition(.opacity)
-            } else {
-                PermissionView(model: model)
-                    .transition(.opacity)
-            }
+            ScreenContent(model: model)
         }
-        .animation(.easeInOut(duration: 0.3), value: model.authorization)
         .sheet(isPresented: $model.isSettingsPresented) {
             SettingsView(model: model)
         }
@@ -41,6 +34,31 @@ struct CameraScreen: View {
         }
         .statusBarHidden(true)
         .persistentSystemOverlays(.hidden)
+    }
+}
+
+/// The welcome question, the camera or the permission page. Whether the question is still open is a setting, and
+/// dials and pinches write the settings many times a second, so it is read here and not by the screen with its sheets.
+private struct ScreenContent: View {
+    let model: CameraModel
+
+    var body: some View {
+        let needsWelcome = model.needsWelcome
+        ZStack {
+            if needsWelcome {
+                // Before the camera starts, so the permission prompt comes after the answer.
+                WelcomeView(model: model)
+                    .transition(.opacity)
+            } else if model.authorization == .authorized {
+                CameraLayout(model: model)
+                    .transition(.opacity)
+            } else {
+                PermissionView(model: model)
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeInOut(duration: 0.3), value: model.authorization)
+        .animation(.easeInOut(duration: 0.3), value: needsWelcome)
     }
 }
 
@@ -59,6 +77,8 @@ private struct CameraLayout: View {
     @State private var bulbPressStart: Date?
     /// The drawer's timer sheet is up. It belongs to the drawer, so the drawer reports it as a preference.
     @State private var drawerSheetShown = false
+    /// The top bar's timer badge asked for that sheet. The drawer presents it, opening first if it has to.
+    @State private var timerSheetRequested = false
 
     static let topBarHeight: CGFloat = 48
 
@@ -78,7 +98,7 @@ private struct CameraLayout: View {
                     .frame(width: width, height: viewfinderHeight)
                     .padding(.top, Self.topBarHeight)
 
-                DrawerLayer(model: model, viewfinderHeight: viewfinderHeight)
+                DrawerLayer(model: model, viewfinderHeight: viewfinderHeight, timerSheetRequested: $timerSheetRequested)
                     .padding(.top, Self.topBarHeight)
                     .opacity(fullscreen ? 0 : 1)
                     .allowsHitTesting(!fullscreen)
@@ -94,7 +114,7 @@ private struct CameraLayout: View {
                     .allowsHitTesting(!fullscreen)
 
                 // Drawn last so the drawer slides out from underneath it.
-                TopBar(model: model)
+                TopBar(model: model, onTimerSheet: showTimerSheet)
                     .opacity(fullscreen ? 0 : 1)
                     .allowsHitTesting(!fullscreen)
             }
@@ -107,7 +127,7 @@ private struct CameraLayout: View {
             secondaryAction: { event in handleHardwareButton(event) }
         )
         .onChange(of: mode) { oldMode, newMode in
-            if let dial = model.activeDial, !Self.dialAllowed(dial, in: newMode) {
+            if let dial = model.activeDial, !Self.dialAllowed(dial, in: newMode, advanced: model.isAdvanced) {
                 model.activeDial = nil
             }
             // Video needs a session reconfiguration, which takes longer than a photo mode change.
@@ -162,6 +182,11 @@ private struct CameraLayout: View {
         }
     }
 
+    private func showTimerSheet() {
+        timerSheetRequested = true
+        withAnimation(Theme.spring) { model.isDrawerOpen = true }
+    }
+
     private func showVeil(holdNanoseconds: UInt64) {
         // A flip asks twice in one update (lens switch and selfie change); the longer hold wins in either order.
         veilHoldNanoseconds = veilVisible ? max(veilHoldNanoseconds, holdNanoseconds) : holdNanoseconds
@@ -201,8 +226,10 @@ private struct CameraLayout: View {
     }
 
     /// Dials that make sense in each mode. A shutter or ISO dial left open from MANUAL would switch PHOTO back to
-    /// MANUAL with the first tick, so it closes instead.
-    static func dialAllowed(_ dial: DialKind, in mode: CaptureMode) -> Bool {
+    /// MANUAL with the first tick, so it closes instead. The simple interface has no strip in any mode: its dials
+    /// are the two its lens row opens, brightness and zoom.
+    static func dialAllowed(_ dial: DialKind, in mode: CaptureMode, advanced: Bool) -> Bool {
+        guard advanced else { return dial == .bias || dial == .zoom }
         switch mode {
         case .photo, .night: return dial == .bias || dial == .zoom
         case .manual, .long, .video: return true
@@ -441,6 +468,7 @@ private struct StatusCard: View {
 private struct DrawerLayer: View {
     let model: CameraModel
     let viewfinderHeight: CGFloat
+    @Binding var timerSheetRequested: Bool
 
     var body: some View {
         let isOpen = model.isDrawerOpen
@@ -455,7 +483,7 @@ private struct DrawerLayer: View {
                         withAnimation(Theme.spring) { model.isDrawerOpen = false }
                     }
                     .accessibilityHidden(true)
-                QuickSettingsDrawer(model: model)
+                QuickSettingsDrawer(model: model, timerSheetRequested: $timerSheetRequested)
                     .padding(.top, 6)
                     .transition(.move(edge: .top).combined(with: .opacity))
             }
@@ -478,11 +506,12 @@ private struct ControlsZone: View {
         let activity = model.activity
         let isStacking = activity == .stacking
         let isRecording = activity == .recording
-        let showsPanel = Self.hasPanel(mode: mode, dialOpen: dial != nil)
+        let advanced = model.isAdvanced
+        let showsPanel = Self.hasPanel(mode: mode, dialOpen: dial != nil, advanced: advanced)
         // An exposure dial makes the stack tall enough to cover a good part of the picture on 6.1" phones, so the
         // lens buttons step aside for it. The zoom dial belongs with them, and the EV chip of PHOTO and NIGHT lives
-        // in that row.
-        let showsLensRow = dial == nil || dial == .zoom || mode == .photo || mode == .night
+        // in that row. So does the simple interface's brightness chip in every mode, and the panel steps aside there.
+        let showsLensRow = dial == nil || dial == .zoom || mode == .photo || mode == .night || !advanced
 
         VStack(spacing: 6) {
             if showsLensRow {
@@ -495,7 +524,8 @@ private struct ControlsZone: View {
             // A stack can't change mid-capture, so its panels fold away and the progress has the screen.
             if !isStacking {
                 if showsPanel {
-                    ModePanels(model: model, mode: mode, showsSecondary: dial == nil, isRecording: isRecording)
+                    ModePanels(model: model, mode: mode, advanced: advanced, showsSecondary: dial == nil,
+                               isRecording: isRecording)
                         .id(mode)
                         .transition(.opacity)
                 }
@@ -520,11 +550,15 @@ private struct ControlsZone: View {
         .animation(Theme.spring, value: dial)
         .animation(Theme.spring, value: mode)
         .animation(Theme.spring, value: isStacking)
+        .animation(Theme.spring, value: advanced)
     }
 
-    private static func hasPanel(mode: CaptureMode, dialOpen: Bool) -> Bool {
+    /// The advanced interface keeps its manual strip under an open dial. The simple one has no strip: its LONG
+    /// panel is the scene picker, which makes room for a dial as NIGHT's panel does, and its VIDEO has no panel.
+    private static func hasPanel(mode: CaptureMode, dialOpen: Bool, advanced: Bool) -> Bool {
         switch mode {
-        case .manual, .long, .video: return true
+        case .manual, .video: return advanced
+        case .long: return advanced || !dialOpen
         case .night: return !dialOpen
         case .photo: return false
         }
@@ -555,7 +589,9 @@ private struct LensRow: View {
 
     var body: some View {
         let mode = model.settings.mode
-        let showsExposure = mode == .photo || mode == .night
+        // The advanced interface has the EV chip on the manual strip in the other modes. The simple one has no
+        // strip, so its brightness chip belongs here in every mode; it only shows while there is something to see.
+        let showsExposure = !model.isAdvanced || mode == .photo || mode == .night
         ZStack {
             LensPickerSlot(model: model)
             if showsExposure {
@@ -607,48 +643,53 @@ private struct LensPickerSlot: View {
     }
 }
 
-/// Exposure compensation for PHOTO and NIGHT, which have no manual strip. Tap opens the dial, touch and hold resets it.
+/// Exposure compensation for the modes without a manual strip. Tap opens the dial, touch and hold lists a few
+/// values and the way back to zero. The advanced interface shows it all the time. In the simple one, brightness is
+/// set on the viewfinder's sun, and the chip only shows while it is off zero or its dial is open, so an untouched
+/// camera has nothing here to set.
 private struct ExposureChip: View {
     let model: CameraModel
 
     var body: some View {
+        let advanced = model.isAdvanced
         let bias = Self.bias(model)
         let isAdjusted = abs(bias) >= 0.05
         let isOpen = model.activeDial == .bias
+        let isShown = advanced || isAdjusted || isOpen
 
-        HStack(spacing: 4) {
-            // Only the glyph turns with the phone, as on the strip's chips; the whole chip turned upright would
-            // stand out of its row.
-            Upright(model: model) {
-                Image(systemName: "plusminus.circle")
+        ZStack {
+            if isShown {
+                Menu {
+                    ExposureChipOptions(model: model)
+                } label: {
+                    HStack(spacing: 4) {
+                        // Only the glyph turns with the phone, as on the strip's chips; the whole chip turned
+                        // upright would stand out of its row. The simple interface wears the viewfinder's sun.
+                        Upright(model: model) {
+                            Image(systemName: advanced ? "plusminus.circle" : "sun.max.fill")
+                        }
+                        Text(EVFormat.label(bias))
+                            .contentTransition(.numericText(value: bias))
+                    }
+                } primaryAction: {
+                    toggleDial()
+                }
+                .menuStyle(.button)
+                .buttonStyle(ExposureChipStyle(isLit: isAdjusted || isOpen, isOpen: isOpen))
+                .menuIndicator(.hidden)
+                .transition(.opacity.combined(with: .scale(scale: 0.8)))
+                .accessibilityLabel(advanced ? "Exposure compensation" : "Brightness")
+                .accessibilityValue(EVFormat.label(bias))
+                .accessibilityHint(advanced ? "Opens the exposure dial. Touch and hold for more options."
+                                            : "Opens the brightness dial. Touch and hold for more options.")
+                .accessibilityAction { toggleDial() }
+                .accessibilityAction(named: "Reset") { Self.reset(model) }
             }
-            Text(EVFormat.label(bias))
-                .contentTransition(.numericText(value: bias))
         }
-        .font(Theme.chipFont)
-        .foregroundStyle(isAdjusted || isOpen ? Theme.accent : Theme.primaryText)
-        .padding(.horizontal, 10)
-        .frame(height: 28)
-        .cameraGlass(in: Capsule())
-        .overlay {
-            if isOpen {
-                Capsule().strokeBorder(Theme.accent.opacity(0.8), lineWidth: 1)
-            }
-        }
-        .frame(minHeight: 44)
-        .contentShape(Rectangle())
-        .onTapGesture { toggleDial() }
-        .onLongPressGesture(minimumDuration: 0.5) { reset() }
         // Keyed to adjusted or not, not the value: a drag of the EV dial changes it on every tick, and the digits
         // would never finish rolling.
         .animation(Theme.snappy, value: isAdjusted)
-        .accessibilityElement(children: .ignore)
-        .accessibilityAddTraits(.isButton)
-        .accessibilityLabel("Exposure compensation")
-        .accessibilityValue(EVFormat.label(bias))
-        .accessibilityHint("Opens the exposure dial. Touch and hold to reset.")
-        .accessibilityAction { toggleDial() }
-        .accessibilityAction(named: "Reset") { reset() }
+        .animation(Theme.snappy, value: isShown)
     }
 
     private func toggleDial() {
@@ -658,21 +699,86 @@ private struct ExposureChip: View {
         }
     }
 
-    private func reset() {
-        guard abs(Self.bias(model)) >= 0.05 else { return }
+    fileprivate static func reset(_ model: CameraModel) {
+        guard abs(bias(model)) >= 0.05 else { return }
         model.setBias(0)
         Haptics.stop()
     }
 
     /// NIGHT keeps its own compensation; setBias and the dial follow the mode the same way.
-    private static func bias(_ model: CameraModel) -> Double {
+    fileprivate static func bias(_ model: CameraModel) -> Double {
         model.settings.mode == .night ? model.settings.night.biasEV : model.settings.manual.bias
     }
 }
 
+/// The chip's touch and hold menu: back to zero, then whole stops either way. Its own view, so the rows are only
+/// worked out when the menu is built, not with every tick of the dial.
+private struct ExposureChipOptions: View {
+    let model: CameraModel
+
+    /// Darkest first.
+    private static let steps: [Double] = [-2, -1, 1, 2]
+
+    var body: some View {
+        let advanced = model.isAdvanced
+        let bias = ExposureChip.bias(model)
+        let range = model.capabilities.biasRange
+        Button {
+            ExposureChip.reset(model)
+        } label: {
+            Label("Reset", systemImage: "arrow.counterclockwise")
+        }
+        .disabled(abs(bias) < 0.05)
+        Section {
+            ForEach(Self.steps.filter { range.contains($0) }, id: \.self) { step in
+                Toggle(isOn: Binding(get: { abs(bias - step) < 0.05 }, set: { _ in choose(step) })) {
+                    // The advanced interface names the unit; the simple one counts in steps of brightness.
+                    Text(advanced ? EVFormat.label(step) + " EV" : EVFormat.label(step))
+                }
+            }
+        } header: {
+            if !advanced {
+                Text("Brightness")
+            }
+        }
+    }
+
+    private func choose(_ step: Double) {
+        Haptics.tick()
+        model.setBias(step)
+    }
+}
+
+/// The lens row's glass chip, yellow while the value is off zero or its dial is open, in a 44 pt touch area.
+private struct ExposureChipStyle: ButtonStyle {
+    var isLit: Bool
+    var isOpen: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(Theme.chipFont)
+            .foregroundStyle(isLit ? Theme.accent : Theme.primaryText)
+            .padding(.horizontal, 10)
+            .frame(height: 28)
+            .cameraGlass(in: Capsule())
+            .overlay {
+                if isOpen {
+                    Capsule().strokeBorder(Theme.accent.opacity(0.8), lineWidth: 1)
+                }
+            }
+            .scaleEffect(configuration.isPressed ? 0.94 : 1)
+            .animation(Theme.snappy, value: configuration.isPressed)
+            .frame(minWidth: 44, minHeight: 44)
+            .contentShape(Rectangle())
+    }
+}
+
+/// The controls each mode adds between the lens row and the carousel. The manual strip and the video panel are
+/// the advanced interface's; NightControls and LongExposureControls switch to their simple layout themselves.
 private struct ModePanels: View {
     let model: CameraModel
     let mode: CaptureMode
+    let advanced: Bool
     let showsSecondary: Bool
     let isRecording: Bool
 
@@ -680,19 +786,27 @@ private struct ModePanels: View {
         VStack(spacing: 6) {
             switch mode {
             case .manual:
-                ManualControlStrip(model: model)
+                if advanced {
+                    ManualControlStrip(model: model)
+                }
             case .long:
-                ManualControlStrip(model: model)
+                // The simple interface picks a scene and its time; the values on the strip follow the scene.
+                if advanced {
+                    ManualControlStrip(model: model)
+                }
                 if showsSecondary {
                     LongExposureControls(model: model)
                 }
             case .video:
-                ManualControlStrip(model: model)
-                if showsSecondary {
-                    // A format change mid-recording would reconfigure the session under the movie file.
-                    VideoControls(model: model)
-                        .disabled(isRecording)
-                        .opacity(isRecording ? 0.35 : 1)
+                // The simple interface films on automatic, with the format chip in the top bar.
+                if advanced {
+                    ManualControlStrip(model: model)
+                    if showsSecondary {
+                        // A format change mid-recording would reconfigure the session under the movie file.
+                        VideoControls(model: model)
+                            .disabled(isRecording)
+                            .opacity(isRecording ? 0.35 : 1)
+                    }
                 }
             case .night:
                 if showsSecondary {
@@ -715,10 +829,14 @@ private struct CarouselSlot: View {
         // The model is idle between intervalometer shots, but each shot is taken in the current mode: a switch to
         // VIDEO there would leave the rest of the sequence taking nothing. A bracket runs as long, so it dims too.
         let sequenceRunning = model.intervalometer != nil || model.bracketInProgress
-        ModeCarousel(mode: Binding(
-            get: { model.settings.mode },
-            set: { model.setMode($0) }
-        ))
+        ModeCarousel(
+            mode: Binding(
+                get: { model.settings.mode },
+                set: { model.setMode($0) }
+            ),
+            // The simple interface leaves MANUAL out.
+            modes: model.availableModes
+        )
         // Hidden but still laid out while filming, so the controls above don't jump when recording starts.
         .opacity(isRecording ? 0 : (activity.isCountdown || sequenceRunning ? 0.35 : 1))
         // Photos still being saved keep the session as it is. Not dimmed for them, which would blink after each shot.
@@ -796,23 +914,58 @@ private struct ThumbnailButton: View {
         let capture = model.lastCapture
         let activity = model.activity
         let isHidden = activity == .recording || activity == .stacking
-        Button {
-            Haptics.tap()
-            model.isDrawerOpen = false
-            model.isReviewPresented = true
+        let hasCaptures = !model.recentCaptures.isEmpty
+        Menu {
+            Button(action: openPhotos) {
+                Label("Open Photos", systemImage: "photo.on.rectangle")
+            }
+            Button(action: showRecent) {
+                Label("Show recent", systemImage: "clock")
+            }
+            .disabled(!hasCaptures)
         } label: {
             Upright(model: model) {
                 ThumbnailImage(capture: capture)
             }
+        } primaryAction: {
+            showRecent()
         }
-        .buttonStyle(PressScaleButtonStyle())
-        .disabled(model.recentCaptures.isEmpty)
+        .menuStyle(.button)
+        // Before the first capture a tap has nothing to show, so only the menu answers and the square stays still.
+        .buttonStyle(PressScaleButtonStyle(scales: hasCaptures))
+        .menuIndicator(.hidden)
         .opacity(isHidden ? 0 : 1)
         .allowsHitTesting(!isHidden)
         .animation(Theme.spring, value: capture?.id)
         .animation(.easeInOut(duration: 0.2), value: isHidden)
         .accessibilityLabel("Recent captures")
-        .accessibilityValue(capture?.summary ?? "None yet")
+        .accessibilityValue(Self.spokenValue(capture, detailed: model.isAdvanced))
+        .accessibilityHint("Touch and hold for more options.")
+        .accessibilityAction(named: "Open Photos") { openPhotos() }
+    }
+
+    private func showRecent() {
+        guard !model.recentCaptures.isEmpty else { return }
+        Haptics.tap()
+        model.isDrawerOpen = false
+        model.isReviewPresented = true
+    }
+
+    /// The review sheet's way into Photos, without the sheet.
+    private func openPhotos() {
+        Haptics.tap()
+        model.isDrawerOpen = false
+        PhotosApp.open { opened in
+            if !opened {
+                model.showToast("Photos couldn't be opened.", symbol: "exclamationmark.triangle")
+            }
+        }
+    }
+
+    /// The exposure summary is shutter speed and ISO, which the simple interface never shows or says.
+    private static func spokenValue(_ capture: CaptureResult?, detailed: Bool) -> String {
+        guard let capture else { return "None yet" }
+        return detailed ? capture.summary : capture.kind.title(detailed: false)
     }
 }
 
@@ -895,9 +1048,11 @@ private struct Upright<Content: View>: View {
 }
 
 private struct PressScaleButtonStyle: ButtonStyle {
+    var scales = true
+
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .scaleEffect(configuration.isPressed ? 0.92 : 1)
+            .scaleEffect(configuration.isPressed && scales ? 0.92 : 1)
             .animation(Theme.snappy, value: configuration.isPressed)
             .contentShape(Rectangle())
     }

@@ -1,9 +1,9 @@
 import SwiftUI
 import CameraCore
 
-/// Chips for every manual control this camera offers, plus AE lock. Tap a chip to open its dial, hold it to
-/// hand the value back to auto. Each chip reads the live values in its own body, so the 10 Hz readings only
-/// redraw the chip text and never the row.
+/// Chips for every manual control this camera offers, plus AE lock. Tap a chip to open its dial; touch and hold it
+/// for auto and the values people reach for most. Each chip reads the live values in its own body, so the 10 Hz
+/// readings only redraw the chip text and never the row.
 struct ManualControlStrip: View {
     @Bindable var model: CameraModel
 
@@ -69,36 +69,223 @@ private struct ParameterChip: View {
         ChipFace(content: content, isSelected: isSelected, isPressed: isPressed)
             .frame(minHeight: 44)
             .contentShape(Rectangle())
-            .onTapGesture(perform: toggle)
-            .onLongPressGesture(minimumDuration: 0.45, perform: reset, onPressingChanged: { pressing in
-                isPressed = pressing
-            })
+            .overlay {
+                ChipTouchLayer(model: model, kind: kind, isPressed: $isPressed)
+            }
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(Text(kind.title))
             .accessibilityValue(Text(content.spokenValue))
-            .accessibilityHint(Text(content.canReset ? "Shows the dial. Hold to return to auto." : "Shows the dial."))
+            .accessibilityHint(Text("Shows the dial. " + HoldMenuText.hint))
             .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : [.isButton])
-            .accessibilityAction(.default, toggle)
+            .accessibilityAction(.default) {
+                ChipReader.toggleDial(kind, model: model)
+            }
             .accessibilityActions {
                 if content.canReset {
-                    Button("Return to auto", action: reset)
+                    Button("Return to auto") {
+                        ChipReader.returnToAuto(kind, model: model)
+                    }
                 }
             }
     }
+}
 
-    private func toggle() {
-        Haptics.tick()
-        withAnimation(Theme.spring) {
-            model.activeDial = model.activeDial == kind ? nil : kind
+/// A chip's tap and its touch and hold menu. Its own view with inputs that never change, so the face's redraws
+/// with every live reading leave the menu button alone.
+private struct ChipTouchLayer: View {
+    let model: CameraModel
+    let kind: DialKind
+    @Binding var isPressed: Bool
+
+    var body: some View {
+        HoldMenuLayer(isPressed: $isPressed) {
+            ChipReader.toggleDial(kind, model: model)
+        } options: {
+            ChipMenu(model: model, kind: kind)
+        }
+    }
+}
+
+/// What a chip offers on touch and hold: the way back to auto first, where the control has one, then the values
+/// people reach for most. Its own view, so the rows are worked out for the menu and not with every reading.
+private struct ChipMenu: View {
+    let model: CameraModel
+    let kind: DialKind
+
+    var body: some View {
+        switch kind {
+        case .shutter: shutter
+        case .iso: iso
+        case .aperture: aperture
+        case .bias: bias
+        case .whiteBalance: whiteBalance
+        case .tint: tint
+        case .focus: focus
+        case .zoom: EmptyView()
         }
     }
 
-    private func reset() {
-        // Read again at the moment the hold completes: the value may have changed since the last redraw.
-        guard ChipReader.content(kind, model: model).canReset else { return }
-        Haptics.stop()
-        withAnimation(Theme.snappy) {
-            ChipReader.reset(kind, model: model)
+    @ViewBuilder
+    private var shutter: some View {
+        let settings = model.settings
+        if settings.mode == .long {
+            // LONG's chip is the total time, which has no auto.
+            let seconds = settings.longExposure.seconds
+            Section("Duration") {
+                ForEach(ChipPresets.longDurations, id: \.self) { value in
+                    HoldMenuChoice(HoldMenuText.time(value), isOn: ChipPresets.isSame(seconds, value)) {
+                        model.setShutter(value)
+                    }
+                }
+            }
+        } else {
+            // The live auto shutter is left unread: a menu that follows the meter would rebuild ten times a second.
+            let fixed = model.isShutterAuto ? nil : settings.manual.shutter
+            let scale = model.shutterScale.map(\.seconds)
+            let onScale = ChipPresets.shutters.filter { value in scale.contains { ChipPresets.isSame($0, value) } }
+            Section(kind.title) {
+                HoldMenuChoice("Auto", isOn: fixed == nil) {
+                    model.setShutter(nil)
+                }
+                ForEach(onScale, id: \.self) { value in
+                    HoldMenuChoice(HoldMenuText.time(value), isOn: ChipPresets.isSame(fixed, value)) {
+                        model.setShutter(value)
+                    }
+                }
+            }
+        }
+    }
+
+    private var iso: some View {
+        let range = model.capabilities.exposure.iso
+        let holder = ControlHolder.of(kind, model: model)
+        let fixed = holder == .person ? model.settings.manual.iso : nil
+        let lowest = range.lowerBound
+        let inRange = ChipPresets.isos.filter { $0 > lowest * 1.03 && $0 <= range.upperBound * 1.02 }
+        return Section(kind.title) {
+            HoldMenuChoice(ControlHolder.autoTitle(for: kind, model: model), isOn: holder != .person) {
+                model.setISO(nil)
+            }
+            HoldMenuChoice("Lowest (\(ISOScale.compactLabel(lowest)))", isOn: ChipPresets.isSame(fixed, lowest)) {
+                model.setISO(lowest)
+            }
+            ForEach(inRange, id: \.self) { value in
+                HoldMenuChoice(ISOScale.compactLabel(value), isOn: ChipPresets.isSame(fixed, value)) {
+                    model.setISO(value)
+                }
+            }
+        }
+    }
+
+    private var aperture: some View {
+        let caps = model.capabilities
+        let range = caps.exposure.aperture
+        let holder = ControlHolder.of(kind, model: model)
+        let fixed = holder == .person ? model.settings.manual.aperture : nil
+        // The lens's own stops where it names them, whole stops across its range otherwise.
+        let stops = ApertureScale.scale(min: range.lowerBound, max: range.upperBound, recommended: caps.apertureStops, step: .full)
+        return Section(kind.title) {
+            HoldMenuChoice(ControlHolder.autoTitle(for: kind, model: model), isOn: holder != .person) {
+                model.setAperture(nil)
+            }
+            ForEach(stops, id: \.self) { value in
+                HoldMenuChoice(ApertureScale.label(value), isOn: ChipPresets.isSame(fixed, value)) {
+                    model.setAperture(value)
+                }
+            }
+        }
+    }
+
+    private var bias: some View {
+        let settings = model.settings
+        let current = settings.mode == .night ? settings.night.biasEV : settings.manual.bias
+        let range = model.capabilities.biasRange
+        return Section(kind.title) {
+            ForEach(ChipPresets.biases.filter { range.contains($0) }, id: \.self) { value in
+                HoldMenuChoice(EVFormat.label(value) + " EV", isOn: abs(current - value) < 0.05) {
+                    model.setBias(value)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var whiteBalance: some View {
+        let holder = ControlHolder.of(kind, model: model)
+        // The camera's or the scene's own white balance checks the first row, and no preset with it.
+        let chosen: WhiteBalanceSetting = holder == .person ? model.effectiveWhiteBalance : .auto
+        Section(kind.title) {
+            HoldMenuChoice(ControlHolder.autoTitle(for: kind, model: model), isOn: holder != .person) {
+                model.setWhiteBalance(.auto)
+            }
+            ForEach(ChipPresets.whiteBalance) { preset in
+                HoldMenuChoice(preset.title, icon: Image(systemName: preset.symbolName),
+                               isOn: ChipPresets.isChosen(preset, in: chosen)) {
+                    model.setWhiteBalance(.preset(preset))
+                }
+            }
+        }
+        Section {
+            Button {
+                model.setWhiteBalanceFromGrayCard()
+            } label: {
+                Label("From a gray card", systemImage: "eyedropper")
+            }
+        }
+    }
+
+    private var tint: some View {
+        Section(kind.title) {
+            HoldMenuChoice("0", isOn: Formatting.tint(model.displayTint) == "0") {
+                model.setTint(0)
+            }
+        }
+    }
+
+    private var focus: some View {
+        let holder = ControlHolder.of(kind, model: model)
+        let position = holder == .person ? model.effectiveFocus.lensPosition : nil
+        return Section(kind.title) {
+            HoldMenuChoice(ControlHolder.autoTitle(for: kind, model: model, auto: "Autofocus"), isOn: holder != .person) {
+                model.setManualFocus(nil)
+            }
+            HoldMenuChoice("Nearest", icon: Image(systemName: "camera.macro"), isOn: position.map { $0 <= 0.005 } ?? false) {
+                model.setManualFocus(0)
+            }
+            HoldMenuChoice("Infinity", icon: Image(systemName: "infinity"), isOn: position.map { $0 >= 0.995 } ?? false) {
+                model.setManualFocus(1)
+            }
+        }
+    }
+}
+
+/// The values the chip menus offer. Each list is cut to what the camera and the mode can do before it shows.
+private enum ChipPresets {
+    static let shutters: [Double] = [1.0 / 1000, 1.0 / 250, 1.0 / 60, 1.0 / 15, 1.0 / 4, 1, 4, 30]
+    static let longDurations: [Double] = [1, 4, 15, 30, 60, 300]
+    static let isos: [Double] = [100, 400, 800, 1600, 3200]
+    /// Zero first: it is what touch and hold used to do.
+    static let biases: [Double] = [0, -2, -1, 1, 2]
+    /// The dial's own preset row without Auto, which leads the menu. Candle sits below the 2000 K the camera can
+    /// lock to.
+    static let whiteBalance: [WhiteBalancePreset] = [.daylight, .cloudy, .shade, .tungsten, .fluorescent, .flash]
+
+    /// The same stop, give or take what a float or the camera's own rounding loses. nil is auto and matches nothing.
+    static func isSame(_ a: Double?, _ b: Double) -> Bool {
+        guard let a, a > 0, b > 0 else { return false }
+        return abs(log2(a / b)) < 0.03
+    }
+
+    /// A dial that lands exactly on a preset's temperature counts as that preset, as on the dial's preset row.
+    static func isChosen(_ preset: WhiteBalancePreset, in setting: WhiteBalanceSetting) -> Bool {
+        switch setting {
+        case .auto:
+            return false
+        case .preset(let chosen):
+            return chosen == preset
+        case .kelvin(let kelvin, let tint):
+            guard let presetKelvin = preset.kelvin else { return false }
+            return abs(kelvin - presetKelvin) < 1 && abs(tint) < 0.5
         }
     }
 }
@@ -215,7 +402,8 @@ private enum ChipTone {
     case auto
     /// Yellow: the user fixed the value.
     case manual
-    /// White without a badge: a control that has no auto, sitting at its neutral value (EV 0, tint 0).
+    /// White without a badge: a control resting where nothing of the user's is set and no camera is choosing.
+    /// EV 0, tint 0, or a value LONG's scene fixes.
     case neutral
 }
 
@@ -249,7 +437,8 @@ private enum ChipReader {
         kinds.append(.bias)
         if caps.supportsCustomWhiteBalance {
             kinds.append(.whiteBalance)
-            if !settings.whiteBalance.isAuto { kinds.append(.tint) }
+            // By the white balance the camera runs: a scene that fixes the temperature leaves a tint to set.
+            if !model.effectiveWhiteBalance.isAuto { kinds.append(.tint) }
         }
         if caps.supportsManualFocus { kinds.append(.focus) }
         return kinds
@@ -281,7 +470,26 @@ private enum ChipReader {
             return !model.isManualExposure
         case .long:
             let long = model.settings.longExposure
-            return long.blend != .additive && long.frameSeconds == nil && model.isISOAuto && model.isApertureAuto
+            // An ISO or aperture the scene fixes takes the lock away the same as one set by hand.
+            return long.blend != .additive && long.frameSeconds == nil
+                && ControlHolder.of(.iso, model: model) == .camera && ControlHolder.of(.aperture, model: model) == .camera
+        }
+    }
+
+    static func toggleDial(_ kind: DialKind, model: CameraModel) {
+        Haptics.tick()
+        withAnimation(Theme.spring) {
+            model.activeDial = model.activeDial == kind ? nil : kind
+        }
+    }
+
+    /// VoiceOver's "Return to auto". The menu's first row does the same by touch.
+    static func returnToAuto(_ kind: DialKind, model: CameraModel) {
+        // Read again at the moment of the action: the value may have changed since the last redraw.
+        guard content(kind, model: model).canReset else { return }
+        Haptics.stop()
+        withAnimation(Theme.snappy) {
+            reset(kind, model: model)
         }
     }
 
@@ -292,16 +500,16 @@ private enum ChipReader {
             return shutter(model: model, settings: settings)
         case .iso:
             let iso = model.displayISO
-            let auto = model.isISOAuto
+            let holder = ControlHolder.of(kind, model: model)
             return ChipContent(title: kind.shortTitle, value: ISOScale.compactLabel(iso), numeric: iso,
-                               tone: auto ? .auto : .manual, canReset: !auto && allowsAuto(settings.mode),
-                               spokenValue: spoken(ISOScale.label(iso), auto: auto))
+                               tone: tone(holder), canReset: holder == .person,
+                               spokenValue: spoken(ISOScale.label(iso), holder: holder))
         case .aperture:
             let aperture = model.displayAperture
-            let auto = model.isApertureAuto
+            let holder = ControlHolder.of(kind, model: model)
             return ChipContent(title: kind.shortTitle, value: ApertureScale.compactLabel(aperture), numeric: aperture,
-                               tone: auto ? .auto : .manual, canReset: !auto && allowsAuto(settings.mode),
-                               spokenValue: spoken("f " + ApertureScale.compactLabel(aperture), auto: auto), hugsTitle: true)
+                               tone: tone(holder), canReset: holder == .person,
+                               spokenValue: spoken("f " + ApertureScale.compactLabel(aperture), holder: holder), hugsTitle: true)
         case .bias:
             let bias = settings.mode == .night ? settings.night.biasEV : settings.manual.bias
             let isSet = abs(bias) >= 0.05
@@ -310,10 +518,10 @@ private enum ChipReader {
                                spokenValue: EVFormat.label(bias) + " EV")
         case .whiteBalance:
             let kelvin = model.displayKelvin
-            let auto = model.isWhiteBalanceAuto
+            let holder = ControlHolder.of(kind, model: model)
             return ChipContent(title: kind.shortTitle, value: Formatting.kelvin(kelvin), numeric: kelvin,
-                               tone: auto ? .auto : .manual, canReset: !auto,
-                               spokenValue: spoken(Formatting.kelvin(kelvin), auto: auto))
+                               tone: tone(holder), canReset: holder == .person,
+                               spokenValue: spoken(Formatting.kelvin(kelvin), holder: holder))
         case .tint:
             let tint = model.displayTint
             let text = Formatting.tint(tint)
@@ -322,11 +530,12 @@ private enum ChipReader {
                                tone: isSet ? .manual : .neutral, canReset: isSet, spokenValue: text)
         case .focus:
             let position = model.displayLensPosition
-            let auto = model.isFocusAuto
-            // "MF" with an auto badge would contradict itself, so autofocus reads "AF".
-            return ChipContent(title: auto ? "AF" : kind.shortTitle, value: percent(position), numeric: position,
-                               tone: auto ? .auto : .manual, canReset: !auto,
-                               spokenValue: spoken(percent(position) + " of the focus range", auto: auto))
+            let holder = ControlHolder.of(kind, model: model)
+            // "MF" with an auto badge would contradict itself, so autofocus reads "AF". A scene that parks the
+            // lens is manual focus without the yellow.
+            return ChipContent(title: holder == .camera ? "AF" : kind.shortTitle, value: percent(position), numeric: position,
+                               tone: tone(holder), canReset: holder == .person,
+                               spokenValue: spoken(percent(position) + " of the focus range", holder: holder))
         case .zoom:
             let zoom = model.readings.displayZoom
             let label = LensMath.zoomLabel(zoom, selected: true)
@@ -377,8 +586,9 @@ private enum ChipReader {
             value = "\(degrees)\u{00B0}"
             spokenValue = "\(degrees) degree shutter angle"
         }
+        // PHOTO and NIGHT, where the model ignores a return to auto, always read auto and never show the strip.
         return ChipContent(title: title, value: value, numeric: speed.seconds, tone: auto ? .auto : .manual,
-                           canReset: !auto && allowsAuto(settings.mode), spokenValue: spoken(spokenValue, auto: auto))
+                           canReset: !auto, spokenValue: spoken(spokenValue, holder: auto ? .camera : .person))
     }
 
     /// VIDEO shares the manual shutter with MANUAL, where it can be seconds long, but a video frame can't expose
@@ -389,11 +599,6 @@ private enum ChipReader {
         let fps = model.recordedVideo.frameRate
         guard fps.isFinite else { return seconds }
         return min(seconds, 1 / max(fps, 1))
-    }
-
-    /// PHOTO and NIGHT are auto by definition; the model ignores nil there.
-    private static func allowsAuto(_ mode: CaptureMode) -> Bool {
-        mode == .manual || mode == .long || mode == .video
     }
 
     private static func angleDegrees(seconds: Double, fps: Double) -> Int {
@@ -412,7 +617,19 @@ private enum ChipReader {
         speed.isFraction ? speed.label + " of a second" : speed.label
     }
 
-    private static func spoken(_ value: String, auto: Bool) -> String {
-        auto ? value + ", auto" : value
+    private static func tone(_ holder: ControlHolder) -> ChipTone {
+        switch holder {
+        case .person: return .manual
+        case .scene: return .neutral
+        case .camera: return .auto
+        }
+    }
+
+    private static func spoken(_ value: String, holder: ControlHolder) -> String {
+        switch holder {
+        case .person: return value
+        case .scene: return value + ", set by the scene"
+        case .camera: return value + ", auto"
+        }
     }
 }

@@ -97,15 +97,21 @@ public struct LongExposureRecipe: Hashable, Sendable {
         prefersSmallestAperture && variable ? range.upperBound : nil
     }
 
-    /// The scene's limit for auto exposure frames, inside what the sensor can do.
+    /// The scene's limit for auto exposure frames, inside what the sensor can do. NaN says nothing about a limit,
+    /// so like nil it keeps the setting; clamped, it would hold auto exposure to the shortest shutter.
     public func maxAutoSeconds(in range: ClosedRange<Double>) -> Double? {
-        maxAutoSeconds.map { ExposureMath.clamp($0, to: range) }
+        guard let limit = maxAutoSeconds, !limit.isNaN else { return nil }
+        return ExposureMath.clamp(limit, to: range)
     }
 
-    /// The offered time closest to `seconds`, or the scene's own when it offers none.
+    /// The offered time closest to `seconds`: the shorter one halfway between two, the first or last past either
+    /// end. The scene's own time when it offers none or `seconds` is NaN.
     public func nearestDuration(to seconds: Double) -> Double {
-        guard seconds.isFinite, let first = durations.first else { return self.seconds }
-        return durations.reduce(first) { abs($1 - seconds) < abs($0 - seconds) ? $1 : $0 }
+        guard !seconds.isNaN, let shortest = durations.first, let longest = durations.last else { return self.seconds }
+        // Decided before any subtraction: far enough out, every difference rounds to the same number.
+        if seconds <= shortest { return shortest }
+        if seconds >= longest { return longest }
+        return durations.reduce(shortest) { abs($1 - seconds) < abs($0 - seconds) ? $1 : $0 }
     }
 }
 

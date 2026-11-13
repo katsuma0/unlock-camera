@@ -21,7 +21,7 @@ struct PermissionView: View {
                 .multilineTextAlignment(.center)
                 .padding(.bottom, 12)
                 .accessibilityAddTraits(.isHeader)
-            Text(Self.message(for: status))
+            Text(Self.message(for: status, advanced: model.isAdvanced))
                 .font(.body)
                 .foregroundStyle(Theme.secondaryText)
                 .multilineTextAlignment(.center)
@@ -98,10 +98,13 @@ struct PermissionView: View {
         }
     }
 
-    private static func message(for status: CameraAuthorization) -> String {
+    private static func message(for status: CameraAuthorization, advanced: Bool) -> String {
         switch status {
         case .notDetermined, .authorized:
-            return "Allow camera access to see the viewfinder and take photos and videos with full manual control."
+            // Manual control is the advanced interface's promise; the simple one runs on automatic.
+            return advanced
+                ? "Allow camera access to see the viewfinder and take photos and videos with full manual control."
+                : "Allow camera access to see the viewfinder and take photos and videos."
         case .denied:
             return "Turn on Camera for Open Shutter in Settings to use the viewfinder."
         case .restricted:

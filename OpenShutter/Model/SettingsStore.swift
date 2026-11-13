@@ -42,4 +42,8 @@ final class SettingsStore {
         guard let data = try? settings.encoded() else { return }
         defaults.set(data, forKey: snapshotKey)
     }
+
+    func clearAdvancedSnapshot() {
+        defaults.removeObject(forKey: snapshotKey)
+    }
 }

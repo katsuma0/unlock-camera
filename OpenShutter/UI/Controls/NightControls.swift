@@ -1,8 +1,9 @@
 import SwiftUI
 import CameraCore
 
-/// NIGHT mode: the duration (automatic from the light, or 1 to 30 s), how steady the phone is, and the frames the
-/// shot will take. The duration capsule opens its own dial, since night duration has no `DialKind`.
+/// NIGHT mode: the duration (automatic from the light, or 1 to 30 s) and, in the advanced interface, how steady the
+/// phone is and the frames the shot will take. The simple interface shows one line of advice in their place. The
+/// duration capsule opens its own dial, since night duration has no `DialKind`; touch and hold lists a few durations.
 struct NightControls: View {
     @Bindable var model: CameraModel
     @State private var isDialOpen = false
@@ -10,14 +11,9 @@ struct NightControls: View {
     var body: some View {
         let locked = model.activity.isBusy
         VStack(spacing: 6) {
-            HStack(spacing: 8) {
-                NightDurationButton(model: model, isOpen: isDialOpen, action: toggleDial)
-                Spacer(minLength: 4)
-                StabilityPicker(model: model)
-            }
-            NightPlanLine(model: model)
+            NightHeaderRows(model: model, isDialOpen: $isDialOpen)
             if isDialOpen {
-                NightDurationDial(model: model)
+                NightDurationDial(model: model, isOpen: $isDialOpen)
                     .transition(.opacity.combined(with: .offset(y: 10)))
             }
         }
@@ -35,13 +31,28 @@ struct NightControls: View {
             if isLocked { isDialOpen = false }
         }
     }
+}
 
-    private func toggleDial() {
-        Haptics.tick()
-        if !isDialOpen, model.activeDial != nil {
-            model.activeDial = nil
+/// The duration button and what goes with it at each interface level. The level is a setting, and pinches and
+/// dials write the settings many times a second, so it is read here and not by the panel with its dial.
+private struct NightHeaderRows: View {
+    let model: CameraModel
+    @Binding var isDialOpen: Bool
+
+    var body: some View {
+        if model.isAdvanced {
+            HStack(spacing: 8) {
+                NightDurationButton(model: model, isDialOpen: $isDialOpen)
+                Spacer(minLength: 4)
+                StabilityPicker(model: model)
+            }
+            NightPlanLine(model: model)
+        } else {
+            // Stability stays on automatic and the frames are the camera's business, so the button stands alone
+            // over a line of advice.
+            NightDurationButton(model: model, isDialOpen: $isDialOpen)
+            NightHintLine(model: model)
         }
-        isDialOpen.toggle()
     }
 }
 
@@ -49,41 +60,110 @@ struct NightControls: View {
 
 private struct NightDurationButton: View {
     let model: CameraModel
-    let isOpen: Bool
-    let action: () -> Void
+    @Binding var isDialOpen: Bool
+    @State private var isPressed = false
 
     var body: some View {
         let manual = model.settings.night.seconds
         // The automatic estimate follows the light, so it is only read (and redrawn at 10 Hz) while it shows.
         let seconds = manual ?? model.nightAutoSeconds
         let text = NightText.duration(seconds, isAuto: manual == nil)
-        Button(action: action) {
-            HStack(spacing: 6) {
-                UprightImage(model: model, systemName: "moon.fill")
-                    .foregroundStyle(Theme.accent)
-                Text(text)
-                    .foregroundStyle(manual == nil ? Theme.primaryText : Theme.accent)
-                    .contentTransition(.numericText(value: seconds))
-            }
+        HStack(spacing: 6) {
+            UprightImage(model: model, systemName: "moon.fill")
+                .foregroundStyle(Theme.accent)
+            Text(text)
+                .foregroundStyle(manual == nil ? Theme.primaryText : Theme.accent)
+                .contentTransition(.numericText(value: seconds))
         }
-        .buttonStyle(NightChipStyle(isSelected: isOpen))
+        .modifier(NightChipLook(isSelected: isDialOpen, isPressed: isPressed))
+        .overlay {
+            NightDurationTouchLayer(model: model, isDialOpen: $isDialOpen, isPressed: $isPressed)
+        }
         // Keyed to auto, not the text: a drag of the dial below changes the text on every tick.
         .animation(Theme.snappy, value: manual == nil)
+        .accessibilityElement(children: .ignore)
+        .accessibilityAddTraits(.isButton)
         .accessibilityLabel(Text("Night mode duration"))
         .accessibilityValue(Text(manual == nil ? "Auto, " + Formatting.compactDuration(seconds) : Formatting.compactDuration(seconds)))
-        .accessibilityHint(Text(isOpen ? "Hides the duration dial." : "Shows a dial to set the duration."))
+        .accessibilityHint(Text((isDialOpen ? "Hides the duration dial. " : "Shows a dial to set the duration. ") + HoldMenuText.hint))
+        .accessibilityAction {
+            NightDial.toggle($isDialOpen, model: model)
+        }
+        .accessibilityActions {
+            if manual != nil {
+                Button("Return to auto") {
+                    model.setNightSeconds(nil)
+                }
+            }
+        }
+    }
+}
+
+/// The button's tap and its touch and hold menu, apart from the face: the automatic duration on the face follows
+/// the light, and this layer's inputs never change.
+private struct NightDurationTouchLayer: View {
+    let model: CameraModel
+    @Binding var isDialOpen: Bool
+    @Binding var isPressed: Bool
+
+    var body: some View {
+        HoldMenuLayer(isPressed: $isPressed) {
+            NightDial.toggle($isDialOpen, model: model)
+        } options: {
+            NightDurationMenu(model: model)
+        }
+    }
+}
+
+private struct NightDurationMenu: View {
+    let model: CameraModel
+
+    /// Inside the planner's 1 to 30 s, like the dial.
+    private static let durations: [Double] = [3, 5, 10, 15, 30]
+
+    var body: some View {
+        let manual = model.settings.night.seconds
+        Section("Duration") {
+            HoldMenuChoice("Auto", isOn: manual == nil) {
+                model.setNightSeconds(nil)
+            }
+            ForEach(Self.durations, id: \.self) { seconds in
+                HoldMenuChoice(HoldMenuText.time(seconds), isOn: manual.map { abs($0 - seconds) < 0.01 } ?? false) {
+                    model.setNightSeconds(seconds)
+                }
+            }
+        }
+    }
+}
+
+@MainActor
+private enum NightDial {
+    /// Opens or closes the duration dial, closing the shared dial first. The panel animates the change.
+    static func toggle(_ isOpen: Binding<Bool>, model: CameraModel) {
+        Haptics.tick()
+        if !isOpen.wrappedValue, model.activeDial != nil {
+            model.activeDial = nil
+        }
+        isOpen.wrappedValue.toggle()
+    }
+
+    /// Done, a swipe down and VoiceOver's escape gesture all end here.
+    static func close(_ isOpen: Binding<Bool>) {
+        Haptics.tick()
+        isOpen.wrappedValue = false
     }
 }
 
 private struct NightDurationDial: View {
     let model: CameraModel
+    @Binding var isOpen: Bool
     @State private var selection: Int?
     @State private var isEditing = false
 
     var body: some View {
         let fallback = selection ?? NightScale.nearestIndex(to: NightScale.current(model))
         VStack(spacing: 4) {
-            NightDialHeader(model: model)
+            NightDialHeader(model: model, isOpen: $isOpen)
             RulerDial(
                 values: NightScale.values,
                 index: Binding(
@@ -101,6 +181,9 @@ private struct NightDurationDial: View {
                 NightDialFollower(model: model, onTarget: follow)
                     .allowsHitTesting(false)
             }
+        }
+        .closesDial(named: "Night mode duration dial") {
+            NightDial.close($isOpen)
         }
     }
 
@@ -135,6 +218,7 @@ private struct NightDialFollower: View {
 
 private struct NightDialHeader: View {
     let model: CameraModel
+    @Binding var isOpen: Bool
 
     var body: some View {
         let manual = model.settings.night.seconds
@@ -147,7 +231,12 @@ private struct NightDialHeader: View {
             onAuto: {
                 Haptics.tap()
                 model.setNightSeconds(nil)
-            }
+            },
+            onDone: {
+                NightDial.close($isOpen)
+            },
+            // This dial opens inside the panel, with the modes still in view below it.
+            doneHint: "Closes the dial."
         )
     }
 }
@@ -323,6 +412,29 @@ private struct NightPlanLine: View {
     }
 }
 
+/// The simple interface's one line of advice, where the advanced one has the stability picker and the plan. Reads
+/// motion on its own, so the attitude updates redraw only this line.
+private struct NightHintLine: View {
+    let model: CameraModel
+
+    var body: some View {
+        let steady = model.motion.isSteady
+        ZStack {
+            Text(steady ? NightText.steadyHint : NightText.handheldHint)
+                .font(.footnote)
+                .foregroundStyle(Theme.secondaryText)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+                .id(steady)
+                .transition(.opacity)
+        }
+        .frame(maxWidth: .infinity)
+        // The controls sit in a fixed band above the shutter; the largest text sizes would push them up the picture.
+        .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
+        .animation(Theme.snappy, value: steady)
+    }
+}
+
 private struct UprightImage: View {
     let model: CameraModel
     let systemName: String
@@ -333,11 +445,13 @@ private struct UprightImage: View {
     }
 }
 
-private struct NightChipStyle: ButtonStyle {
+/// The duration capsule: glass, outlined in yellow while its dial is open, in a 44 pt touch area.
+private struct NightChipLook: ViewModifier {
     var isSelected: Bool
+    var isPressed: Bool
 
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
+    func body(content: Content) -> some View {
+        content
             .font(Theme.chipFont)
             .lineLimit(1)
             .fixedSize()
@@ -348,8 +462,8 @@ private struct NightChipStyle: ButtonStyle {
                 Capsule()
                     .strokeBorder(Theme.accent.opacity(isSelected ? 0.8 : 0), lineWidth: 1)
             }
-            .scaleEffect(configuration.isPressed ? 0.94 : 1)
-            .animation(Theme.snappy, value: configuration.isPressed)
+            .scaleEffect(isPressed ? 0.94 : 1)
+            .animation(Theme.snappy, value: isPressed)
             .animation(Theme.spring, value: isSelected)
             .frame(minWidth: 44, minHeight: 44)
             .contentShape(Rectangle())
@@ -357,6 +471,10 @@ private struct NightChipStyle: ButtonStyle {
 }
 
 private enum NightText {
+    static let handheldHint = "Hold still until it finishes."
+    /// The longest duration follows the planner's range.
+    static let steadyHint = "On a tripod it can run up to \(Int(NightModePlanner.secondsRange.upperBound)) s."
+
     /// "Auto · 3s" or "10s".
     static func duration(_ seconds: Double, isAuto: Bool) -> String {
         let value = Formatting.compactDuration(seconds)

@@ -3,8 +3,11 @@ import CoreLocation
 import CameraCore
 
 /// The settings sheet. Every control reads `model.settings` and writes through `model.updateSettings`, which saves
-/// the change and re-applies it to the camera. Rows the current camera can't use stay visible but disabled, and
-/// their section footer says why, so nobody hunts for a switch that silently does nothing.
+/// the change and re-applies it to the camera.
+///
+/// The form follows the interface level. The advanced one lists everything: rows the current camera can't use stay
+/// visible but disabled, and their section footer says why, so nobody hunts for a switch that silently does nothing.
+/// The simple one lists the few settings the simple interface runs on, in plain words.
 struct SettingsView: View {
     @Bindable var model: CameraModel
 
@@ -15,15 +18,8 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
-                CaptureSection(model: model, locationAccess: locationAccess)
-                ExposureSection(model: model)
-                FocusSection(model: model)
-                ViewfinderSection(model: model)
-                NightSection(model: model)
-                LongExposureSection(model: model)
-                VideoSection(model: model)
-                ControlsSection(model: model)
-                CameraDetailsSection(capabilities: model.capabilities)
+                InterfaceSection(model: model)
+                InterfaceLevelSections(model: model, locationAccess: locationAccess)
                 AboutSection(model: model)
             }
             .formStyle(.grouped)
@@ -41,6 +37,169 @@ struct SettingsView: View {
             if locationAccess == nil {
                 locationAccess = LocationPermissionWatcher()
             }
+        }
+    }
+}
+
+// MARK: - Interface level
+
+/// The switch between the simple and the advanced interface. It leads the form at both levels, because it decides
+/// what the rest of the form lists.
+private struct InterfaceSection: View {
+    let model: CameraModel
+
+    private static let explanation = "Adds manual mode, RAW, the histogram and the detailed settings. Turning it off puts everything they changed back on automatic; turning it on again brings your settings back."
+    private static let busyNote = "This can't change while a shot is in progress."
+
+    var body: some View {
+        // The model refuses the change under a running shot and says so in a toast, which this sheet covers. The
+        // same conditions gray the switch out here, with the reason in the footer.
+        let isBusy = model.activity.isBusy || model.intervalometer != nil || model.photosInFlight > 0
+        Section {
+            Toggle("Advanced controls", isOn: Binding(
+                get: { model.isAdvanced },
+                set: { model.setAdvanced($0) }
+            ))
+            .disabled(isBusy)
+            .accessibilityHint(isBusy ? Self.busyNote : "")
+        } footer: {
+            SettingsFooter([Self.explanation, isBusy ? Self.busyNote : nil])
+        }
+    }
+}
+
+/// The sections of the interface in use, simple or advanced. Reading that here keeps it out of the form's own
+/// body, which would otherwise re-run with every setting.
+private struct InterfaceLevelSections: View {
+    let model: CameraModel
+    let locationAccess: LocationPermissionWatcher?
+
+    var body: some View {
+        if model.isAdvanced {
+            CaptureSection(model: model, locationAccess: locationAccess)
+            ExposureSection(model: model)
+            FocusSection(model: model)
+            ViewfinderSection(model: model)
+            NightSection(model: model)
+            LongExposureSection(model: model)
+            VideoSection(model: model)
+            ControlsSection(model: model)
+            CameraDetailsSection(capabilities: model.capabilities)
+        } else {
+            SimplePhotosSection(model: model, locationAccess: locationAccess)
+            SimpleViewfinderSection(model: model)
+            SimpleControlsSection(model: model)
+        }
+    }
+}
+
+// MARK: - Simple interface
+
+// The simple form lists only what the simple interface runs on and names things by what they do. Everything else
+// is on automatic there, so a row for it would describe something nobody can see.
+
+private struct SimplePhotosSection: View {
+    let model: CameraModel
+    let locationAccess: LocationPermissionWatcher?
+
+    var body: some View {
+        let capture = model.settings.capture
+        let photo = PhotoSupport(model.capabilities, isVideoMode: model.settings.mode == .video)
+
+        Section {
+            SettingsPicker("Format", selection: model.settingBinding(\.capture.processedFormat),
+                         options: Self.formats(current: capture.processedFormat, photo: photo), label: Self.formatTitle)
+            // Unlike the advanced form, a row the current camera can't use is left out: a dimmed switch and its
+            // reason are more than this short form should carry.
+            if photo.livePhoto {
+                Toggle("Live Photos", isOn: model.settingBinding(\.capture.livePhoto))
+            }
+            Toggle("Mirror the front camera", isOn: model.settingBinding(\.capture.mirrorFront))
+            Toggle("Location tags", isOn: model.settingBinding(\.capture.saveLocation))
+            if capture.saveLocation, locationAccess?.isDenied == true {
+                Button("Open Settings") { model.openAppSettings() }
+            }
+            if photo.silentShutter {
+                Toggle("Quiet shutter", isOn: model.settingBinding(\.capture.silentShutter))
+            }
+        } header: {
+            Text("Photos")
+        } footer: {
+            SettingsFooter(Self.notes(capture: capture, photo: photo, access: locationAccess))
+        }
+    }
+
+    /// High efficiency first, the default. The saved format keeps its row on a camera without it.
+    private static func formats(current: ProcessedFormat, photo: PhotoSupport) -> [ProcessedFormat] {
+        pickerOptions(photo.heif ? [.heif, .jpeg] : [.jpeg], current: current)
+    }
+
+    private static func formatTitle(_ format: ProcessedFormat) -> String {
+        switch format {
+        case .heif: return "High efficiency"
+        case .jpeg: return "Most compatible"
+        // Goes with RAW only, which this interface keeps off.
+        case .none: return format.title
+        }
+    }
+
+    private static func notes(capture: CaptureOptions, photo: PhotoSupport, access: LocationPermissionWatcher?) -> [String?] {
+        var notes: [String?] = ["High efficiency photos take less space. Most compatible photos open in any app."]
+        if capture.processedFormat == .heif, !photo.heif {
+            notes.append("The current camera can't save high efficiency photos, so it saves most compatible ones.")
+        }
+        if photo.livePhoto {
+            // The model records the Live movie in PHOTO only; unsaid, the switch would seem dead in the other modes.
+            notes.append("Only photo mode takes Live Photos.")
+        }
+        notes.append(locationProblem(enabled: capture.saveLocation, access: access)
+            ?? "Location tags add where each photo was taken. Location is only read while they are on.")
+        return notes
+    }
+}
+
+private struct SimpleViewfinderSection: View {
+    let model: CameraModel
+
+    var body: some View {
+        Section {
+            Toggle("Grid", isOn: gridBinding)
+            Toggle("Level", isOn: model.settingBinding(\.display.showLevel))
+        } header: {
+            Text("Viewfinder")
+        } footer: {
+            Text("The grid divides the picture into thirds. The level line turns yellow when the phone is straight.")
+        }
+    }
+
+    /// The simple interface has one grid, the thirds: the one its list offers besides Off, as in the drawer.
+    private var gridBinding: Binding<Bool> {
+        Binding(
+            get: { model.settings.display.grid != .off },
+            set: { isOn in
+                let grid = CameraSettings.simpleGrids.first(where: { $0 != .off }) ?? .thirds
+                model.updateSettings { $0.display.grid = isOn ? grid : .off }
+            }
+        )
+    }
+}
+
+private struct SimpleControlsSection: View {
+    let model: CameraModel
+
+    var body: some View {
+        Section {
+            Toggle("Hardware buttons take photos", isOn: model.settingBinding(\.controls.volumeShutter))
+            Toggle("Haptics", isOn: model.settingBinding(\.controls.haptics))
+        } header: {
+            Text("Buttons and feel")
+        } footer: {
+            SettingsFooter([
+                model.capabilities.supportsCameraControls
+                    ? hardwareButtonsNote
+                    : "The volume buttons take the photo. When this is off, they change the volume.",
+                "Haptics are the small taps you feel when you use the controls.",
+            ])
         }
     }
 }
@@ -84,6 +243,9 @@ private struct CaptureSection: View {
                 }
             }
             CustomAspectRow(aspect: capture.aspect) { ratio in
+                // The row saves a half-typed ratio as it goes away, and turning the advanced interface off takes
+                // it away. By then the settings are the simple ones, which keep to their own three shapes.
+                guard model.isAdvanced else { return }
                 model.updateSettings { $0.capture.aspect = ratio }
             }
         } footer: {
@@ -280,15 +442,8 @@ private struct CaptureSection: View {
     }
 
     private static func locationNote(enabled: Bool, access: LocationPermissionWatcher?) -> String {
-        let general = "Adds where each photo was taken. Location is only read while this is on."
-        guard enabled, let access else { return general }
-        if access.isDenied {
-            return "Location access is off for Open Shutter, so photos won't include where they were taken."
-        }
-        if access.isAuthorized, !access.isPrecise {
-            return "Precise Location is off for Open Shutter, so photos get an approximate place."
-        }
-        return general
+        locationProblem(enabled: enabled, access: access)
+            ?? "Adds where each photo was taken. Location is only read while this is on."
     }
 }
 
@@ -903,7 +1058,7 @@ private struct ControlsSection: View {
         } header: {
             Text("Controls")
         } footer: {
-            Text("The volume buttons and a Camera Control click take the photo. When this is off, both go back to iOS: the volume buttons change the volume and a Camera Control click opens the camera app chosen in iOS Settings. Switching lenses while zooming moves to the next lens as you pinch past it, like the Camera app.")
+            Text(hardwareButtonsNote + " Switching lenses while zooming moves to the next lens as you pinch past it, like the Camera app.")
         }
     }
 }
@@ -1094,7 +1249,10 @@ private struct AboutSection: View {
                 Button("Reset", role: .destructive, action: resetAll)
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text("Every setting goes back to its default. Photos and videos you took stay in your library.")
+                // Simple is the default interface, so the advanced one says that the reset leaves it on.
+                Text(model.isAdvanced
+                    ? "Every setting goes back to its default, and advanced controls stay on. Photos and videos you took stay in your library."
+                    : "Every setting goes back to its default. Photos and videos you took stay in your library.")
             }
         } header: {
             Text("About")
@@ -1112,6 +1270,9 @@ private struct AboutSection: View {
         let formats = model.capabilities.formats
         model.updateSettings { settings in
             var fresh = CameraSettings.default
+            // Simple or advanced, and the answered first-launch question, belong to the interface, not the
+            // camera: resetting them would swap the screen behind the sheet, or ask the question again.
+            fresh.interface = settings.interface
             // Mode, lens and zoom say where the camera is, not how it is set up; resetting them would make the
             // preview jump to another lens behind the sheet.
             fresh.mode = settings.mode
@@ -1119,7 +1280,9 @@ private struct AboutSection: View {
             fresh.zoom = settings.zoom
             // The default 4K 30 isn't on every lens, and the saved values should say what VIDEO really records.
             fresh.video = VideoFormatChoices.fitted(fresh.video, formats: formats)
-            settings = fresh
+            // The defaults switch on tools only the advanced interface shows, such as the histogram and the
+            // readout. The simple one gets the defaults the way it runs them.
+            settings = fresh.interface.advanced ? fresh : fresh.simplified()
         }
         // An open dial would keep editing a value that just went back to auto, or a tint that no longer applies.
         model.activeDial = nil
@@ -1137,6 +1300,22 @@ private extension CameraModel {
             set: { newValue in self.updateSettings { $0[keyPath: keyPath] = newValue } }
         )
     }
+}
+
+/// What the hardware buttons switch does, for both forms.
+private let hardwareButtonsNote = "The volume buttons and a Camera Control click take the photo. When this is off, both go back to iOS: the volume buttons change the volume and a Camera Control click opens the camera app chosen in iOS Settings."
+
+/// Why photos carry no place, or only a rough one, while location tags are on; nil when nothing is in the way.
+@MainActor
+private func locationProblem(enabled: Bool, access: LocationPermissionWatcher?) -> String? {
+    guard enabled, let access else { return nil }
+    if access.isDenied {
+        return "Location access is off for Open Shutter, so photos won't include where they were taken."
+    }
+    if access.isAuthorized, !access.isPrecise {
+        return "Precise Location is off for Open Shutter, so photos get an approximate place."
+    }
+    return nil
 }
 
 /// `supported` in the type's own order plus the saved value, even when the current camera lacks it. Without it the

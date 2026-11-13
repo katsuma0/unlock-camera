@@ -2,7 +2,8 @@ import Foundation
 
 // The simple interface shows a handful of settings and runs the rest on their defaults. Turning the advanced
 // interface off resets everything it alone shows, so nothing invisible keeps changing the pictures; turning it back
-// on restores those settings from a snapshot taken at that moment.
+// on restores those settings from a snapshot taken at that moment, along with what the simple interface had fewer
+// choices for.
 
 extension CameraSettings {
     /// Aspect ratios the simple drawer offers.
@@ -77,7 +78,7 @@ extension CameraSettings {
 
     /// These settings as the simple interface runs them. Everything only the advanced interface shows goes back to
     /// automatic or its default, and the settings both share are narrowed to the choices the simple one offers.
-    /// Applying it twice changes nothing more.
+    /// Applying it twice changes nothing more. `restoringAdvanced(from:)` gives back each setting narrowed here.
     public func simplified() -> CameraSettings {
         var settings = self
         settings.copyAdvancedFields(from: Self.simpleBaseline)
@@ -100,13 +101,12 @@ extension CameraSettings {
             settings.display.grid = .thirds
         }
 
-        // A scene keeps its time when that is one the scene offers; the rest follows the recipe again.
+        // A scene follows its recipe again and takes the offered time closest to its own. Custom is no scene of
+        // the simple interface, so it starts over on Water.
         let long = settings.longExposure
         if let recipe = long.recipe {
             settings.longExposure.apply(long.scene)
-            if recipe.durations.contains(long.seconds) {
-                settings.longExposure.seconds = long.seconds
-            }
+            settings.longExposure.seconds = recipe.nearestDuration(to: long.seconds)
         } else {
             settings.longExposure.apply(.water)
         }
@@ -115,11 +115,28 @@ extension CameraSettings {
 
     /// These settings with the advanced interface on, taking back every advanced-only setting from `snapshot`,
     /// the settings as they were when the advanced interface was last turned off. Without a snapshot they start
-    /// from the defaults. Settings both interfaces share keep their current values.
+    /// from the defaults. Settings both interfaces share keep their current values, except where going simple had
+    /// to narrow one (a frame shape, timer or grid it doesn't offer, a RAW-only format, a long exposure set by
+    /// hand): that comes back too while it is still where narrowing left it. The mode stays where it is.
     public func restoringAdvanced(from snapshot: CameraSettings?) -> CameraSettings {
         var settings = self
         settings.copyAdvancedFields(from: snapshot ?? .default)
         settings.interface.advanced = true
+        if let snapshot {
+            // A value that differs from the narrowed one was picked in the simple interface since, and stays.
+            // The long exposure goes as a whole: a scene with another setup's blend or frame would be neither.
+            let narrowed = snapshot.simplified()
+            func restore<Value: Equatable>(_ path: WritableKeyPath<CameraSettings, Value>) {
+                if self[keyPath: path] == narrowed[keyPath: path] {
+                    settings[keyPath: path] = snapshot[keyPath: path]
+                }
+            }
+            restore(\.capture.processedFormat)
+            restore(\.capture.aspect)
+            restore(\.capture.schedule)
+            restore(\.display.grid)
+            restore(\.longExposure)
+        }
         if !settings.capture.isValid {
             settings.capture.processedFormat = .heif
         }

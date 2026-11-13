@@ -32,12 +32,16 @@ private struct ViewfinderAccessibility: ViewModifier {
     let interaction: ViewfinderInteraction
 
     func body(content: Content) -> some View {
+        // The simple interface calls exposure compensation brightness, here as on its chip and dial.
+        let advanced = model.isAdvanced
         content
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("Viewfinder")
             // Without a value VoiceOver says nothing after a swipe, so the change would go unheard.
-            .accessibilityValue("Exposure " + EVFormat.label(ViewfinderInteraction.currentBias(model)))
-            .accessibilityHint("Double tap to focus in the middle. Swipe up or down to change exposure.")
+            .accessibilityValue((advanced ? "Exposure " : "Brightness ") + EVFormat.label(ViewfinderInteraction.currentBias(model)))
+            .accessibilityHint(advanced
+                ? "Double tap to focus in the middle. Swipe up or down to change exposure."
+                : "Double tap to focus in the middle. Swipe up or down to change brightness.")
             .accessibilityAction {
                 interaction.focusCenter(lock: false, model: model)
             }
@@ -48,7 +52,7 @@ private struct ViewfinderAccessibility: ViewModifier {
                 @unknown default: break
                 }
             }
-            .accessibilityAction(named: "Lock focus and exposure") {
+            .accessibilityAction(named: advanced ? "Lock focus and exposure" : "Lock focus and brightness") {
                 interaction.focusCenter(lock: true, model: model)
             }
             .accessibilityAction(named: "Switch zoom") {
@@ -596,7 +600,8 @@ private struct AnalysisOverlay: View {
     private var showsOverlay: Bool {
         guard model.sessionState == .running else { return false }
         let display = model.settings.display
-        let manualFocus = model.settings.focus.lensPosition != nil || model.activeDial == .focus
+        // Focus as the camera runs it: a scene that holds the lens at infinity is focused by hand as well.
+        let manualFocus = model.effectiveFocus.lensPosition != nil || model.activeDial == .focus
         let peaking = display.peaking == .always || (display.peaking == .manualFocus && manualFocus)
         return display.zebras || display.falseColor || peaking
     }
