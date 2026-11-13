@@ -189,6 +189,9 @@ final class CameraModel {
     /// Steps the zoom along the wheel's ticks; VoiceOver and the hardware buttons use it.
     func nudgeZoom(by steps: Int) {}
 
+    /// The tripod and hold-still status for NIGHT, LONG and a stacked MANUAL shutter; nil elsewhere.
+    var steadyStatus: SteadyMessage? { nil }
+
     /// Wakes the screen the battery saver darkened.
     func wakeScreen() {}
 

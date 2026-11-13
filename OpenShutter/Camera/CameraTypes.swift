@@ -310,6 +310,8 @@ struct DeviceOptions: Equatable, Sendable {
     var photoResolution: PhotoResolution
     /// Front camera photos saved the way the preview shows them (mirrored) or the way others see you.
     var mirrorFront: Bool
+    /// Shoot faster at some cost in processing, where the photo output allows it.
+    var prioritizeSpeed: Bool
 
     init(settings: CameraSettings) {
         faceDrivenAE = settings.exposure.faceDriven
@@ -330,6 +332,7 @@ struct DeviceOptions: Equatable, Sendable {
         constantColor = settings.capture.constantColor
         photoResolution = settings.capture.resolution
         mirrorFront = settings.capture.mirrorFront
+        prioritizeSpeed = settings.capture.prioritizeSpeed
     }
 }
 
@@ -361,6 +364,8 @@ struct PhotoRequest: Sendable {
     var bracket: BracketPlan
     /// Exposure to bracket around for manual brackets (current readings).
     var bracketBase: ExposureValues?
+    /// What the model knew at the press, for the photo's metadata.
+    var shot: ShotContext? = nil
 }
 
 struct StackRequest: Sendable {
@@ -374,6 +379,8 @@ struct StackRequest: Sendable {
     var location: LocationStamp?
     /// 0...1, night mode only.
     var noiseReduction: Double
+    /// What the model knew at the press, for the photo's metadata.
+    var shot: ShotContext? = nil
 }
 
 struct StackProgress: @unchecked Sendable {
@@ -396,6 +403,8 @@ struct StackProgress: @unchecked Sendable {
 struct VideoRequest: Sendable {
     var settings: VideoSettings
     var location: LocationStamp?
+    /// What the model knew at the press, for the movie's metadata.
+    var shot: ShotContext? = nil
 }
 
 struct CaptureResult: @unchecked Sendable, Identifiable {

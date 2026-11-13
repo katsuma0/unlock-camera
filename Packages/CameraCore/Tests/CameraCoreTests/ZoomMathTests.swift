@@ -527,7 +527,7 @@ final class ZoomMathTests: XCTestCase {
         XCTAssertEqual(lens(4.1, current: 1, maxFactor: 4.15, continuing: true), 1)
         XCTAssertEqual(lens(1.04, current: 0, maxFactor: 2, continuing: true), 1)
         // An unusable largest factor counts as none, so nothing is kept.
-        for bad in [Double.nan, 0, -3, -.infinity] {
+        for bad in [Double.nan, 0, -3, -Double.infinity] {
             XCTAssertEqual(lens(4.1, current: 1, maxFactor: bad, continuing: true), 2, "\(bad)")
         }
         XCTAssertEqual(lens(4.1, current: 1, maxFactor: .infinity, continuing: true), 1)
