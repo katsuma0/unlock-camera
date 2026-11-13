@@ -2,12 +2,15 @@
 
 Open Shutter is an iPhone camera app with the manual controls iOS lets an app touch. Shutter speed from the fastest the sensor allows out to 30 minutes, ISO, white balance in Kelvin and tint, manual focus, exposure compensation, every back lens, and on an iPhone 18 Pro the aperture itself.
 
+It opens as a plain camera. Four modes, everything on auto, no numbers on the screen. The first launch asks whether you want that or the advanced interface, and a switch at the top of Settings changes the answer later. Advanced adds manual mode and everything in the list below. Turning it off puts what it changed back on automatic, and turning it on again brings your settings back.
+
 The sensor can't hold a single frame open much longer than a second. Anything longer here is built from frames: a 30 second exposure is thirty 1 second frames added together on the GPU, which is what light does on a sensor anyway, so the brightness matches a real 30 second shot. Night mode works the same way with alignment and averaging, and it takes any duration you give it between 1 and 30 seconds instead of Apple's presets.
 
 What's in it:
 
 - Shutter, ISO, aperture and EV on ruler dials, each one auto or locked. Lock one and the others follow it, so shutter priority, ISO priority and aperture priority all work. With an Xcode 27 build on iOS 27, iOS runs those natively; otherwise a meter loop in the app does. On iOS 26 and later, auto exposure can meter a small spot or the whole frame instead of the area around the point you tap.
 - Aperture on variable aperture lenses (iPhone 18 Pro, iOS 27), using the stops Apple recommends for the lens.
+- Long exposure scenes that set themselves up: Water, Light trails, Stars, Northern lights, Star trails, Fireworks and Light painting. Stars, for one, is 15 seconds with focus at infinity, white balance at 4000 K and ISO held under 3200. In the advanced interface a scene is a starting point and every value can be changed.
 - Long exposure with three blends. Real adds light like a long shutter. Blur averages frames, which looks like an ND filter at noon. Trails keeps the brightest pixels for car lights and stars. Blur and Trails can also fix the shutter of each frame. Bulb runs until you let go.
 - Night mode from 1 to 30 seconds, handheld or tripod, with frame alignment and blur rejection.
 - White balance presets, Kelvin from 2000 to 10000, tint, and a gray card button.
@@ -19,6 +22,7 @@ What's in it:
 - Histogram (luma or RGB), zebras, false color, level, grids, clipping warnings and a live readout with a light meter.
 - Video with manual exposure, frame rate, resolution, HEVC, H.264 or ProRes, HDR, Apple Log or Apple Log 2, every stabilization mode the phone offers, wind noise reduction, and the torch.
 - The Camera Control button carries zoom, lens, exposure, shutter, ISO and white balance by default. Aperture, focus and mode can be swapped in from Settings. The volume buttons take the picture too.
+- Touch and hold on most buttons lists their choices: flash, video light brightness, timer, video format, the manual chips with their common values. Every dial has a Done button that brings the modes back.
 - A settings page for the capture, exposure, focus, video and control options, and a page listing what your camera reports: every format, range and feature.
 
 ## Running it
