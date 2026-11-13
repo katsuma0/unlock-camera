@@ -35,7 +35,8 @@ final class CameraSettingsTests: XCTestCase {
         XCTAssertEqual(decoded.display.zebraThreshold, DisplaySettings().zebraThreshold, accuracy: 1e-9)
     }
 
-    func testEveryCustomisedFieldRoundTrips() throws {
+    /// Every setting changed from its default.
+    private func everyFieldCustomised() -> CameraSettings {
         var s = CameraSettings()
         s.mode = .long
         s.lensID = "com.apple.avfoundation.avcapturedevice.built-in_video:2"
@@ -59,6 +60,9 @@ final class CameraSettingsTests: XCTestCase {
         s.capture.saveLocation = true
         s.capture.schedule = CaptureSchedule(delay: 10, shots: 20, interval: 30)
         s.capture.bracket = BracketPlan(kind: .exposure, count: 5, step: 1)
+        s.capture.prioritizeSpeed = true
+        s.capture.artist = "Ana Lucía Peña"
+        s.capture.copyright = "\u{00A9} 2026 Ana Lucía Peña. \"All\" rights reserved."
         s.exposure.aeMaxShutter = 1.0 / 60
         s.exposure.faceDriven = .off
         s.exposure.lowLightBoost = true
@@ -81,6 +85,7 @@ final class CameraSettingsTests: XCTestCase {
         s.display.falseColor = true
         s.display.showReadout = false
         s.display.clippingWarnings = false
+        s.display.dimDuringLongShots = true
         s.night.seconds = 12.5
         s.night.stability = .tripod
         s.night.alignFrames = false
@@ -102,15 +107,222 @@ final class CameraSettingsTests: XCTestCase {
         s.video.windNoiseReduction = false
         s.video.lowLightNoiseReduction = true
         s.video.showShutterAngle = false
+        s.video.allowAudioPlayback = true
         s.controls.volumeShutter = false
         s.controls.cameraControlItems = [.lens, .shutter, .aperture]
         s.controls.haptics = false
         s.controls.autoLensSwitching = false
+        s.controls.volumeUpAction = .zoomOut
+        s.controls.volumeDownAction = .nextLens
+        s.controls.hapticStrength = .light
+        s.controls.dialTicks = false
+        s.controls.zoomTicks = .lensValues
         s.interface.advanced = true
         s.interface.welcomed = true
+        s.appearance.scheme = .dark
+        s.appearance.accent = .purple
+        s.accessibility.largerLabels = true
+        s.accessibility.solidControls = true
+        s.accessibility.reduceMotion = true
+        s.accessibility.leftHanded = true
+        s.accessibility.speakStatus = true
+        s.topBar = TopBarOptions(leading: [.timer, .aspect, .exposureLock, .grid], trailing: [])
+        s.startup.keepMode = false
+        s.startup.keepLensAndZoom = false
+        s.startup.keepBrightness = false
+        return s
+    }
 
+    func testEveryCustomisedFieldRoundTrips() throws {
+        let s = everyFieldCustomised()
         let decoded = CameraSettings.decoded(from: try s.encoded())
         XCTAssertEqual(decoded, s)
+    }
+
+    // MARK: - Settings added since the last version
+
+    /// What the last version saved on a fresh install, its defaults, with line breaks added.
+    private let lastVersionDefaults = #"""
+        {"capture":{"aspect":{"long":4,"short":3},"bracket":{"count":3,"kind":"off","step":1},"constantColor":false,
+        "depth":false,"flash":"off","lensCorrection":true,"livePhoto":false,"mirrorFront":true,"processedFormat":"heif",
+        "processing":"balanced","quality":0.9,"rawFormat":"none","resolution":"automatic","saveLocation":false,
+        "schedule":{"delay":0,"interval":0,"shots":1},"silentShutter":false},
+        "controls":{"autoLensSwitching":true,"cameraControlItems":["zoom","lens","exposureBias","shutter","iso",
+        "whiteBalance"],"haptics":true,"volumeShutter":true},
+        "display":{"clippingWarnings":true,"falseColor":false,"grid":"off","histogram":"luma","peaking":"manualFocus",
+        "peakingColor":"red","peakingSensitivity":0.5,"showLevel":true,"showReadout":true,"zebraThreshold":0.95,
+        "zebras":false},
+        "exposure":{"faceDriven":"automatic","globalToneMapping":false,"lowLightBoost":false,
+        "meteringArea":"automatic","videoHDR":"automatic"},
+        "focus":{"auto":{}},"focusOptions":{"continuousTracking":false,"faceDriven":"automatic","range":"none",
+        "smooth":false},
+        "interface":{"advanced":false,"welcomed":false},
+        "longExposure":{"align":true,"blend":"average","bulb":false,"maxBulbSeconds":1800,"scene":"water","seconds":2},
+        "manual":{"bias":0},"mode":"photo",
+        "night":{"alignFrames":true,"biasEV":0,"maxISO":3200,"stability":"automatic"},
+        "video":{"audio":true,"codec":"hevc","colorMode":"sdr","frameRate":30,"lowLightNoiseReduction":false,
+        "resolution":"uhd4K","showShutterAngle":true,"stabilization":"standard","windNoiseReduction":true},
+        "whiteBalance":{"auto":{}},"zoom":1}
+        """#
+
+    /// Keys this version added, by path ("controls.dialTicks").
+    private let addedKeys = [
+        "appearance", "accessibility", "topBar", "startup",
+        "capture.prioritizeSpeed", "capture.artist", "capture.copyright",
+        "display.dimDuringLongShots",
+        "video.allowAudioPlayback",
+        "controls.volumeUpAction", "controls.volumeDownAction", "controls.hapticStrength", "controls.dialTicks",
+        "controls.zoomTicks",
+    ]
+
+    /// `data` without the keys at `paths`, each of which has to be there.
+    private func removing(_ paths: [String], from data: Data) throws -> Data {
+        var root = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        for path in paths {
+            let keys = path.split(separator: ".").map(String.init)
+            if keys.count == 1 {
+                XCTAssertNotNil(root.removeValue(forKey: keys[0]), path)
+            } else {
+                var group = try XCTUnwrap(root[keys[0]] as? [String: Any], path)
+                XCTAssertNotNil(group.removeValue(forKey: keys[1]), path)
+                root[keys[0]] = group
+            }
+        }
+        return try JSONSerialization.data(withJSONObject: root)
+    }
+
+    func testNewSettingsStartAsTheAppHasAlwaysWorked() {
+        let settings = CameraSettings.default
+        // Both volume buttons took the photo.
+        XCTAssertEqual(settings.controls.volumeUpAction, .shutter)
+        XCTAssertEqual(settings.controls.volumeDownAction, .shutter)
+        XCTAssertEqual(settings.controls.hapticStrength, .normal)
+        XCTAssertTrue(settings.controls.dialTicks)
+        XCTAssertEqual(settings.controls.zoomTicks, .everyStep)
+        XCTAssertFalse(settings.display.dimDuringLongShots)
+        XCTAssertFalse(settings.capture.prioritizeSpeed)
+        XCTAssertEqual(settings.capture.artist, "")
+        XCTAssertEqual(settings.capture.copyright, "")
+        XCTAssertFalse(settings.video.allowAudioPlayback)
+        XCTAssertEqual(settings.appearance, AppearanceOptions())
+        XCTAssertEqual(settings.accessibility, AccessibilityOptions())
+        XCTAssertEqual(settings.topBar, TopBarOptions())
+        XCTAssertEqual(settings.startup, StartupOptions())
+        // Opening the camera changes nothing until an option says so.
+        XCTAssertEqual(settings.applyingStartupOptions(), settings)
+    }
+
+    func testTheLastVersionsSaveLoadsWithTheNewSettingsAtTheirDefaults() {
+        let loaded = CameraSettings.decoded(from: Data(lastVersionDefaults.utf8))
+        // Its frame shape was saved with it, so it stays 4:3; everything added since starts at its default.
+        var expected = CameraSettings.default
+        expected.capture.aspect = .fourThree
+        XCTAssertEqual(loaded, expected)
+    }
+
+    func testOldSavesKeepEveryValueAndGetTheNewSettingsAtTheirDefaults() throws {
+        let customised = everyFieldCustomised()
+        let older = CameraSettings.decoded(from: try removing(addedKeys, from: customised.encoded()))
+        var expected = customised
+        expected.capture.prioritizeSpeed = false
+        expected.capture.artist = ""
+        expected.capture.copyright = ""
+        expected.display.dimDuringLongShots = false
+        expected.video.allowAudioPlayback = false
+        expected.controls.volumeUpAction = .shutter
+        expected.controls.volumeDownAction = .shutter
+        expected.controls.hapticStrength = .normal
+        expected.controls.dialTicks = true
+        expected.controls.zoomTicks = .everyStep
+        expected.appearance = AppearanceOptions()
+        expected.accessibility = AccessibilityOptions()
+        expected.topBar = TopBarOptions()
+        expected.startup = StartupOptions()
+        XCTAssertEqual(older, expected)
+    }
+
+    func testTheNewSettingsDecodeTolerantly() {
+        // A value from a later version, or of the wrong type, goes back to its default alone.
+        let json = #"""
+            {"controls":{"haptics":false,"volumeUpAction":"selfie","volumeDownAction":"zoomIn","hapticStrength":3,
+            "dialTicks":"no","zoomTicks":"lensValues"},
+            "display":{"grid":"thirds","dimDuringLongShots":"yes"},
+            "capture":{"quality":0.75,"prioritizeSpeed":"yes","artist":42,"copyright":"Sam"},
+            "video":{"audio":false,"allowAudioPlayback":{}},
+            "appearance":"dark","accessibility":{"largerLabels":true,"reduceMotion":"on"},
+            "topBar":7,"startup":{"keepMode":false,"keepBrightness":null},"zoom":2}
+            """#
+        let decoded = CameraSettings.decoded(from: Data(json.utf8))
+        XCTAssertFalse(decoded.controls.haptics)
+        XCTAssertEqual(decoded.controls.volumeUpAction, .shutter)
+        XCTAssertEqual(decoded.controls.volumeDownAction, .zoomIn)
+        XCTAssertEqual(decoded.controls.hapticStrength, .normal)
+        XCTAssertTrue(decoded.controls.dialTicks)
+        XCTAssertEqual(decoded.controls.zoomTicks, .lensValues)
+        XCTAssertEqual(decoded.display.grid, .thirds)
+        XCTAssertFalse(decoded.display.dimDuringLongShots)
+        XCTAssertEqual(decoded.capture.quality, 0.75, accuracy: 1e-9)
+        XCTAssertFalse(decoded.capture.prioritizeSpeed)
+        XCTAssertEqual(decoded.capture.artist, "")
+        XCTAssertEqual(decoded.capture.copyright, "Sam")
+        XCTAssertFalse(decoded.video.audio)
+        XCTAssertFalse(decoded.video.allowAudioPlayback)
+        XCTAssertEqual(decoded.appearance, AppearanceOptions())
+        XCTAssertTrue(decoded.accessibility.largerLabels)
+        XCTAssertFalse(decoded.accessibility.reduceMotion)
+        XCTAssertEqual(decoded.topBar, TopBarOptions())
+        XCTAssertFalse(decoded.startup.keepMode)
+        XCTAssertTrue(decoded.startup.keepLensAndZoom)
+        XCTAssertTrue(decoded.startup.keepBrightness)
+        XCTAssertEqual(decoded.zoom, 2)
+
+        // Set values come back.
+        let set = #"""
+            {"controls":{"volumeUpAction":"brighter","volumeDownAction":"nextLens","hapticStrength":"strong",
+            "dialTicks":false},"display":{"dimDuringLongShots":true},
+            "capture":{"prioritizeSpeed":true,"artist":"Sam","copyright":""},"video":{"allowAudioPlayback":true},
+            "appearance":{"scheme":"light","accent":"green"},"topBar":{"leading":["level"],"trailing":[]}}
+            """#
+        let chosen = CameraSettings.decoded(from: Data(set.utf8))
+        XCTAssertEqual(chosen.controls.volumeUpAction, .brighter)
+        XCTAssertEqual(chosen.controls.volumeDownAction, .nextLens)
+        XCTAssertEqual(chosen.controls.hapticStrength, .strong)
+        XCTAssertFalse(chosen.controls.dialTicks)
+        XCTAssertTrue(chosen.display.dimDuringLongShots)
+        XCTAssertTrue(chosen.capture.prioritizeSpeed)
+        XCTAssertEqual(chosen.capture.artist, "Sam")
+        XCTAssertTrue(chosen.video.allowAudioPlayback)
+        XCTAssertEqual(chosen.appearance.scheme, .light)
+        XCTAssertEqual(chosen.appearance.accent, .green)
+        XCTAssertEqual(chosen.topBar, TopBarOptions(leading: [.level], trailing: []))
+    }
+
+    // MARK: - Default frame shape
+
+    func testFreshSettingsFrameSixteenNine() throws {
+        XCTAssertEqual(CaptureOptions().aspect, .sixteenNine)
+        XCTAssertEqual(CameraSettings().capture.aspect, .sixteenNine)
+        XCTAssertEqual(CameraSettings.default.capture.aspect, .sixteenNine)
+        XCTAssertEqual(CameraSettings.decoded(from: Data("{}".utf8)).capture.aspect, .sixteenNine)
+        XCTAssertEqual(CameraSettings.decoded(from: Data("not json".utf8)).capture.aspect, .sixteenNine)
+        // A capture object without the key, or with one this version can't read, gets the default alone.
+        let missing = CameraSettings.decoded(from: Data(#"{"capture":{"quality":0.8,"flash":"on"}}"#.utf8))
+        XCTAssertEqual(missing.capture.aspect, .sixteenNine)
+        XCTAssertEqual(missing.capture.quality, 0.8, accuracy: 1e-9)
+        XCTAssertEqual(missing.capture.flash, .on)
+        XCTAssertEqual(CameraSettings.decoded(from: Data(#"{"capture":{"aspect":"wide"}}"#.utf8)).capture.aspect,
+                       .sixteenNine)
+
+        // Saves carry their shape, so a saved 4:3 stays 4:3.
+        let saved = CameraSettings.decoded(from: Data(#"{"capture":{"aspect":{"long":4,"short":3}}}"#.utf8))
+        XCTAssertEqual(saved.capture.aspect, .fourThree)
+        var fourThree = CameraSettings()
+        fourThree.capture.aspect = .fourThree
+        XCTAssertEqual(CameraSettings.decoded(from: try fourThree.encoded()).capture.aspect, .fourThree)
+
+        // The simple interface offers 16:9, so a fresh start stays on it in either interface.
+        XCTAssertEqual(CameraSettings.default.simplified().capture.aspect, .sixteenNine)
+        XCTAssertEqual(CameraSettings.default.simplified().restoringAdvanced(from: nil).capture.aspect, .sixteenNine)
     }
 
     func testNewerSettingsDecodeTolerantly() {

@@ -9,13 +9,22 @@ final class InterfaceLevelTests: XCTestCase {
         "manual.bias",
         "capture.processedFormat", "capture.flash", "capture.aspect", "capture.livePhoto", "capture.silentShutter",
         "capture.mirrorFront", "capture.saveLocation", "capture.schedule",
-        "display.grid", "display.showLevel",
+        "capture.prioritizeSpeed", "capture.artist", "capture.copyright",
+        "display.grid", "display.showLevel", "display.dimDuringLongShots",
         "night.seconds", "night.biasEV",
         "longExposure.scene", "longExposure.seconds", "longExposure.blend", "longExposure.bulb", "longExposure.align",
         "longExposure.frameSeconds",
-        "video.resolution", "video.frameRate",
+        "video.resolution", "video.frameRate", "video.allowAudioPlayback",
         "controls.volumeShutter", "controls.haptics",
+        "controls.volumeUpAction", "controls.volumeDownAction", "controls.hapticStrength", "controls.dialTicks",
+        "controls.zoomTicks",
         "interface.welcomed",
+        // How the app looks and handles.
+        "appearance.scheme", "appearance.accent",
+        "accessibility.largerLabels", "accessibility.solidControls", "accessibility.reduceMotion",
+        "accessibility.leftHanded", "accessibility.speakStatus",
+        "topBar.leading", "topBar.trailing",
+        "startup.keepMode", "startup.keepLensAndZoom", "startup.keepBrightness",
     ]
     private let levelSwitch = "interface.advanced"
 
@@ -37,7 +46,8 @@ final class InterfaceLevelTests: XCTestCase {
         s.capture.resolution = .mp48
         s.capture.processing = .minimal
         s.capture.flash = .auto
-        s.capture.aspect = .sixteenNine
+        // 16:9 is the default now; 4:3 is the simple interface's other full-width shape.
+        s.capture.aspect = .fourThree
         s.capture.livePhoto = true
         s.capture.silentShutter = true
         s.capture.depth = true
@@ -47,6 +57,9 @@ final class InterfaceLevelTests: XCTestCase {
         s.capture.saveLocation = true
         s.capture.schedule = CaptureSchedule(delay: 10)
         s.capture.bracket = BracketPlan(kind: .exposure, count: 5, step: 1)
+        s.capture.prioritizeSpeed = true
+        s.capture.artist = "Sam Rivera"
+        s.capture.copyright = "Copyright 2026 Sam Rivera"
         s.exposure.aeMaxShutter = 1.0 / 60
         s.exposure.faceDriven = .off
         s.exposure.lowLightBoost = true
@@ -69,6 +82,7 @@ final class InterfaceLevelTests: XCTestCase {
         s.display.falseColor = true
         s.display.showReadout = false
         s.display.clippingWarnings = false
+        s.display.dimDuringLongShots = true
         s.night.seconds = 12.5
         s.night.stability = .tripod
         s.night.alignFrames = false
@@ -86,12 +100,30 @@ final class InterfaceLevelTests: XCTestCase {
         s.video.windNoiseReduction = false
         s.video.lowLightNoiseReduction = true
         s.video.showShutterAngle = false
+        s.video.allowAudioPlayback = true
         s.controls.volumeShutter = false
         s.controls.cameraControlItems = [.lens, .shutter, .aperture]
         s.controls.haptics = false
         s.controls.autoLensSwitching = false
+        s.controls.volumeUpAction = .zoomIn
+        s.controls.volumeDownAction = .darker
+        s.controls.hapticStrength = .strong
+        s.controls.dialTicks = false
+        s.controls.zoomTicks = .lensValues
         s.interface.advanced = true
         s.interface.welcomed = true
+        s.appearance.scheme = .light
+        s.appearance.accent = .teal
+        s.accessibility.largerLabels = true
+        s.accessibility.solidControls = true
+        s.accessibility.reduceMotion = true
+        s.accessibility.leftHanded = true
+        s.accessibility.speakStatus = true
+        // An advanced-only button among them: the simple interface hides it from the bar but keeps it in the list.
+        s.topBar = TopBarOptions(leading: [.timer, .grid, .histogram], trailing: [.level, .location])
+        s.startup.keepMode = false
+        s.startup.keepLensAndZoom = false
+        s.startup.keepBrightness = false
         return s
     }
 
@@ -500,6 +532,24 @@ final class InterfaceLevelTests: XCTestCase {
         current.controls.volumeShutter = false
         current.controls.haptics = false
         current.interface.welcomed = true
+        // Off their defaults, and off the snapshots' values wherever a setting has a third one, so taking a value
+        // from either would show.
+        current.capture.prioritizeSpeed = true
+        current.capture.artist = "Kim"
+        current.capture.copyright = "Kim, all rights reserved"
+        current.display.dimDuringLongShots = true
+        current.video.allowAudioPlayback = true
+        current.controls.volumeUpAction = .brighter
+        current.controls.volumeDownAction = .nextLens
+        current.controls.hapticStrength = .light
+        current.controls.dialTicks = false
+        current.controls.zoomTicks = .lensValues
+        current.appearance.scheme = .dark
+        current.appearance.accent = .pink
+        current.accessibility.leftHanded = true
+        current.accessibility.speakStatus = true
+        current.topBar = TopBarOptions(leading: [.level], trailing: [.batterySaver])
+        current.startup.keepMode = false
         let before = leaves(of: current)
         for snapshot in [everythingChanged(), advancedSetup(), adjustedScene(), nil] {
             let after = leaves(of: current.restoringAdvanced(from: snapshot))
