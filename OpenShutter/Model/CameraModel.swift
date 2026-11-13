@@ -348,7 +348,7 @@ final class CameraModel {
     /// one shows back on automatic, after saving it; going advanced brings those settings back.
     func setAdvanced(_ advanced: Bool) {
         guard advanced != isAdvanced else { return }
-        guard canChangeMode else {
+        guard canChangeInterface else {
             let waitsForSave = !activity.isBusy && intervalometer == nil
             showToast(waitsForSave ? "Wait for the last photo to save." : "Finish the shot first.",
                       symbol: "exclamationmark.triangle")
@@ -371,6 +371,10 @@ final class CameraModel {
             scheduleApply(.whiteBalance)
         }
     }
+
+    /// The level changes only between shots, like the mode: a capture keeps the settings it started with. The
+    /// switches that call setAdvanced gray out on this.
+    var canChangeInterface: Bool { canChangeMode }
 
     /// Drops the settings kept for the advanced interface while the simple one is on. "Reset all settings" calls
     /// it, or the advanced switch would bring back what the reset was meant to clear.
@@ -904,15 +908,18 @@ final class CameraModel {
         var schedule = settings.capture.schedule
         // A scene shot from a tripod waits a moment first, so the tap on the shutter isn't in the picture. A self
         // timer already gives it that, and a bulb starts when it is told to.
+        var isSettling = false
         if !isBulbMode, schedule.delay == 0, let settle = sceneRecipe?.settleSeconds, settle > 0 {
             schedule.delay = settle
+            isSettling = true
         }
         if schedule.isOff || isBulbMode {
             scheduleTask = Task { [weak self] in
                 await self?.performCapture(bulb: self?.isBulbMode ?? false, releaseAtExposure: true)
             }
         } else {
-            runSchedule(schedule)
+            // The wait is there to let the phone come to rest, so nothing taps it on the way.
+            runSchedule(schedule, silentCountdown: isSettling)
         }
     }
 
@@ -981,13 +988,13 @@ final class CameraModel {
         }
     }
 
-    private func runSchedule(_ schedule: CaptureSchedule) {
+    private func runSchedule(_ schedule: CaptureSchedule, silentCountdown: Bool = false) {
         scheduleTask?.cancel()
         scheduleTask = Task { [weak self] in
             guard let self else { return }
             let start = Date()
             if schedule.delay > 0 {
-                let completed = await self.countdown(schedule.delay)
+                let completed = await self.countdown(schedule.delay, haptics: !silentCountdown)
                 guard completed else { return }
             }
             for index in 0..<schedule.shots {
@@ -1014,12 +1021,12 @@ final class CameraModel {
     }
 
     /// Counts down whole seconds. Returns false when cancelled.
-    private func countdown(_ seconds: Double) async -> Bool {
+    private func countdown(_ seconds: Double, haptics: Bool = true) async -> Bool {
         var remaining = seconds
         while remaining > 0 {
             if Task.isCancelled { return false }
             activity = .countdown(remaining: Int(remaining.rounded(.up)))
-            Haptics.tap()
+            if haptics { Haptics.tap() }
             let step = remaining - (remaining.rounded(.up) - 1)
             let sleep = step > 0 ? step : 1
             try? await Task.sleep(nanoseconds: UInt64(sleep * 1_000_000_000))
@@ -1288,11 +1295,12 @@ final class CameraModel {
         // Until the first-launch question is answered nothing is simplified (see init).
         let simple = !proposed.interface.advanced && proposed.interface.welcomed
         var next = simple ? proposed.simplified() : proposed
-        // A blend, frame or bulb that isn't the scene's own was set by hand, and that is what Custom means. Checked
-        // here for every way in: the LONG panel's setters and the blend picker in Settings.
+        // A blend, frame, bulb or alignment that isn't the scene's own was set by hand, and that is what Custom
+        // means. Checked here for every way in: the LONG panel's setters and the rows in Settings.
         let long = next.longExposure
         if let recipe = long.recipe,
-           long.blend != recipe.blend || long.bulb != recipe.bulb || long.frameSeconds != recipe.frameSeconds {
+           long.blend != recipe.blend || long.bulb != recipe.bulb || long.frameSeconds != recipe.frameSeconds
+            || long.align != recipe.align {
             next.longExposure.scene = .custom
         }
         if !next.capture.isValid {

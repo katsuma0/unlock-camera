@@ -82,6 +82,9 @@ private struct NightDurationButton: View {
                 .contentTransition(.numericText(value: seconds))
         }
         .modifier(NightChipLook(isSelected: isDialOpen, isPressed: press.isPressed))
+        .onTapGesture {
+            NightDial.toggle($isDialOpen, model: model)
+        }
         .overlay {
             NightDurationTouchLayer(model: model, isDialOpen: $isDialOpen, press: press)
         }

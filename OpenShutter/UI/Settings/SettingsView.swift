@@ -54,7 +54,7 @@ private struct InterfaceSection: View {
     var body: some View {
         // The model refuses the change under a running shot and says so in a toast, which this sheet covers. The
         // same conditions gray the switch out here, with the reason in the footer.
-        let isBusy = model.activity.isBusy || model.intervalometer != nil || model.photosInFlight > 0
+        let isBusy = !model.canChangeInterface
         Section {
             Toggle("Advanced controls", isOn: Binding(
                 get: { model.isAdvanced },

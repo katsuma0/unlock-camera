@@ -80,6 +80,9 @@ private struct ParameterChip: View {
         ChipFace(content: content, isSelected: isSelected, isPressed: press.isPressed)
             .frame(minHeight: 44)
             .contentShape(Rectangle())
+            .onTapGesture {
+                ChipReader.toggleDial(kind, model: model)
+            }
             .overlay {
                 ChipTouchLayer(model: model, kind: kind, press: press)
             }

@@ -135,25 +135,32 @@ struct GlassChipButtonStyle: ButtonStyle {
 /// A clear button to lay over the control, which stays the ordinary view it was: its icon still turns with the
 /// phone, its value still rolls, and VoiceOver reads it with its own label, value and actions. Give the layer a
 /// view of its own whose inputs never change, and the control's redraws never reach the system's menu button.
+/// The control underneath keeps a tap of its own that does the same as `action`: only the top view gets a touch,
+/// so the two never both run, and a layer that failed to take touches would cost the menu and not the control.
 struct MenuOnHoldLayer<Options: View>: View {
     let press: PressTracker
     let action: () -> Void
     @ViewBuilder let options: () -> Options
 
     var body: some View {
-        Menu {
-            options()
-        } label: {
-            Color.clear
-                .contentShape(Rectangle())
-        } primaryAction: {
-            action()
+        // A clear colour has no size of its own. The label gets the control's, so a menu button that sizes itself
+        // to its label's ideal size still covers the whole control.
+        GeometryReader { proxy in
+            Menu {
+                options()
+            } label: {
+                Color.clear
+                    .frame(width: proxy.size.width, height: proxy.size.height)
+                    .contentShape(Rectangle())
+            } primaryAction: {
+                action()
+            }
+            .menuStyle(.button)
+            .buttonStyle(MenuOnHoldPressStyle(press: press))
+            .menuIndicator(.hidden)
+            // Rows read top to bottom in the order they are written, whichever way the menu opens.
+            .menuOrder(.fixed)
         }
-        .menuStyle(.button)
-        .buttonStyle(MenuOnHoldPressStyle(press: press))
-        .menuIndicator(.hidden)
-        // Rows read top to bottom in the order they are written, whichever way the menu opens.
-        .menuOrder(.fixed)
         .accessibilityHidden(true)
         // A layer that goes away under a finger never reports the lift.
         .onDisappear { press.isPressed = false }

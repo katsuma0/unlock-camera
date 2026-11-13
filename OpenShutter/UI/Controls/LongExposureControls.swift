@@ -266,6 +266,10 @@ private struct DurationButton: View {
                 .contentTransition(.numericText(value: long.seconds))
         }
         .modifier(LongChipLook(isActive: !long.bulb, isSelected: isSelected, isPressed: press.isPressed))
+        .onTapGesture {
+            guard !long.bulb else { return }
+            LongDial.toggleDuration(model)
+        }
         .overlay {
             // With bulb the hold sets the length; the dial would only change the frame size.
             if !long.bulb {

@@ -538,6 +538,14 @@ private struct ControlsZone: View {
         }
         .padding(.bottom, 4)
         .frame(maxWidth: .infinity)
+        // VoiceOver's two-finger scrub closes an open dial from whichever control has the focus: the lens row and
+        // the brightness chip open dials too, and have no escape of their own.
+        .accessibilityElement(children: .contain)
+        .accessibilityAction(.escape) {
+            guard model.activeDial != nil else { return }
+            Haptics.tick()
+            withAnimation(Theme.spring) { model.activeDial = nil }
+        }
         // The zone is offered the whole screen height. Sizing it to what its rows ideally need keeps a row that
         // fills whatever it is given (a horizontal ScrollView does) from stretching it over the viewfinder.
         .fixedSize(horizontal: false, vertical: true)
@@ -678,6 +686,7 @@ private struct ExposureChip: View {
                 .animation(Theme.snappy, value: press.isPressed)
                 .frame(minWidth: 44, minHeight: 44)
                 .contentShape(Rectangle())
+                .onTapGesture { Self.toggleDial(model) }
                 .accessibilityElement(children: .ignore)
                 .accessibilityAddTraits(.isButton)
                 .accessibilityLabel(advanced ? "Exposure compensation" : "Brightness")
