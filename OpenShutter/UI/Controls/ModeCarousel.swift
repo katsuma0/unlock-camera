@@ -6,6 +6,8 @@ import CameraCore
 /// mode; the strip follows the finger and springs to the mode it lands on.
 struct ModeCarousel: View {
     @Binding var mode: CaptureMode
+    /// The modes on offer, left to right. The simple interface leaves MANUAL out.
+    var modes: [CaptureMode] = CaptureMode.carouselOrder
 
     @Environment(\.legibilityWeight) private var legibilityWeight
     @GestureState private var isTouching = false
@@ -13,8 +15,6 @@ struct ModeCarousel: View {
     @State private var dragTranslation: CGFloat = 0
     /// Title widths as laid out. Until the first layout pass a UIFont estimate stands in, so the strip starts centered.
     @State private var measuredWidths: [CaptureMode: CGFloat] = [:]
-
-    private let modes = CaptureMode.carouselOrder
 
     private static let height: CGFloat = 44
     private static let itemPadding: CGFloat = 10

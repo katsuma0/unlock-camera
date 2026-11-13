@@ -61,6 +61,8 @@ final class CameraModel {
     private(set) var controlsFullscreen = false
     /// The video light. Only VIDEO uses it, the way the Camera app's flash button becomes a torch there.
     private(set) var torchOn = false
+    /// Brightness the video light uses when it is on, 0...1.
+    private(set) var torchLevel = 1.0
 
     /// Which manual control the dial is editing. Views bind to it.
     var activeDial: DialKind? {
@@ -136,14 +138,26 @@ final class CameraModel {
         self.store = store
         self.motionMonitor = motionMonitor ?? MotionMonitor()
         self.locationProvider = locationProvider ?? LocationProvider()
-        self.settings = store.load()
+        let loaded = store.load()
+        if loaded.interface.advanced {
+            self.settings = loaded
+        } else {
+            let simple = loaded.simplified()
+            // Settings from before the simple interface existed may hold a manual setup. Kept as the snapshot,
+            // so choosing the advanced interface brings it back.
+            if simple != loaded, store.loadAdvancedSnapshot() == nil {
+                store.saveAdvancedSnapshot(loaded)
+            }
+            self.settings = simple
+        }
     }
 
     // MARK: - Lifecycle
 
-    /// Checks permission, starts the backend with the saved settings, starts motion and location.
+    /// Checks permission, starts the backend with the saved settings, starts motion and location. Waits for the
+    /// first-launch question, so the camera permission prompt doesn't land on top of it.
     func start() async {
-        guard !hasStarted else { return }
+        guard !hasStarted, !needsWelcome else { return }
         hasStarted = true
         backend.delegate = self
         Haptics.isEnabled = settings.controls.haptics
@@ -264,11 +278,50 @@ final class CameraModel {
         applyCameraControls()
     }
 
+    // MARK: - Simple and advanced
+
+    /// MANUAL mode and the detailed controls are showing. Off, the camera runs on auto and the screen keeps to the
+    /// basics.
+    var isAdvanced: Bool { settings.interface.advanced }
+
+    /// The first-launch question (simple or advanced) is still open. The camera starts once it is answered.
+    var needsWelcome: Bool { !settings.interface.welcomed }
+
+    /// Modes in the carousel, left to right.
+    var availableModes: [CaptureMode] { CaptureMode.carouselOrder(advanced: isAdvanced) }
+
+    /// Answers the first-launch question and starts the camera.
+    func finishWelcome(advanced: Bool) {
+        guard needsWelcome else { return }
+        updateSettings { $0.interface.welcomed = true }
+        setAdvanced(advanced)
+        Task { await start() }
+    }
+
+    /// Switches between the simple and the advanced interface. Going simple puts everything only the advanced
+    /// one shows back on automatic, after saving it; going advanced brings those settings back.
+    func setAdvanced(_ advanced: Bool) {
+        guard advanced != isAdvanced else { return }
+        guard canChangeMode else {
+            showToast("Finish the shot first.", symbol: "exclamationmark.triangle")
+            return
+        }
+        releaseLock()
+        activeDial = nil
+        if advanced {
+            let snapshot = store.loadAdvancedSnapshot()
+            updateSettings { $0 = $0.restoringAdvanced(from: snapshot) }
+        } else {
+            store.saveAdvancedSnapshot(settings)
+            updateSettings { $0 = $0.simplified() }
+        }
+    }
+
     // MARK: - Mode and lens
 
     func setMode(_ mode: CaptureMode) {
         // The carousel and the Camera Control play their own clicks.
-        guard mode != settings.mode, canChangeMode else { return }
+        guard mode != settings.mode, canChangeMode, availableModes.contains(mode) else { return }
         releaseLock()
         if let dial = activeDial, !dialAvailable(dial, in: mode) {
             activeDial = nil
@@ -453,8 +506,20 @@ final class CameraModel {
         let wanted = on && settings.mode == .video && capabilities.hasTorch
         guard wanted != torchOn else { return }
         torchOn = wanted
-        backend.setTorch(level: wanted ? 1 : nil)
+        backend.setTorch(level: wanted ? torchLevel : nil)
         Haptics.tap()
+    }
+
+    /// Brightness of the video light, 0...1 (the menu offers a few steps). Choosing one turns the light on.
+    func setTorchLevel(_ level: Double) {
+        guard level.isFinite else { return }
+        torchLevel = min(max(level, 0.05), 1)
+        if torchOn {
+            backend.setTorch(level: torchLevel)
+            Haptics.tap()
+        } else {
+            setTorch(true)
+        }
     }
 
     private func turnTorchOff() {
@@ -676,22 +741,49 @@ final class CameraModel {
         updateSettings { $0.night.stability = choice }
     }
 
+    /// The time stays the scene's own to change: every scene offers several.
     func setLongExposureSeconds(_ seconds: Double) {
         updateSettings { $0.longExposure.seconds = min(max(seconds, 0.25), 1800) }
     }
 
+    /// Picks what LONG mode is pointed at and loads that scene's blend, time and frame. Custom keeps the values.
+    func setLongExposureScene(_ scene: LongExposureScene) {
+        guard !activity.isBusy else { return }
+        updateSettings { $0.longExposure.apply(scene) }
+    }
+
+    /// The scene's recipe while LONG is on with a scene chosen; nil in other modes and for Custom.
+    var sceneRecipe: LongExposureRecipe? {
+        settings.mode == .long ? settings.longExposure.recipe : nil
+    }
+
+    // A blend, frame or bulb set by hand is no longer the scene's recipe, so these three leave the scene for Custom.
+
     func setLongExposureBlend(_ blend: StackBlend) {
-        updateSettings { $0.longExposure.blend = blend }
+        updateSettings {
+            guard $0.longExposure.blend != blend else { return }
+            $0.longExposure.blend = blend
+            $0.longExposure.scene = .custom
+        }
     }
 
     /// Shutter for each Blur or Trails frame; nil leaves it to auto exposure.
     func setLongExposureFrameSeconds(_ seconds: Double?) {
         let range = capabilities.exposure.seconds
-        updateSettings { $0.longExposure.frameSeconds = seconds.map { min(max($0, range.lowerBound), range.upperBound) } }
+        let frame = seconds.map { min(max($0, range.lowerBound), range.upperBound) }
+        updateSettings {
+            guard $0.longExposure.frameSeconds != frame else { return }
+            $0.longExposure.frameSeconds = frame
+            $0.longExposure.scene = .custom
+        }
     }
 
     func setBulb(_ enabled: Bool) {
-        updateSettings { $0.longExposure.bulb = enabled }
+        updateSettings {
+            guard $0.longExposure.bulb != enabled else { return }
+            $0.longExposure.bulb = enabled
+            $0.longExposure.scene = .custom
+        }
     }
 
     // MARK: - Capture
@@ -1263,7 +1355,8 @@ final class CameraModel {
 
     private func applyCameraControls() {
         let state = CameraControlState(
-            items: settings.controls.cameraControlItems,
+            // The simple interface has no MANUAL to land in, so its Camera Control carries nothing that leads there.
+            items: isAdvanced ? settings.controls.cameraControlItems : CameraSettings.simpleCameraControlItems,
             shutterStops: shutterScale.map(\.seconds),
             // LONG's shutter picker sets the duration, which Blur and Trails have as well; it is never Auto there.
             shutter: settings.mode == .long ? settings.longExposure.seconds : (isShutterAuto ? nil : displayShutter),
@@ -1361,15 +1454,35 @@ final class CameraModel {
         }
     }
 
+    /// Focus as the camera runs it: the person's own setting, else the scene's (stars and fireworks sit at
+    /// infinity), else autofocus.
+    var effectiveFocus: FocusSetting {
+        if settings.focus.lensPosition != nil { return settings.focus }
+        if sceneRecipe?.focusAtInfinity == true, capabilities.supportsManualFocus {
+            // The far end of the lens travel. Past the hyperfocal distance of a phone lens, so the sky is sharp.
+            return .manual(lensPosition: 1)
+        }
+        return .auto
+    }
+
+    /// White balance as the camera runs it: the person's own setting, else the scene's fixed temperature, else auto.
+    var effectiveWhiteBalance: WhiteBalanceSetting {
+        if !settings.whiteBalance.isAuto { return settings.whiteBalance }
+        if let kelvin = sceneRecipe?.kelvin, capabilities.supportsCustomWhiteBalance {
+            return .kelvin(kelvin, tint: 0)
+        }
+        return .auto
+    }
+
     private func currentFocusRequest() -> FocusRequest {
-        if let position = settings.focus.lensPosition, capabilities.supportsManualFocus {
+        if let position = effectiveFocus.lensPosition, capabilities.supportsManualFocus {
             return .manual(position)
         }
         return .continuousAuto
     }
 
     private func currentWhiteBalanceRequest() -> WhiteBalanceRequest {
-        switch settings.whiteBalance {
+        switch effectiveWhiteBalance {
         case .auto:
             return .auto
         case .preset(let preset):
