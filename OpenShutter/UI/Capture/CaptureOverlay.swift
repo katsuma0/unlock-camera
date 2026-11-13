@@ -100,10 +100,14 @@ private struct CountdownHint: View {
     let model: CameraModel
 
     var body: some View {
-        Text("Tap the shutter to cancel")
+        // A tripod scene's wait counts down like a self timer nobody set, so it says what it is for. The break falls
+        // between the sentences rather than wherever the width runs out.
+        Text(model.isSettling ? "Letting the phone settle.\nTap the shutter to cancel." : "Tap the shutter to cancel.")
             .font(.footnote.weight(.semibold))
             .foregroundStyle(Theme.secondaryText)
+            .multilineTextAlignment(.center)
             .shadow(color: .black.opacity(0.6), radius: 4)
+            .padding(.horizontal, 24)
             .offset(y: 96)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .uprightRotation(model.motion.iconRotationDegrees)
@@ -147,7 +151,8 @@ private struct StatusBlock: View {
                     BracketStatusLine(model: model)
                 }
                 if isStacking {
-                    StackStatusLine(progress: model.stackProgress, isFinishing: isFinishing)
+                    StackStatusLine(progress: model.stackProgress, isFinishing: isFinishing,
+                                    countsFrames: model.isAdvanced)
                 }
                 StatusButtons(
                     canDiscard: isStacking && !isFinishing,
@@ -226,7 +231,7 @@ private struct BracketStatusLine: View {
 
     /// The model's center for a focus bracket: the manual focus distance, or where autofocus has the lens.
     private static func focusCenter(_ model: CameraModel) -> Double {
-        model.settings.focus.lensPosition ?? model.readings.lensPosition
+        model.effectiveFocus.lensPosition ?? model.readings.lensPosition
     }
 
     static func text(_ bracket: BracketPlan, focusCenter: Double, frame: Int, stopping: Bool = false) -> String {
@@ -256,6 +261,8 @@ private struct BracketStatusLine: View {
 private struct StackStatusLine: View {
     let progress: StackProgress?
     let isFinishing: Bool
+    /// The advanced interface counts the frames a shot is built from. The simple one shows the clock alone.
+    let countsFrames: Bool
 
     var body: some View {
         let fraction = Self.fraction(progress)
@@ -280,7 +287,7 @@ private struct StackStatusLine: View {
             } else {
                 ProgressRing(fraction: fraction)
             }
-            Text(processing ? "Processing" : Self.text(progress))
+            Text(processing ? "Processing" : Self.text(progress, countsFrames: countsFrames))
                 .contentTransition(.numericText())
         }
         .font(Theme.valueFont)
@@ -291,7 +298,7 @@ private struct StackStatusLine: View {
         .animation(Theme.snappy, value: processing)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(processing ? "Processing" : "Exposure in progress")
-        .accessibilityValue(processing ? "" : Self.text(progress))
+        .accessibilityValue(processing ? "" : Self.text(progress, countsFrames: countsFrames))
     }
 
     private static func fraction(_ progress: StackProgress?) -> Double {
@@ -299,8 +306,9 @@ private struct StackStatusLine: View {
         return min(max(value, 0), 1)
     }
 
-    /// "12 of 30 · 0:08" counting down to the planned end; bulb counts up: "12 frames · 0:08".
-    static func text(_ progress: StackProgress?) -> String {
+    /// "12 of 30 · 0:08" counting down to the planned end; bulb counts up: "12 frames · 0:08". Without the frame
+    /// count it is the clock alone, "0:08".
+    static func text(_ progress: StackProgress?, countsFrames: Bool = true) -> String {
         guard let progress else { return "Starting" }
         let captured = max(0, progress.framesCaptured)
         let elapsed = progress.elapsed.isFinite ? max(0, progress.elapsed) : 0
@@ -311,10 +319,12 @@ private struct StackStatusLine: View {
             } else {
                 clock = Formatting.clock(elapsed.rounded(.down))
             }
-            return "\(captured) of \(progress.framesPlanned) \u{00B7} \(clock)"
+            return countsFrames ? "\(captured) of \(progress.framesPlanned) \u{00B7} \(clock)" : clock
         }
+        let clock = Formatting.clock(elapsed.rounded(.down))
+        guard countsFrames else { return clock }
         let frames = captured == 1 ? "1 frame" : "\(captured) frames"
-        return frames + " \u{00B7} " + Formatting.clock(elapsed.rounded(.down))
+        return frames + " \u{00B7} " + clock
     }
 }
 

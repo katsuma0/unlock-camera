@@ -429,11 +429,17 @@ extension CameraService {
         frameDurationRestoreLimit = longestFrame.seconds
     }
 
-    /// Device not locked. Gives the format its own frame durations back once exposures fit in them again,
-    /// otherwise the preview stays at the slideshow rate of the last long exposure.
-    nonisolated private func restoreFrameDurations(unlessLongerThan duration: CMTime?) {
+    /// Device not locked. Gives the format its own frame durations back unless `duration` still fills the stretched
+    /// frame. A shorter custom exposure leaves the frame as long as it was, so a 1/8 s exposure after a 1 s one would
+    /// come once a second; from the format's own durations it stretches the frame to its own length and no further.
+    nonisolated func restoreFrameDurations(unlessLongerThan duration: CMTime?) {
         guard let limit = frameDurationRestoreLimit else { return }
-        if let duration, duration.seconds > limit { return }
+        if let duration, duration.seconds > limit, let device = activeCamera?.device {
+            let stretched = device.activeVideoMaxFrameDuration
+            // A twelfth of a stop covers the device rounding the frame it stretched to, so asking for the same
+            // duration again doesn't reset it.
+            if !stretched.isNumeric || duration.seconds * pow(2, 1.0 / 12) >= stretched.seconds { return }
+        }
         applyFrameRateLimits()
     }
 

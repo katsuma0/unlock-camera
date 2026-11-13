@@ -1345,6 +1345,11 @@ extension CameraService {
                            lens: camera.lens, zoomFactor: Double(camera.device.videoZoomFactor),
                            exposureBefore: restoreTarget ?? Self.currentExposure(of: camera.device), wasAELocked: lockSettled)
         stackJob = job
+        // The preview's longer exposure may have left the frame stretched, and the stack would get one frame per
+        // stretched frame time. This comes first because applyFrameRateLimits does nothing while a stack is in progress.
+        if let frame = Self.clampedDuration(request.plan.frameSeconds, in: camera.device.activeFormat) {
+            restoreFrameDurations(unlessLongerThan: frame)
+        }
         stackInProgress = true
         stopSoftwareAE()
         updateFrameDelivery()

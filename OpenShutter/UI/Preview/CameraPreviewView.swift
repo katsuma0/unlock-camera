@@ -32,12 +32,17 @@ private struct ViewfinderAccessibility: ViewModifier {
     let interaction: ViewfinderInteraction
 
     func body(content: Content) -> some View {
+        // The simple interface calls exposure compensation brightness, here as on its chip and dial.
+        let advanced = model.isAdvanced
         content
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("Viewfinder")
             // Without a value VoiceOver says nothing after a swipe, so the change would go unheard.
-            .accessibilityValue("Exposure " + EVFormat.label(ViewfinderInteraction.currentBias(model)))
-            .accessibilityHint("Double tap to focus in the middle. Swipe up or down to change exposure.")
+            .accessibilityValue((advanced ? "Exposure " : "Brightness ")
+                + EVFormat.label(ViewfinderInteraction.currentBias(model)))
+            .accessibilityHint(advanced
+                ? "Double tap to focus in the middle. Swipe up or down to change exposure."
+                : "Double tap to focus in the middle. Swipe up or down to change brightness.")
             .accessibilityAction {
                 interaction.focusCenter(lock: false, model: model)
             }
@@ -48,7 +53,7 @@ private struct ViewfinderAccessibility: ViewModifier {
                 @unknown default: break
                 }
             }
-            .accessibilityAction(named: "Lock focus and exposure") {
+            .accessibilityAction(named: advanced ? "Lock focus and exposure" : "Lock focus and brightness") {
                 interaction.focusCenter(lock: true, model: model)
             }
             .accessibilityAction(named: "Switch zoom") {
@@ -76,7 +81,8 @@ private final class ViewfinderInteraction {
     private(set) var focusPointIsCurrent = false
     /// The square is bright: tapped, or exposure changed beside it, within the last two seconds.
     private(set) var reticleIsFresh = false
-    /// The long press that placed the tracked point also locked exposure, so the square stays while that lasts.
+    /// The long press that placed the tracked point also locked the focus, the exposure or both, so the square
+    /// stays while that lasts.
     private(set) var lockIsAtFocusPoint = false
     /// Bumped to restart the two-second fade.
     private(set) var freshGeneration = 0
@@ -144,13 +150,13 @@ private final class ViewfinderInteraction {
         trackedFocusPoint = point
         focusPointIsCurrent = point != nil
         reticleIsFresh = point != nil
-        lockIsAtFocusPoint = point != nil && model.aeLocked
+        lockIsAtFocusPoint = point != nil && Self.isLocked(model)
         freshGeneration &+= 1
     }
 
     /// The model keeps the point of a released lock. Locking again later (the AE-L chip) isn't tied to that old
     /// square, so it must not bring the square and the sun back.
-    func aeLockChanged(_ locked: Bool) {
+    func lockChanged(_ locked: Bool) {
         if !locked && lockIsAtFocusPoint {
             lockIsAtFocusPoint = false
         }
@@ -185,9 +191,15 @@ private final class ViewfinderInteraction {
         return point
     }
 
-    /// A tap clears the AE lock and a long press sets it, so a point that arrived locked came from a long press.
+    /// A tap clears the lock and a long press sets it, so a point that arrived locked came from a long press.
     private func holdsLock(_ model: CameraModel) -> Bool {
-        model.aeLocked && lockIsAtFocusPoint
+        Self.isLocked(model) && lockIsAtFocusPoint
+    }
+
+    /// Either half of a lock keeps the square, by the rule ViewfinderOverlays draws it with: in a scene that fixes
+    /// the ISO a long press holds the focus alone.
+    static func isLocked(_ model: CameraModel) -> Bool {
+        model.aeLocked || model.focusLocked
     }
 
     // MARK: Zoom
@@ -596,7 +608,9 @@ private struct AnalysisOverlay: View {
     private var showsOverlay: Bool {
         guard model.sessionState == .running else { return false }
         let display = model.settings.display
-        let manualFocus = model.settings.focus.lensPosition != nil || model.activeDial == .focus
+        // Focus as the camera runs it, like the model's options: a scene that holds the lens at infinity counts
+        // as manual focus.
+        let manualFocus = model.effectiveFocus.lensPosition != nil || model.activeDial == .focus
         let peaking = display.peaking == .always || (display.peaking == .manualFocus && manualFocus)
         return display.zebras || display.falseColor || peaking
     }
@@ -685,8 +699,8 @@ private struct ExposureSlider: View {
         .onChange(of: model.focusPoint, initial: true) { _, point in
             interaction.focusPointChanged(to: point, model: model)
         }
-        .onChange(of: model.aeLocked) { _, locked in
-            interaction.aeLockChanged(locked)
+        .onChange(of: ViewfinderInteraction.isLocked(model)) { _, locked in
+            interaction.lockChanged(locked)
         }
         .onChange(of: ViewfinderInteraction.currentBias(model)) {
             interaction.biasChanged(model: model)

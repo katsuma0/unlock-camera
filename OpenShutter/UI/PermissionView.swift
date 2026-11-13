@@ -8,6 +8,36 @@ struct PermissionView: View {
 
     var body: some View {
         let status = model.authorization
+        // Where the page fits, the button keeps its place near the bottom. Large text sizes can outgrow the screen,
+        // and then the page scrolls, as the welcome page before it does.
+        ViewThatFits(in: .vertical) {
+            page(for: status)
+                .frame(maxHeight: .infinity)
+            ScrollView {
+                page(for: status)
+            }
+            .scrollBounceBehavior(.basedOnSize)
+            // The page fades in late (see the task below), so the indicator flashes when it shows, not on appear.
+            .scrollIndicatorsFlash(trigger: isShown)
+        }
+        .background(Theme.background.ignoresSafeArea())
+        .opacity(isShown ? 1 : 0)
+        .task(id: status) {
+            // Once access is granted this page is on its way out; fading it in now would flash it.
+            guard status != .authorized else { return }
+            // Every launch starts as "not determined" for a moment, until the model reads the real status.
+            // Waiting a beat keeps people who already allowed the camera from seeing this page flash by.
+            if status == .notDetermined, !isShown {
+                try? await Task.sleep(nanoseconds: 450_000_000)
+                guard !Task.isCancelled else { return }
+            }
+            withAnimation(.easeOut(duration: 0.3)) { isShown = true }
+        }
+    }
+
+    /// The column itself. Its spacers spread it over the screen where there is room and keep their minimum inside
+    /// the scroll view.
+    private func page(for status: CameraAuthorization) -> some View {
         VStack(spacing: 0) {
             Spacer(minLength: 24)
             Image(systemName: "camera.aperture")
@@ -19,9 +49,10 @@ struct PermissionView: View {
                 .font(.title2.weight(.semibold))
                 .foregroundStyle(Theme.primaryText)
                 .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
                 .padding(.bottom, 12)
                 .accessibilityAddTraits(.isHeader)
-            Text(Self.message(for: status))
+            Text(Self.message(for: status, advanced: model.isAdvanced))
                 .font(.body)
                 .foregroundStyle(Theme.secondaryText)
                 .multilineTextAlignment(.center)
@@ -38,20 +69,7 @@ struct PermissionView: View {
         .padding(.horizontal, 32)
         .padding(.bottom, 24)
         .frame(maxWidth: 480)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Theme.background.ignoresSafeArea())
-        .opacity(isShown ? 1 : 0)
-        .task(id: status) {
-            // Once access is granted this page is on its way out; fading it in now would flash it.
-            guard status != .authorized else { return }
-            // Every launch starts as "not determined" for a moment, until the model reads the real status.
-            // Waiting a beat keeps people who already allowed the camera from seeing this page flash by.
-            if status == .notDetermined, !isShown {
-                try? await Task.sleep(nanoseconds: 450_000_000)
-                guard !Task.isCancelled else { return }
-            }
-            withAnimation(.easeOut(duration: 0.3)) { isShown = true }
-        }
+        .frame(maxWidth: .infinity)
     }
 
     @ViewBuilder
@@ -98,10 +116,13 @@ struct PermissionView: View {
         }
     }
 
-    private static func message(for status: CameraAuthorization) -> String {
+    private static func message(for status: CameraAuthorization, advanced: Bool) -> String {
         switch status {
         case .notDetermined, .authorized:
-            return "Allow camera access to see the viewfinder and take photos and videos with full manual control."
+            // Manual control is the advanced interface's promise; the simple one runs on automatic.
+            return advanced
+                ? "Allow camera access to see the viewfinder and take photos and videos with full manual control."
+                : "Allow camera access to see the viewfinder and take photos and videos."
         case .denied:
             return "Turn on Camera for Open Shutter in Settings to use the viewfinder."
         case .restricted:

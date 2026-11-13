@@ -29,6 +29,8 @@ final class CameraModel {
     private(set) var activity: CaptureActivity = .idle {
         didSet { if oldValue != activity { updateIdleTimer() } }
     }
+    /// The countdown running is only the wait a tripod scene takes after the tap, not a self timer.
+    private(set) var isSettling = false
     /// Photos from their request until they are saved. The session can't change lens or mode under them.
     private(set) var photosInFlight = 0
     /// Counts camera swaps started by select(): lens buttons, double tap, Camera Control Lens picks, flips, queued and
@@ -61,11 +63,19 @@ final class CameraModel {
     private(set) var controlsFullscreen = false
     /// The video light. Only VIDEO uses it, the way the Camera app's flash button becomes a torch there.
     private(set) var torchOn = false
+    /// Brightness the video light uses when it is on, 0...1.
+    private(set) var torchLevel = 1.0
 
     /// Which manual control the dial is editing. Views bind to it.
     var activeDial: DialKind? {
         didSet {
             guard oldValue != activeDial else { return }
+            // The simple interface dials brightness and zoom. Any other dial would edit a value it keeps on auto.
+            if let dial = activeDial, !isAdvanced, dial != .bias, dial != .zoom {
+                // Runs this observer again for the closed dial, which does the rest.
+                activeDial = nil
+                return
+            }
             // Peaking follows the focus dial in "manual focus" peaking mode.
             applyAnalysis()
             if activeDial == nil { applyCameraControls() }
@@ -86,6 +96,11 @@ final class CameraModel {
 
     @ObservationIgnored private var hasStarted = false
     @ObservationIgnored private var backendRunning = false
+    /// The app is behind another one. The camera can't run there and a permission prompt has nowhere to show, so a
+    /// start asked for meanwhile waits for the return.
+    @ObservationIgnored private var inBackground = false
+    /// Counts backend starts, so one the app left in the middle of doesn't finish setting up a stopped camera.
+    @ObservationIgnored private var backendStarts = 0
     @ObservationIgnored private var saveTask: Task<Void, Never>?
     @ObservationIgnored private var applyTask: Task<Void, Never>?
     @ObservationIgnored private var pendingApply: Set<ApplyKind> = []
@@ -103,8 +118,9 @@ final class CameraModel {
     @ObservationIgnored private var pendingZoom: (value: Double, animated: Bool)?
     /// The newest lens chosen while a lens switch was reconfiguring the session or photos were still being saved.
     @ObservationIgnored private var pendingPreset: LensPreset?
-    /// A long press focused once and is holding that distance (the AF half of AE/AF LOCK).
-    @ObservationIgnored private var focusHeld = false
+    /// A long press focused once and is holding that distance (the AF half of AE/AF LOCK). Observed, because the
+    /// viewfinder shows a hold of the focus alone as well as one with the exposure.
+    private var focusHeld = false
     /// Counts photo captures, so a photo that finishes late can tell a newer one owns the shutter state.
     @ObservationIgnored private var photoGeneration = 0
     /// The newest photo frees the shutter as soon as it is exposed (cameraBackendWillCapture).
@@ -115,19 +131,28 @@ final class CameraModel {
     /// NIGHT's metered light and bias when AE was locked, so recomposing doesn't change the plan.
     @ObservationIgnored private var lockedMeter: (product: Double, bias: Double)?
     @ObservationIgnored private var lockMeterTask: Task<Void, Never>?
-    /// A stacked shutter with auto ISO wants less than base ISO for the whole time, so it is shot at base ISO and
-    /// the preview is asked for that too (updateStackISOFloor).
-    @ObservationIgnored private var stackISOAtFloor = false
+    /// A stacked shutter's auto ISO wants less than base ISO for the whole time, or more than a scene lets it have,
+    /// so it is shot at that limit and the preview is asked for the same (updateStackISOLimit).
+    @ObservationIgnored private var stackISOLimit: StackISOLimit?
     /// Pressing the shutter or a side button jolts a phone on a tripod, so the steady plan shown just before the
     /// press still counts for a moment after the motion sensor says otherwise.
     @ObservationIgnored private var steadyLostAt: Date?
+    /// When the last countdown ran out and its shot began. A press that lands just after it was meant for the
+    /// countdown (stackJustStartedFromCountdown).
+    @ObservationIgnored private var countdownEndedAt: Date?
     /// When the app last sent a zoom or an exposure bias. Readings that disagree after that settle came from
-    /// somewhere else, like the Camera Control's system sliders, and get adopted.
+    /// somewhere else, like the Camera Control's system sliders, and get adopted. The far future marks a request
+    /// still waiting for the session: until a start or a mode change has set it up and applyAll sends the
+    /// settings, the camera runs whatever it ran before, and its readings say nothing about them.
     @ObservationIgnored private var lastZoomCommand = Date.distantPast
     @ObservationIgnored private var lastBiasCommand = Date.distantPast
 
     private enum ApplyKind: Hashable {
         case exposure, focus, whiteBalance
+    }
+
+    private enum StackISOLimit {
+        case floor, ceiling
     }
 
     // Default arguments run outside the main actor, so the main-actor helpers are built in the body.
@@ -136,14 +161,31 @@ final class CameraModel {
         self.store = store
         self.motionMonitor = motionMonitor ?? MotionMonitor()
         self.locationProvider = locationProvider ?? LocationProvider()
-        self.settings = store.load()
+        let loaded = store.load()
+        if loaded.interface.advanced || !loaded.interface.welcomed {
+            // Until the first-launch question is answered nothing is simplified, so settings from a version before
+            // it come through "Advanced" exactly as they were (finishWelcome).
+            self.settings = loaded
+        } else {
+            let simple = loaded.simplified()
+            // Anything a later version starts to hide from the simple interface is kept as the snapshot, unless
+            // one from the last switch is already there.
+            if simple != loaded, store.loadAdvancedSnapshot() == nil {
+                store.saveAdvancedSnapshot(loaded)
+            }
+            self.settings = simple
+        }
+        // The first-launch question comes before start(), and its buttons click too.
+        Haptics.isEnabled = settings.controls.haptics
     }
 
     // MARK: - Lifecycle
 
-    /// Checks permission, starts the backend with the saved settings, starts motion and location.
+    /// Checks permission, starts the backend with the saved settings, starts motion and location. Waits for the
+    /// first-launch question, so the camera permission prompt doesn't land on top of it, and for the app to be in
+    /// front (sceneDidBecomeActive calls again).
     func start() async {
-        guard !hasStarted else { return }
+        guard !hasStarted, !needsWelcome, !inBackground else { return }
         hasStarted = true
         backend.delegate = self
         Haptics.isEnabled = settings.controls.haptics
@@ -171,7 +213,14 @@ final class CameraModel {
     }
 
     func sceneDidBecomeActive() {
-        guard hasStarted else { return }
+        inBackground = false
+        guard hasStarted else {
+            // A start put off while the app was away: the first-launch answer can arrive on the way out.
+            if !needsWelcome {
+                Task { await start() }
+            }
+            return
+        }
         // Keeps Auto-Lock in step with a stack that went on while the app was away.
         updateIdleTimer()
         let status = backend.authorizationStatus()
@@ -183,6 +232,7 @@ final class CameraModel {
     }
 
     func sceneDidEnterBackground() {
+        inBackground = true
         guard backendRunning else { return }
         // The scene in front of the lens will have changed by the time the app comes back.
         releaseLock()
@@ -228,10 +278,16 @@ final class CameraModel {
     }
 
     private func startBackend() async {
-        guard !backendRunning else { return }
+        guard !backendRunning, !inBackground else { return }
         backendRunning = true
+        // A starting camera runs whatever bias it had until applyAll sends these settings.
+        lastBiasCommand = .distantFuture
+        backendStarts &+= 1
+        let attempt = backendStarts
         sessionState = .starting
         await backend.start(settings: settings)
+        // The app left while the camera was starting, and leaving stopped it. The return starts it afresh.
+        guard backendRunning, attempt == backendStarts else { return }
         // A backend that failed or got interrupted has already said so; otherwise start returning means it runs.
         if sessionState == .starting || sessionState == .idle {
             sessionState = .running
@@ -240,6 +296,7 @@ final class CameraModel {
         applyAll()
         if settings.mode == .video {
             await backend.configureForVideo(settings.video)
+            guard backendRunning, attempt == backendStarts else { return }
             applyAll()
             noteMicrophoneIfDenied()
         }
@@ -258,17 +315,89 @@ final class CameraModel {
         lastBiasCommand = Date()
         backend.apply(options: DeviceOptions(settings: settings))
         backend.apply(exposure: currentExposureRequest())
+        endFocusHold()
         backend.apply(focus: currentFocusRequest())
         backend.apply(whiteBalance: currentWhiteBalanceRequest())
         applyAnalysis()
         applyCameraControls()
     }
 
+    // MARK: - Simple and advanced
+
+    /// MANUAL mode and the detailed controls are showing. Off, the camera runs on auto and the screen keeps to the
+    /// basics.
+    var isAdvanced: Bool { settings.interface.advanced }
+
+    /// The first-launch question (simple or advanced) is still open. The camera starts once it is answered.
+    var needsWelcome: Bool { !settings.interface.welcomed }
+
+    /// Modes in the carousel, left to right.
+    var availableModes: [CaptureMode] { CaptureMode.carouselOrder(advanced: isAdvanced) }
+
+    /// Answers the first-launch question and starts the camera. "Advanced" keeps every setting an earlier version
+    /// saved as it was; "Simple" keeps them as the snapshot the advanced switch brings back.
+    func finishWelcome(advanced: Bool) {
+        guard needsWelcome else { return }
+        var answered = settings
+        answered.interface.welcomed = true
+        answered.interface.advanced = advanced
+        if !advanced {
+            let simple = answered.simplified()
+            if simple != answered {
+                store.saveAdvancedSnapshot(settings)
+            }
+            answered = simple
+        }
+        // No camera is running yet to re-apply anything to: start() sends it everything.
+        settings = answered
+        // Saved at once, so quitting right after the answer doesn't bring the question back.
+        saveNow()
+        Task { await start() }
+    }
+
+    /// Switches between the simple and the advanced interface. Going simple puts everything only the advanced
+    /// one shows back on automatic, after saving it; going advanced brings those settings back.
+    func setAdvanced(_ advanced: Bool) {
+        guard advanced != isAdvanced else { return }
+        guard canChangeInterface else {
+            let waitsForSave = !activity.isBusy && intervalometer == nil
+            showToast(waitsForSave ? "Wait for the last photo to save." : "Finish the shot first.",
+                      symbol: "exclamationmark.triangle")
+            return
+        }
+        // Nothing stays open or held that the other level has no control for: a lock, a dial, a gray card
+        // measurement still on its way.
+        releaseLock()
+        activeDial = nil
+        let grayCardPending = adoptNextWhiteBalanceReading
+        adoptNextWhiteBalanceReading = false
+        if advanced {
+            commit(settings.restoringAdvanced(from: store.loadAdvancedSnapshot()))
+        } else {
+            store.saveAdvancedSnapshot(settings)
+            commit(settings.simplified())
+        }
+        // The camera is still held on the gray card measurement, which no setting stands for any more.
+        if grayCardPending {
+            scheduleApply(.whiteBalance)
+        }
+    }
+
+    /// The level changes only between shots, like the mode: a capture keeps the settings it started with. The
+    /// switches that call setAdvanced gray out on this.
+    var canChangeInterface: Bool { canChangeMode }
+
+    /// Drops the settings kept for the advanced interface while the simple one is on. "Reset all settings" calls
+    /// it, or the advanced switch would bring back what the reset was meant to clear.
+    func forgetAdvancedSettings() {
+        store.clearAdvancedSnapshot()
+    }
+
     // MARK: - Mode and lens
 
     func setMode(_ mode: CaptureMode) {
         // The carousel and the Camera Control play their own clicks.
-        guard mode != settings.mode, canChangeMode else { return }
+        guard mode != settings.mode, canChangeMode, availableModes.contains(mode) else { return }
         releaseLock()
         if let dial = activeDial, !dialAvailable(dial, in: mode) {
             activeDial = nil
@@ -288,7 +417,8 @@ final class CameraModel {
     /// says nothing about exposure, so keepingAutoExposure leaves MANUAL's saved shutter, ISO and aperture behind
     /// instead of bringing them back into the shot.
     private func switchToManual(keepingAutoExposure: Bool = false, _ change: (inout CameraSettings) -> Void) {
-        guard canChangeMode else { return }
+        // The simple interface has no MANUAL to land in.
+        guard isAdvanced, canChangeMode else { return }
         releaseLock()
         updateSettings { settings in
             settings.mode = .manual
@@ -453,8 +583,20 @@ final class CameraModel {
         let wanted = on && settings.mode == .video && capabilities.hasTorch
         guard wanted != torchOn else { return }
         torchOn = wanted
-        backend.setTorch(level: wanted ? 1 : nil)
+        backend.setTorch(level: wanted ? torchLevel : nil)
         Haptics.tap()
+    }
+
+    /// Brightness of the video light, 0...1 (the menu offers a few steps). Choosing one turns the light on.
+    func setTorchLevel(_ level: Double) {
+        guard level.isFinite else { return }
+        torchLevel = min(max(level, 0.05), 1)
+        if torchOn {
+            backend.setTorch(level: torchLevel)
+            Haptics.tap()
+        } else {
+            setTorch(true)
+        }
     }
 
     private func turnTorchOff() {
@@ -471,7 +613,7 @@ final class CameraModel {
         switch settings.mode {
         case .long:
             guard let value else { return }
-            updateSettings { $0.longExposure.seconds = min(max(value, 0.25), 1800) }
+            setLongExposureSeconds(value)
         case .video:
             let limit = 1.0 / max(recordedVideo.frameRate, 1)
             updateSettings { $0.manual.shutter = value.map { min($0, limit) } }
@@ -483,6 +625,7 @@ final class CameraModel {
         }
     }
 
+    /// nil = auto, or in LONG the ISO the scene fixes.
     func setISO(_ iso: Double?) {
         let value = iso.map { min(max($0, capabilities.exposure.iso.lowerBound), capabilities.exposure.iso.upperBound) }
         switch settings.mode {
@@ -494,7 +637,7 @@ final class CameraModel {
         }
     }
 
-    /// nil = auto (or the fixed f-number on lenses without an iris).
+    /// nil = auto, or in LONG the aperture the scene asks for. Does nothing on lenses without an iris.
     func setAperture(_ fNumber: Double?) {
         guard capabilities.supportsVariableAperture else { return }
         let range = capabilities.exposure.aperture
@@ -528,7 +671,11 @@ final class CameraModel {
             lockedMeter = (liveMeteredProduct, settings.night.biasEV)
         }
         Haptics.tap()
-        showToast(aeLocked ? "AE LOCK" : "AE lock off", symbol: aeLocked ? "lock.fill" : "lock.open")
+        if aeLocked {
+            showLockToast(focus: false, exposure: true)
+        } else {
+            showToast(isAdvanced ? "AE lock off" : "Brightness lock off", symbol: "lock.open")
+        }
         scheduleApply(.exposure)
     }
 
@@ -545,10 +692,15 @@ final class CameraModel {
 
     // MARK: - Focus
 
-    /// nil = continuous autofocus.
+    /// nil = continuous autofocus, or in LONG the distance the scene holds.
     func setManualFocus(_ lensPosition: Double?) {
         guard lensPosition == nil || capabilities.supportsManualFocus else { return }
-        let value = lensPosition.map { min(max($0, 0), 1) }
+        var value = lensPosition.map { min(max($0, 0), 1) }
+        // The far end is where a scene that focuses at infinity already holds the lens. Kept as the person's, it
+        // would follow them out of the scene and focus every other mode at infinity.
+        if let position = value, position >= 1, sceneRecipe?.focusAtInfinity == true {
+            value = nil
+        }
         updateSettings { $0.focus = value.map { FocusSetting.manual(lensPosition: $0) } ?? .auto }
     }
 
@@ -564,13 +716,18 @@ final class CameraModel {
             applyAnalysis()
             applyCameraControls()
         }
-        let focusIsAuto = settings.focus.lensPosition == nil
+        // A scene that holds focus at infinity counts as manual focus: the tap moves the metering point and the
+        // lens stays where the stars are sharp.
+        let focusIsAuto = effectiveFocus.lensPosition == nil
         let request = currentExposureRequest()
         let exposureIsAuto = request.locks.isAllAuto
         // Spot and whole frame metering follow the tap as long as the meter decides something: a value auto exposure
-        // still sets, or a stack's auto ISO held at the floor. Only a fully manual exposure leaves the meter be.
-        let metersHere = stackISOAtFloor
+        // still sets, or a stack's auto ISO held at a limit. Only a fully manual exposure leaves the meter be.
+        let metersHere = stackISOLimit != nil
             || !request.locks.isFullyManual(variableAperture: capabilities.supportsVariableAperture)
+        // Nothing to focus and nothing to meter (star trails, fireworks on a fixed lens): a square would say the tap
+        // did something.
+        guard focusIsAuto || metersHere else { return }
         focusPoint = layerPoint
         backend.setPointOfInterest(devicePoint, focus: focusIsAuto, exposure: metersHere)
         if focusIsAuto {
@@ -584,7 +741,7 @@ final class CameraModel {
             // Manual focus or a manual exposure has nothing to hold, so the toast names only what is locked.
             if focusHeld || aeLocked {
                 Haptics.stop()
-                showToast(focusHeld && aeLocked ? "AE/AF LOCK" : (aeLocked ? "AE LOCK" : "AF LOCK"), symbol: "lock.fill")
+                showLockToast(focus: focusHeld, exposure: aeLocked)
             }
         } else if aeLocked {
             aeLocked = false
@@ -599,6 +756,21 @@ final class CameraModel {
         }
     }
 
+    /// A long press holds the focus distance it found, with the exposure (aeLocked) or, where the exposure has
+    /// nothing auto to hold, alone.
+    var focusLocked: Bool { focusHeld }
+
+    /// The simple interface says it without the abbreviations.
+    private func showLockToast(focus: Bool, exposure: Bool) {
+        let message: String
+        if isAdvanced {
+            message = focus && exposure ? "AE/AF LOCK" : (exposure ? "AE LOCK" : "AF LOCK")
+        } else {
+            message = focus && exposure ? "Focus and brightness locked" : (exposure ? "Brightness locked" : "Focus locked")
+        }
+        showToast(message, symbol: "lock.fill")
+    }
+
     /// Ends AE LOCK or AE/AF LOCK: exposure follows its request again, a held focus goes back to autofocus, and
     /// the lock's square goes with it.
     private func releaseLock() {
@@ -607,10 +779,18 @@ final class CameraModel {
             scheduleApply(.exposure)
         }
         guard focusHeld else { return }
+        endFocusHold()
+        backend.apply(focus: currentFocusRequest())
+    }
+
+    /// A focus request other than the hold's own is going to the camera, and it ends the distance a long press was
+    /// holding. The viewfinder stops showing that lock, and its square goes unless it still marks a held exposure.
+    private func endFocusHold() {
+        guard focusHeld else { return }
         focusHeld = false
+        guard !aeLocked else { return }
         reticleTask?.cancel()
         focusPoint = nil
-        backend.apply(focus: currentFocusRequest())
     }
 
     /// The exposure freezes when AE locks, but the meter keeps reading the recomposed frame, and NIGHT plans from
@@ -636,6 +816,7 @@ final class CameraModel {
 
     // MARK: - White balance
 
+    /// Auto gives the white balance back to the camera, or in LONG to the scene where it holds one.
     func setWhiteBalance(_ setting: WhiteBalanceSetting) {
         updateSettings { $0.whiteBalance = setting }
     }
@@ -644,20 +825,34 @@ final class CameraModel {
     func setKelvin(_ kelvin: Double) {
         let range = WhiteBalanceMath.kelvinRange
         let k = min(max(kelvin, range.lowerBound), range.upperBound)
-        let tint = settings.whiteBalance.tintValue
-        updateSettings { $0.whiteBalance = .kelvin(k, tint: tint) }
+        let setting = chosenWhiteBalance(kelvin: k, tint: effectiveWhiteBalance.tintValue)
+        updateSettings { $0.whiteBalance = setting }
     }
 
     func setTint(_ tint: Double) {
         let range = WhiteBalanceMath.tintRange
         let t = min(max(tint, range.lowerBound), range.upperBound)
-        let k = settings.whiteBalance.kelvinValue ?? readings.kelvin
-        updateSettings { $0.whiteBalance = .kelvin(k, tint: t) }
+        // A scene's temperature stays when its tint is the first thing changed.
+        let k = effectiveWhiteBalance.kelvinValue ?? readings.kelvin
+        let setting = chosenWhiteBalance(kelvin: k, tint: t)
+        updateSettings { $0.whiteBalance = setting }
+    }
+
+    /// A temperature and tint the person picked, as they are kept: auto where they are the ones the scene already
+    /// runs, since kept as the person's they would follow them out of the scene into every mode. The margins are
+    /// the ones the strip's chips use to tell the scene's value from the person's.
+    private func chosenWhiteBalance(kelvin: Double, tint: Double) -> WhiteBalanceSetting {
+        if let scene = sceneRecipe?.kelvin, capabilities.supportsCustomWhiteBalance,
+           abs(kelvin - scene) < 1, abs(tint) < 0.5 {
+            return .auto
+        }
+        return .kelvin(kelvin, tint: tint)
     }
 
     /// Locks white balance to whatever is in the middle of the frame being neutral gray.
     func setWhiteBalanceFromGrayCard() {
-        guard capabilities.supportsCustomWhiteBalance else { return }
+        // The simple interface has no white balance control to show the result or take it back with.
+        guard isAdvanced, capabilities.supportsCustomWhiteBalance else { return }
         adoptNextWhiteBalanceReading = true
         backend.apply(whiteBalance: .grayWorld)
         Haptics.tap()
@@ -676,9 +871,29 @@ final class CameraModel {
         updateSettings { $0.night.stability = choice }
     }
 
+    /// The time stays the scene's own to change: every scene offers several. The simple interface keeps to those,
+    /// so there another value lands on the closest one.
     func setLongExposureSeconds(_ seconds: Double) {
         updateSettings { $0.longExposure.seconds = min(max(seconds, 0.25), 1800) }
     }
+
+    /// Picks what LONG mode is pointed at and loads that scene's blend, time and frame. Custom keeps the values.
+    func setLongExposureScene(_ scene: LongExposureScene) {
+        // The scene already on has nothing to load, and Custom is not a scene of the simple interface.
+        guard !activity.isBusy, scene != settings.longExposure.scene, isAdvanced || scene.recipe != nil else { return }
+        // A lock holds the exposure and the focus of the scene being left.
+        releaseLock()
+        updateSettings { $0.longExposure.apply(scene) }
+    }
+
+    /// The scene's recipe while LONG is on with a scene chosen; nil in other modes and for Custom.
+    var sceneRecipe: LongExposureRecipe? {
+        settings.mode == .long ? settings.longExposure.recipe : nil
+    }
+
+    // A blend, frame or bulb set by hand is no longer the scene's recipe, so a change in one of these three leaves
+    // the scene for Custom (commit). The simple interface has no Custom and no control for any of them: there the
+    // settings go back to the scene's own whatever is written.
 
     func setLongExposureBlend(_ blend: StackBlend) {
         updateSettings { $0.longExposure.blend = blend }
@@ -687,7 +902,8 @@ final class CameraModel {
     /// Shutter for each Blur or Trails frame; nil leaves it to auto exposure.
     func setLongExposureFrameSeconds(_ seconds: Double?) {
         let range = capabilities.exposure.seconds
-        updateSettings { $0.longExposure.frameSeconds = seconds.map { min(max($0, range.lowerBound), range.upperBound) } }
+        let frame = seconds.map { min(max($0, range.lowerBound), range.upperBound) }
+        updateSettings { $0.longExposure.frameSeconds = frame }
     }
 
     func setBulb(_ enabled: Bool) {
@@ -703,6 +919,10 @@ final class CameraModel {
             stopRecording()
             return
         case .stacking:
+            if stackJustStartedFromCountdown {
+                cancelCapture()
+                return
+            }
             // A second tap ends a bulb or long exposure and keeps what it has, like releasing a cable release.
             backend.finishStackEarly()
             return
@@ -732,14 +952,30 @@ final class CameraModel {
         }
         // Earlier photos are still being processed and saved: only another plain photo can start alongside them.
         if photosInFlight > 0, !(pressTakesPlainPhoto && photosInFlight < Self.maxPhotosInFlight) { return }
-        let schedule = settings.capture.schedule
-        if schedule.isOff || (settings.mode == .long && settings.longExposure.bulb) {
+        var schedule = settings.capture.schedule
+        // A scene shot from a tripod waits a moment first, so the tap on the shutter isn't in the picture. A self
+        // timer counts toward the wait but never shortens it, and a bulb starts when it is told to.
+        let settle = isBulbMode ? 0 : (sceneRecipe?.settleSeconds ?? 0)
+        isSettling = settle > 0 && schedule.delay == 0
+        if settle > 0 {
+            schedule.delay = max(schedule.delay, settle)
+        }
+        if schedule.isOff || isBulbMode {
             scheduleTask = Task { [weak self] in
                 await self?.performCapture(bulb: self?.isBulbMode ?? false, releaseAtExposure: true)
             }
         } else {
-            runSchedule(schedule)
+            // The wait is there to let the phone come to rest, so nothing taps it on the way, a timer's count
+            // included.
+            runSchedule(schedule, silentCountdown: settle > 0)
         }
+    }
+
+    /// A press as a countdown runs out was meant to cancel it, and the shot it started has nothing yet: ended
+    /// early, it would save a dark, nearly empty picture.
+    private var stackJustStartedFromCountdown: Bool {
+        guard let ended = countdownEndedAt, Date().timeIntervalSince(ended) < 0.5 else { return false }
+        return (stackProgress?.framesCaptured ?? 0) == 0
     }
 
     /// AVCapturePhotoOutput takes the next photo while it still processes the last ones. Each one in flight holds
@@ -775,6 +1011,11 @@ final class CameraModel {
 
     /// Stops what is running and keeps the result (stack so far, intervalometer, timer).
     func stopCapture() {
+        // A stop as the countdown runs out was meant for the countdown, whichever button sent it.
+        if activity == .stacking, stackJustStartedFromCountdown {
+            cancelCapture()
+            return
+        }
         // A bracket only sees the stop once the photo in progress is saved.
         if bracketInProgress { bracketStopping = true }
         cancelSchedule()
@@ -802,18 +1043,20 @@ final class CameraModel {
         scheduleTask?.cancel()
         scheduleTask = nil
         intervalometer = nil
+        isSettling = false
+        countdownEndedAt = nil
         if case .countdown = activity {
             activity = .idle
         }
     }
 
-    private func runSchedule(_ schedule: CaptureSchedule) {
+    private func runSchedule(_ schedule: CaptureSchedule, silentCountdown: Bool = false) {
         scheduleTask?.cancel()
         scheduleTask = Task { [weak self] in
             guard let self else { return }
             let start = Date()
             if schedule.delay > 0 {
-                let completed = await self.countdown(schedule.delay)
+                let completed = await self.countdown(schedule.delay, haptics: !silentCountdown)
                 guard completed else { return }
             }
             for index in 0..<schedule.shots {
@@ -840,18 +1083,20 @@ final class CameraModel {
     }
 
     /// Counts down whole seconds. Returns false when cancelled.
-    private func countdown(_ seconds: Double) async -> Bool {
+    private func countdown(_ seconds: Double, haptics: Bool = true) async -> Bool {
         var remaining = seconds
         while remaining > 0 {
             if Task.isCancelled { return false }
             activity = .countdown(remaining: Int(remaining.rounded(.up)))
-            Haptics.tap()
+            if haptics { Haptics.tap() }
             let step = remaining - (remaining.rounded(.up) - 1)
             let sleep = step > 0 ? step : 1
             try? await Task.sleep(nanoseconds: UInt64(sleep * 1_000_000_000))
             remaining -= sleep
         }
         if Task.isCancelled { return false }
+        isSettling = false
+        countdownEndedAt = Date()
         activity = .idle
         return true
     }
@@ -933,7 +1178,7 @@ final class CameraModel {
     }
 
     private func performFocusBracket() async {
-        let center = settings.focus.lensPosition ?? readings.lensPosition
+        let center = effectiveFocus.lensPosition ?? readings.lensPosition
         let positions = settings.capture.bracket.focusPositions(center: center)
         // One capture from the first frame to the last: the shutter stops it, and lens, mode and focus stay put
         // between frames.
@@ -958,8 +1203,9 @@ final class CameraModel {
     }
 
     private func performWhiteBalanceBracket() async {
-        let center = settings.whiteBalance.kelvinValue ?? readings.kelvin
-        let tint = settings.whiteBalance.tintValue
+        let whiteBalance = effectiveWhiteBalance
+        let center = whiteBalance.kelvinValue ?? readings.kelvin
+        let tint = whiteBalance.tintValue
         bracketInProgress = true
         activity = .capturing
         defer {
@@ -1097,10 +1343,36 @@ final class CameraModel {
 
     // MARK: - Settings
 
-    /// Mutates settings, saves them, and re-applies whatever changed to the backend.
+    /// Mutates settings, saves them, and re-applies whatever changed to the backend. The interface level and the
+    /// answered first-launch question only change through setAdvanced and finishWelcome, so a reset to the
+    /// defaults keeps both. In the simple interface the result is simplified again, so a setting it hides can't
+    /// pick up a value.
     func updateSettings(_ change: (inout CameraSettings) -> Void) {
         var next = settings
         change(&next)
+        next.interface = settings.interface
+        commit(next)
+    }
+
+    /// Takes new settings, interface level included, saves them and re-applies whatever changed to the backend.
+    private func commit(_ proposed: CameraSettings) {
+        // Until the first-launch question is answered nothing is simplified (see init).
+        let simple = !proposed.interface.advanced && proposed.interface.welcomed
+        var next = simple ? proposed.simplified() : proposed
+        // A blend, frame, bulb or alignment that isn't the scene's own was set by hand, and that is what Custom
+        // means. Checked here for every way in: the LONG panel's setters and the rows in Settings.
+        let long = next.longExposure
+        if let recipe = long.recipe,
+           long.blend != recipe.blend || long.bulb != recipe.bulb || long.frameSeconds != recipe.frameSeconds
+            || long.align != recipe.align {
+            next.longExposure.scene = .custom
+            // Alignment the person hasn't touched was the scene's, chosen for its blend, so it follows the new one:
+            // on for Blur, whose frames may be held by hand; off for Real and Trails, which over a night sky would
+            // follow the stars and smear the ground.
+            if long.blend != recipe.blend, long.align == recipe.align {
+                next.longExposure.align = long.blend == .average
+            }
+        }
         if !next.capture.isValid {
             next.capture.processedFormat = .heif
         }
@@ -1125,33 +1397,45 @@ final class CameraModel {
     private func reapply(from old: CameraSettings, to new: CameraSettings) {
         // Before any request is built from these settings, including the one a mode change sends at once.
         if old.mode != new.mode || old.manual != new.manual || old.longExposure != new.longExposure {
-            updateStackISOFloor()
+            updateStackISOLimit()
         }
         if old.mode != new.mode {
+            // applyAll sends everything, which also covers a scene or an interface level that changed with the mode.
             modeDidChange(from: old.mode, to: new.mode)
             return
         }
         if DeviceOptions(settings: old) != DeviceOptions(settings: new) {
             backend.apply(options: DeviceOptions(settings: new))
         }
+        let sceneChanged = new.mode == .long && old.longExposure.scene != new.longExposure.scene
+        // A scene holds a focus distance and a white balance of its own wherever the person has set none and the
+        // lens can hold them. Only that share goes out again when LONG's scene changes: a scene turned into Custom
+        // by hand runs the same autofocus, and sending it again would end a long press's held focus.
+        let oldRecipe = new.mode == .long ? old.longExposure.recipe : nil
+        let newRecipe = new.mode == .long ? new.longExposure.recipe : nil
+        let sceneFocusChanged = capabilities.supportsManualFocus
+            && (oldRecipe?.focusAtInfinity ?? false) != (newRecipe?.focusAtInfinity ?? false)
+        let sceneKelvinChanged = capabilities.supportsCustomWhiteBalance && oldRecipe?.kelvin != newRecipe?.kelvin
+        let levelChanged = old.interface.advanced != new.interface.advanced
         if old.manual != new.manual || old.longExposure != new.longExposure || old.night.biasEV != new.night.biasEV
             || old.exposure.aeMaxShutter != new.exposure.aeMaxShutter || old.video.frameRate != new.video.frameRate {
             scheduleApply(.exposure)
         }
-        if old.whiteBalance != new.whiteBalance {
+        if old.whiteBalance != new.whiteBalance || sceneKelvinChanged {
             scheduleApply(.whiteBalance)
         }
-        if old.focus != new.focus {
+        if old.focus != new.focus || sceneFocusChanged {
             scheduleApply(.focus)
         }
-        if old.display != new.display || old.focus != new.focus {
+        if old.display != new.display || old.focus != new.focus || sceneChanged || levelChanged {
             applyAnalysis()
         }
         // The Camera Control overlay shows these too. An open dial updates it when it closes, since every
         // reinstall reconfigures the session.
         let controlValuesChanged = old.manual.locks != new.manual.locks || old.whiteBalance != new.whiteBalance
             || old.focus != new.focus || old.longExposure != new.longExposure || old.video.frameRate != new.video.frameRate
-        if old.controls.cameraControlItems != new.controls.cameraControlItems
+        // The simple interface carries its own short list of controls.
+        if old.controls.cameraControlItems != new.controls.cameraControlItems || levelChanged
             || (controlValuesChanged && activeDial == nil && !applyingControlChange) {
             applyCameraControls()
         }
@@ -1168,6 +1452,9 @@ final class CameraModel {
             releaseLock()
             // A format past the hardware budget runs without the analysis output, and its last frame would stay up.
             analysis = nil
+            // The rebuilt session puts the old exposure back first, so its readings say nothing about these
+            // settings until applyAll sends them.
+            lastBiasCommand = .distantFuture
             Task {
                 await backend.configureForVideo(video)
                 // A frame the old format sent during the reconfiguration would otherwise stay up.
@@ -1193,6 +1480,10 @@ final class CameraModel {
         if new == .video {
             let video = settings.video
             analysis = nil
+            // The camera keeps the old mode's exposure until the session is rebuilt, which can wait on the
+            // microphone question. Its bias meanwhile is no change of the person's, so none is adopted until
+            // applyAll sends these settings.
+            lastBiasCommand = .distantFuture
             Task {
                 await backend.configureForVideo(video)
                 analysis = nil
@@ -1200,6 +1491,7 @@ final class CameraModel {
                 noteMicrophoneIfDenied()
             }
         } else if old == .video {
+            lastBiasCommand = .distantFuture
             Task {
                 await backend.configureForPhoto()
                 applyAll()
@@ -1219,6 +1511,12 @@ final class CameraModel {
         }
     }
 
+    private func saveNow() {
+        saveTask?.cancel()
+        saveTask = nil
+        store.save(settings)
+    }
+
     /// Dials can fire 60 times a second; the device only needs the latest value about 30 times a second.
     private func scheduleApply(_ kind: ApplyKind) {
         pendingApply.insert(kind)
@@ -1231,11 +1529,16 @@ final class CameraModel {
 
     private func flushApply() {
         let kinds = pendingApply
-        if kinds.contains(.exposure) { lastBiasCommand = Date() }
+        // A start or a mode switch keeps its far-future mark until applyAll: a request sent now queues behind the
+        // session's rebuild, which first puts back the old mode's exposure, so readings until then still carry it.
+        if kinds.contains(.exposure), lastBiasCommand != .distantFuture { lastBiasCommand = Date() }
         pendingApply.removeAll()
         applyTask = nil
         if kinds.contains(.exposure) { backend.apply(exposure: currentExposureRequest()) }
-        if kinds.contains(.focus) { backend.apply(focus: currentFocusRequest()) }
+        if kinds.contains(.focus) {
+            endFocusHold()
+            backend.apply(focus: currentFocusRequest())
+        }
         if kinds.contains(.whiteBalance) { backend.apply(whiteBalance: currentWhiteBalanceRequest()) }
     }
 
@@ -1248,7 +1551,7 @@ final class CameraModel {
 
     private var analysisOptions: AnalysisOptions {
         let display = settings.display
-        let manualFocus = settings.focus.lensPosition != nil || activeDial == .focus
+        let manualFocus = effectiveFocus.lensPosition != nil || activeDial == .focus
         let peaking = display.peaking == .always || (display.peaking == .manualFocus && manualFocus)
         return AnalysisOptions(
             histogram: display.histogram != .off,
@@ -1263,21 +1566,33 @@ final class CameraModel {
 
     private func applyCameraControls() {
         let state = CameraControlState(
-            items: settings.controls.cameraControlItems,
+            // The simple interface has no MANUAL to land in, so its Camera Control carries nothing that leads there.
+            items: isAdvanced ? settings.controls.cameraControlItems : CameraSettings.simpleCameraControlItems,
             shutterStops: shutterScale.map(\.seconds),
             // LONG's shutter picker sets the duration, which Blur and Trails have as well; it is never Auto there.
             shutter: settings.mode == .long ? settings.longExposure.seconds : (isShutterAuto ? nil : displayShutter),
             isoStops: isoScale,
-            iso: isISOAuto ? nil : displayISO,
+            // Auto on the ISO and aperture pickers is wherever the person has set nothing, which in LONG can be a
+            // value the scene fixes: Auto leads back to it, as the dial's does.
+            iso: locksByHand && settings.manual.iso != nil ? displayISO : nil,
             apertureStops: apertureScale,
-            aperture: isApertureAuto ? nil : displayAperture,
-            kelvin: settings.whiteBalance.kelvinValue,
-            lensPosition: settings.focus.lensPosition,
+            aperture: locksByHand && capabilities.supportsVariableAperture && settings.manual.aperture != nil
+                ? displayAperture : nil,
+            kelvin: effectiveWhiteBalance.kelvinValue,
+            lensPosition: effectiveFocus.lensPosition,
             mode: settings.mode,
             lensTitles: backLensPresets.map(\.selectedLabel),
             lensIndex: backLensPresets.firstIndex(where: { $0.id == activePresetID })
         )
         backend.configureCameraControls(state)
+    }
+
+    /// MANUAL, LONG and VIDEO expose with the shared manual values. PHOTO and NIGHT leave them alone.
+    private var locksByHand: Bool {
+        switch settings.mode {
+        case .manual, .long, .video: return true
+        case .photo, .night: return false
+        }
     }
 
     // MARK: - Requests
@@ -1295,7 +1610,7 @@ final class CameraModel {
         case .manual:
             // A stacked shutter's auto ISO at the floor is fixed there, as LONG Real's is below. Only while it is
             // stacked on this camera's limits: a lens or format change can make the same shutter a single frame.
-            let iso = manual.iso ?? (stackISOAtFloor && shutterIsStacked ? capabilities.exposure.iso.lowerBound : nil)
+            let iso = manual.iso ?? (shutterIsStacked ? heldStackISO : nil)
             let locks = ExposureLocks(seconds: manual.shutter, iso: iso, aperture: aperture)
             return ExposureRequest(locks: locks, bias: manual.bias, aeLocked: aeLocked && locks.isAllAuto, maxAutoSeconds: maxAuto)
         case .video:
@@ -1304,47 +1619,146 @@ final class CameraModel {
             return ExposureRequest(locks: locks, bias: manual.bias, aeLocked: aeLocked && locks.isAllAuto, maxAutoSeconds: frameLimit)
         case .long:
             let long = settings.longExposure
+            // A scene's ISO, aperture, compensation and longest auto frame stand in wherever the person has set no
+            // value of their own. All of it is worked out here from the scene, so leaving LONG or the scene drops
+            // it with nothing to undo.
+            let sceneISO = sceneISOLock
+            let longAperture = aperture ?? sceneAperture
+            let longMaxAuto = sceneRecipe?.maxAutoSeconds(in: capabilities.exposure.seconds) ?? maxAuto
             switch long.blend {
             case .additive:
                 // Auto ISO runs shutter priority at the longest frame, as MANUAL's stacked shutter does, so the
                 // meter sees the scene and longPlan can pick the ISO for the whole time. A bulb has no known length,
                 // so it stays at base ISO. So does a scene too bright for base ISO over the whole time: the stack
-                // comes out brighter than the meter wants, and the preview, brightened to match, shows it.
-                let iso = manual.iso ?? (long.bulb || stackISOAtFloor ? capabilities.exposure.iso.lowerBound : nil)
-                let locks = ExposureLocks(seconds: long.seconds, iso: iso, aperture: aperture)
-                return ExposureRequest(locks: locks, bias: manual.bias, aeLocked: false, maxAutoSeconds: maxAuto)
+                // comes out brighter than the meter wants, and the preview, brightened to match, shows it. A sky
+                // too dark for the ISO a scene stops at is held there the same way, and comes out darker.
+                let iso = manual.iso ?? sceneISO ?? (long.bulb ? capabilities.exposure.iso.lowerBound : heldStackISO)
+                let locks = ExposureLocks(seconds: long.seconds, iso: iso, aperture: longAperture)
+                return ExposureRequest(locks: locks, bias: requestedBias, aeLocked: false, maxAutoSeconds: longMaxAuto)
             case .average, .lighten:
-                let range = capabilities.exposure.seconds
-                let frame = long.frameSeconds.map { min(max($0, range.lowerBound), range.upperBound) }
-                let locks = ExposureLocks(seconds: frame, iso: manual.iso, aperture: aperture)
-                return ExposureRequest(locks: locks, bias: manual.bias, aeLocked: aeLocked && locks.isAllAuto, maxAutoSeconds: maxAuto)
+                let locks = ExposureLocks(seconds: longFrameSeconds, iso: manual.iso ?? sceneISO, aperture: longAperture)
+                return ExposureRequest(locks: locks, bias: requestedBias, aeLocked: aeLocked && locks.isAllAuto,
+                                       maxAutoSeconds: longMaxAuto)
             }
         }
     }
 
+    /// Exposure compensation as the camera gets it: the person's own, plus in LONG what the scene adds (a stop
+    /// under for a night sky, which the meter would turn gray).
+    private var requestedBias: Double {
+        switch settings.mode {
+        case .night:
+            return settings.night.biasEV
+        case .long:
+            guard let scene = sceneRecipe?.biasEV, scene != 0 else { return settings.manual.bias }
+            // Kept inside what the camera takes, so its reading of the sum can be told from a change made on the
+            // Camera Control (adoptExternalChanges).
+            let range = capabilities.biasRange
+            let sum = settings.manual.bias + scene
+            return sum.isFinite ? min(max(sum, range.lowerBound), range.upperBound) : settings.manual.bias
+        case .photo, .manual, .video:
+            return settings.manual.bias
+        }
+    }
+
+    /// The ISO a scene fixes for its frames: the lowest for light trails, a set one for star trails. nil where the
+    /// scene leaves the ISO to auto exposure, and outside LONG's scenes. The person's exposure compensation moves
+    /// it: a scene that fixes the frame as well leaves the brightness control nothing else to work on, and with the
+    /// frame on auto the meter's target moves by the same amount, so the frame keeps the length the scene wants.
+    private var sceneISOLock: Double? {
+        guard let recipe = sceneRecipe else { return nil }
+        let range = capabilities.exposure.iso
+        guard let lock = recipe.isoLock(in: range) else { return nil }
+        let moved = lock * pow(2, settings.manual.bias)
+        return moved.isFinite ? min(max(moved, range.lowerBound), range.upperBound) : lock
+    }
+
+    /// The highest ISO a scene lets its auto ISO reach (stars stay under the grain), moved by the person's exposure
+    /// compensation as the lock is: held there, the scene fixes the frame and the ISO, and the brightness control
+    /// would have nothing else to work on. nil where auto ISO may go as high as the sensor does, and outside
+    /// LONG's scenes.
+    private var sceneISOCeiling: Double? {
+        guard let recipe = sceneRecipe else { return nil }
+        let range = capabilities.exposure.iso
+        let ceiling = recipe.isoCeiling(in: range)
+        guard ceiling < range.upperBound else { return nil }
+        let moved = ceiling * pow(2, settings.manual.bias)
+        return moved.isFinite ? min(max(moved, range.lowerBound), range.upperBound) : ceiling
+    }
+
+    /// The aperture a scene asks for on a lens with an iris: open all the way for a night sky, closed all the way
+    /// for fireworks and other moving lights. nil where the scene leaves it to auto exposure, and on a fixed lens.
+    private var sceneAperture: Double? {
+        guard capabilities.supportsVariableAperture else { return nil }
+        return sceneRecipe?.aperture(in: capabilities.exposure.aperture, variable: true)
+    }
+
+    /// The frame of each Blur or Trails exposure in LONG, inside what this lens takes: the person's or the scene's.
+    /// A scene whose frame was chosen for a wider aperture than the one its iris closes to gets it lengthened by
+    /// the light the iris takes away (fireworks keep their skyline). nil leaves the frame to auto exposure. Worked
+    /// out here rather than stored, so the scene's own frame stays in the settings and the scene stays a scene.
+    var longFrameSeconds: Double? {
+        var frame = settings.longExposure.frameSeconds
+        if let recipe = sceneRecipe, settings.manual.aperture == nil, let aperture = sceneAperture {
+            frame = recipe.frameSeconds(at: aperture) ?? frame
+        }
+        let range = capabilities.exposure.seconds
+        return frame.map { min(max($0, range.lowerBound), range.upperBound) }
+    }
+
+    /// The aperture a stack is planned for: the locked one on a lens with an iris, else the one the lens has now.
+    private var stackAperture: Double {
+        guard capabilities.supportsVariableAperture else { return readings.aperture }
+        return settings.manual.aperture ?? sceneAperture ?? readings.aperture
+    }
+
     /// Shutter priority at the longest frame previews a stack with auto ISO only while the ISO for the whole time
-    /// is in range. Below base ISO the stack comes out brighter than that preview, so the request fixes base ISO
-    /// and the backend brightens the preview by the missing stops. Follows the meter as readings arrive.
-    private func updateStackISOFloor() {
+    /// is in range. Below base ISO the stack comes out brighter than that preview, and above the ISO a scene stops
+    /// at (stars stay under the grain) it comes out darker. The request then fixes the ISO at that limit, and the
+    /// backend scales the preview by the missing stops. Follows the meter as readings arrive.
+    private func updateStackISOLimit() {
         guard let seconds = autoISOStackSeconds else {
             // Sent again so the backend's stored request, which it re-applies after lens and format changes,
-            // doesn't keep base ISO.
-            if stackISOAtFloor {
-                stackISOAtFloor = false
+            // doesn't keep the held ISO.
+            if stackISOLimit != nil {
+                stackISOLimit = nil
                 scheduleApply(.exposure)
             }
             return
         }
         // A running capture keeps the request it started with.
         guard !activity.isBusy else { return }
-        let aperture = capabilities.supportsVariableAperture ? (settings.manual.aperture ?? readings.aperture) : readings.aperture
-        let metered = ExposureMath.iso(forProduct: meteredProduct, seconds: seconds, aperture: aperture)
-        let floor = capabilities.exposure.iso.lowerBound
-        // A third of a stop of slack keeps a meter hovering at base ISO from switching the preview back and forth.
-        let atFloor = stackISOAtFloor ? metered < floor * pow(2, 1.0 / 3) : metered < floor
-        guard atFloor != stackISOAtFloor else { return }
-        stackISOAtFloor = atFloor
+        let range = capabilities.exposure.iso
+        let metered = ExposureMath.iso(forProduct: meteredProduct, seconds: seconds, aperture: stackAperture)
+        let floor = range.lowerBound
+        // Only a scene stops auto ISO short of what the sensor has. At the sensor's own top it stops by itself,
+        // which is also where the person's compensation can move a scene's ceiling to.
+        let ceiling = sceneISOCeiling ?? range.upperBound
+        // A third of a stop of slack keeps a meter hovering at a limit from switching the preview back and forth.
+        let slack = pow(2, 1.0 / 3)
+        let floorEdge = stackISOLimit == .floor ? floor * slack : floor
+        let ceilingEdge = stackISOLimit == .ceiling ? ceiling / slack : ceiling
+        let limit: StackISOLimit?
+        if metered < floorEdge {
+            limit = .floor
+        } else if metered > ceilingEdge, ceiling < range.upperBound {
+            limit = .ceiling
+        } else {
+            limit = nil
+        }
+        guard limit != stackISOLimit else { return }
+        stackISOLimit = limit
         scheduleApply(.exposure)
+    }
+
+    /// The ISO a stack's auto ISO is held at while the meter asks for one past a limit; nil while it is in range.
+    private var heldStackISO: Double? {
+        let range = capabilities.exposure.iso
+        switch stackISOLimit {
+        case .floor: return range.lowerBound
+        case .ceiling: return sceneISOCeiling ?? range.upperBound
+        case nil: return nil
+        }
     }
 
     /// The whole time a stack with auto ISO spreads its light over: LONG Real, or MANUAL past the longest shutter.
@@ -1353,7 +1767,8 @@ final class CameraModel {
         switch settings.mode {
         case .long:
             let long = settings.longExposure
-            return long.blend == .additive && !long.bulb ? long.seconds : nil
+            // A scene that fixes the ISO leaves no auto ISO to hold.
+            return long.blend == .additive && !long.bulb && sceneISOLock == nil ? long.seconds : nil
         case .manual:
             return shutterIsStacked ? settings.manual.shutter : nil
         case .photo, .night, .video:
@@ -1361,15 +1776,35 @@ final class CameraModel {
         }
     }
 
+    /// Focus as the camera runs it: the person's own setting, else the scene's (stars and fireworks sit at
+    /// infinity), else autofocus.
+    var effectiveFocus: FocusSetting {
+        if settings.focus.lensPosition != nil { return settings.focus }
+        if sceneRecipe?.focusAtInfinity == true, capabilities.supportsManualFocus {
+            // The far end of the lens travel. Past the hyperfocal distance of a phone lens, so the sky is sharp.
+            return .manual(lensPosition: 1)
+        }
+        return .auto
+    }
+
+    /// White balance as the camera runs it: the person's own setting, else the scene's fixed temperature, else auto.
+    var effectiveWhiteBalance: WhiteBalanceSetting {
+        if !settings.whiteBalance.isAuto { return settings.whiteBalance }
+        if let kelvin = sceneRecipe?.kelvin, capabilities.supportsCustomWhiteBalance {
+            return .kelvin(kelvin, tint: 0)
+        }
+        return .auto
+    }
+
     private func currentFocusRequest() -> FocusRequest {
-        if let position = settings.focus.lensPosition, capabilities.supportsManualFocus {
+        if let position = effectiveFocus.lensPosition, capabilities.supportsManualFocus {
             return .manual(position)
         }
         return .continuousAuto
     }
 
     private func currentWhiteBalanceRequest() -> WhiteBalanceRequest {
-        switch settings.whiteBalance {
+        switch effectiveWhiteBalance {
         case .auto:
             return .auto
         case .preset(let preset):
@@ -1418,15 +1853,22 @@ final class CameraModel {
             updateActivePreset(factor: readings.zoomFactor)
             changed = true
         }
-        let currentBias = settings.mode == .night ? settings.night.biasEV : settings.manual.bias
+        let requested = requestedBias
         if !activity.isBusy, pendingApply.isEmpty, now.timeIntervalSince(lastBiasCommand) > 1,
-           readings.bias.isFinite, abs(readings.bias - currentBias) > 0.05 {
+           readings.bias.isFinite, abs(readings.bias - requested) > 0.05 {
             if settings.mode == .night {
                 settings.night.biasEV = readings.bias
+                changed = true
             } else {
-                settings.manual.bias = readings.bias
+                // The slider shows what the camera runs, a scene's share included; the rest is the person's own.
+                // At the end of the range their part can't move further, and then nothing is adopted.
+                let range = capabilities.biasRange
+                let own = min(max(settings.manual.bias + readings.bias - requested, range.lowerBound), range.upperBound)
+                if abs(own - settings.manual.bias) > 0.001 {
+                    settings.manual.bias = own
+                    changed = true
+                }
             }
-            changed = true
         }
         guard changed else { return }
         scheduleSave()
@@ -1450,7 +1892,7 @@ final class CameraModel {
     private func dialAvailable(_ dial: DialKind, in mode: CaptureMode) -> Bool {
         switch dial {
         case .aperture: return capabilities.supportsVariableAperture
-        case .tint: return !settings.whiteBalance.isAuto
+        case .tint: return !effectiveWhiteBalance.isAuto
         default: return true
         }
     }
@@ -1601,31 +2043,46 @@ final class CameraModel {
         NightModePlanner.suggestedSeconds(meteredProduct: meteredProduct, aperture: readings.aperture, stability: nightStability)
     }
 
-    /// What LONG mode would do right now.
+    /// What LONG mode would do right now. A scene's ISO and aperture stand in wherever the person has set none,
+    /// as in the exposure request.
     var longPlan: StackPlan {
         let long = settings.longExposure
-        let aperture = capabilities.supportsVariableAperture ? (settings.manual.aperture ?? readings.aperture) : readings.aperture
+        let caps = capabilities.exposure
+        let aperture = stackAperture
         switch long.blend {
         case .additive:
-            let caps = capabilities.exposure
-            // Auto ISO gives the metered light over the whole time, like MANUAL's stacked shutter. A bulb has no
-            // known length, so it keeps base ISO.
+            // Auto ISO gives the metered light over the whole time, like MANUAL's stacked shutter, up to the ISO a
+            // scene stops at. A bulb has no known length, so it keeps base ISO.
             let metered = ExposureMath.iso(forProduct: meteredProduct, seconds: long.seconds, aperture: aperture)
-            let iso = settings.manual.iso ?? (long.bulb ? caps.iso.lowerBound : min(max(metered, caps.iso.lowerBound), caps.iso.upperBound))
+            let wanted = metered.isFinite ? metered : caps.iso.lowerBound
+            let auto = min(max(wanted, caps.iso.lowerBound), sceneISOCeiling ?? caps.iso.upperBound)
+            let iso = settings.manual.iso ?? sceneISOLock ?? (long.bulb ? caps.iso.lowerBound : auto)
             return LongExposurePlanner.plan(totalSeconds: long.seconds, blend: .additive, iso: iso, aperture: aperture,
                                             frameSeconds: nil, ranges: caps, align: long.align)
         case .average, .lighten:
             // The planner clamps a chosen frame to this lens's range, as the request does.
-            return LongExposurePlanner.plan(totalSeconds: long.seconds, blend: long.blend, iso: settings.manual.iso ?? readings.iso,
-                                            aperture: aperture, frameSeconds: long.frameSeconds ?? readings.exposureSeconds,
-                                            ranges: capabilities.exposure, align: long.align)
+            var iso = settings.manual.iso ?? sceneISOLock ?? readings.iso
+            var frame = longFrameSeconds ?? readings.exposureSeconds
+            // Auto exposure takes a moment to come down to a scene's longest frame, so a reading can still be
+            // the scene before's (Water picked right after Stars): frames too long to hold. They are planned at
+            // the limit, and an auto ISO makes up the light the shorter frame loses.
+            if longFrameSeconds == nil, let limit = sceneRecipe?.maxAutoSeconds(in: caps.seconds),
+               limit > 0, readings.exposureSeconds > limit {
+                if settings.manual.iso == nil, sceneISOLock == nil {
+                    let carried = iso * readings.exposureSeconds / limit
+                    if carried.isFinite { iso = min(max(carried, caps.iso.lowerBound), caps.iso.upperBound) }
+                }
+                frame = limit
+            }
+            return LongExposurePlanner.plan(totalSeconds: long.seconds, blend: long.blend, iso: iso, aperture: aperture,
+                                            frameSeconds: frame, ranges: caps, align: long.align)
         }
     }
 
     /// MANUAL mode with a shutter past the hardware limit: a Real (additive) stack.
     private var manualStackPlan: StackPlan {
         let seconds = settings.manual.shutter ?? capabilities.exposure.seconds.upperBound
-        let aperture = capabilities.supportsVariableAperture ? (settings.manual.aperture ?? readings.aperture) : readings.aperture
+        let aperture = stackAperture
         // Auto ISO with a fixed long shutter: pick the ISO that gives the metered brightness, like shutter priority.
         let iso = settings.manual.iso ?? ExposureMath.iso(forProduct: meteredProduct, seconds: seconds, aperture: aperture)
         let clampedISO = min(max(iso, capabilities.exposure.iso.lowerBound), capabilities.exposure.iso.upperBound)
@@ -1727,15 +2184,24 @@ final class CameraModel {
     }
 
     var displayAperture: Double {
-        if capabilities.supportsVariableAperture, settings.mode != .photo, settings.mode != .night, let f = settings.manual.aperture {
-            return f
+        guard capabilities.supportsVariableAperture else { return readings.aperture }
+        switch settings.mode {
+        case .manual, .video: return settings.manual.aperture ?? readings.aperture
+        case .long: return settings.manual.aperture ?? sceneAperture ?? readings.aperture
+        case .photo, .night: return readings.aperture
         }
-        return readings.aperture
     }
 
-    var displayKelvin: Double { settings.whiteBalance.kelvinValue ?? readings.kelvin }
-    var displayTint: Double { settings.whiteBalance.isAuto ? readings.tint : settings.whiteBalance.tintValue }
-    var displayLensPosition: Double { settings.focus.lensPosition ?? readings.lensPosition }
+    // White balance and focus show what the camera runs, which in LONG can be a scene's.
+
+    var displayKelvin: Double { effectiveWhiteBalance.kelvinValue ?? readings.kelvin }
+
+    var displayTint: Double {
+        let whiteBalance = effectiveWhiteBalance
+        return whiteBalance.isAuto ? readings.tint : whiteBalance.tintValue
+    }
+
+    var displayLensPosition: Double { effectiveFocus.lensPosition ?? readings.lensPosition }
 
     var isShutterAuto: Bool {
         switch settings.mode {
@@ -1745,9 +2211,13 @@ final class CameraModel {
         }
     }
 
+    // Auto means auto exposure, autofocus or auto white balance picks the value as the light changes. A value a
+    // scene fixes is not auto, though the person never set it: asking for auto there goes back to the scene's.
+
     var isISOAuto: Bool {
         switch settings.mode {
-        case .manual, .video, .long: return settings.manual.iso == nil
+        case .manual, .video: return settings.manual.iso == nil
+        case .long: return settings.manual.iso == nil && sceneISOLock == nil
         case .photo, .night: return true
         }
     }
@@ -1755,13 +2225,14 @@ final class CameraModel {
     var isApertureAuto: Bool {
         guard capabilities.supportsVariableAperture else { return true }
         switch settings.mode {
-        case .manual, .video, .long: return settings.manual.aperture == nil
+        case .manual, .video: return settings.manual.aperture == nil
+        case .long: return settings.manual.aperture == nil && sceneAperture == nil
         case .photo, .night: return true
         }
     }
 
-    var isWhiteBalanceAuto: Bool { settings.whiteBalance.isAuto }
-    var isFocusAuto: Bool { settings.focus.lensPosition == nil }
+    var isWhiteBalanceAuto: Bool { effectiveWhiteBalance.isAuto }
+    var isFocusAuto: Bool { effectiveFocus.lensPosition == nil }
 
     /// "1/250 · ISO 100 · ƒ/1.8 · +0.3" for the readout.
     var exposureSummary: String {
@@ -1807,6 +2278,14 @@ extension CameraModel: CameraBackendDelegate {
             scheduleApply(.exposure)
             scheduleApply(.focus)
         }
+        // A scene's white balance and infinity focus only go to a lens that can hold them, and peaking follows
+        // whether focus is held.
+        if previous.supportsCustomWhiteBalance != capabilities.supportsCustomWhiteBalance {
+            scheduleApply(.whiteBalance)
+        }
+        if previous.supportsManualFocus != capabilities.supportsManualFocus {
+            applyAnalysis()
+        }
         // The Camera Control's stops come from the lens and format, and a pinch can switch lens without select().
         // The backend skips a reinstall when nothing changed.
         applyCameraControls()
@@ -1814,10 +2293,13 @@ extension CameraModel: CameraBackendDelegate {
 
     func cameraBackend(_ backend: CameraBackend, didUpdateReadings readings: LiveReadings) {
         self.readings = readings
-        updateStackISOFloor()
+        updateStackISOLimit()
         adoptExternalChanges(from: readings)
         if adoptNextWhiteBalanceReading, !readings.isAdjustingWhiteBalance {
             adoptNextWhiteBalanceReading = false
+            // Written directly, so the request isn't sent again and the measured gains stay. Only the advanced
+            // interface measures (setWhiteBalanceFromGrayCard), and switching to simple drops a pending one.
+            guard isAdvanced else { return }
             settings.whiteBalance = .kelvin(readings.kelvin, tint: readings.tint)
             scheduleSave()
             if activeDial == nil { applyCameraControls() }
@@ -1860,6 +2342,14 @@ extension CameraModel: CameraBackendDelegate {
     func cameraBackend(_ backend: CameraBackend, didReceiveControl change: CameraControlChange) {
         applyingControlChange = true
         defer { applyingControlChange = false }
+        // The simple interface puts none of these on the Camera Control, so such a pick was on its way when the
+        // interface switched. Everything it could set is hidden there, or leads to MANUAL.
+        if !isAdvanced {
+            switch change {
+            case .shutter, .iso, .aperture, .kelvin, .focus: return
+            case .mode, .lens: break
+            }
+        }
         // PHOTO and NIGHT have no focus or white balance control to go back to auto with, so a pick there moves
         // to MANUAL, as a shutter or ISO pick does.
         let leavesAutoMode = settings.mode == .photo || settings.mode == .night
@@ -1875,7 +2365,7 @@ extension CameraModel: CameraBackendDelegate {
             if leavesAutoMode {
                 let range = WhiteBalanceMath.kelvinRange
                 let kelvin = min(max(value, range.lowerBound), range.upperBound)
-                let tint = settings.whiteBalance.tintValue
+                let tint = effectiveWhiteBalance.tintValue
                 switchToManual(keepingAutoExposure: true) { $0.whiteBalance = .kelvin(kelvin, tint: tint) }
             } else {
                 setKelvin(value)

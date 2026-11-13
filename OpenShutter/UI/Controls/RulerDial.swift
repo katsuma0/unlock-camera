@@ -258,6 +258,10 @@ struct RulerDial: View {
         guard !values.isEmpty else { return }
         let translation = value.translation.width
         guard var state = drag else {
+            // A drag that sets off up or down is not a scrub. The panel around the dial closes on a swipe down, and
+            // the sideways drift of that swipe must not move the value. The scrub starts where the finger turns
+            // sideways.
+            guard abs(translation) >= abs(value.translation.height) else { return }
             // A finger landing on a gliding dial catches it where it is, like a scroll view. Measuring from the
             // first reported translation hides the few points the gesture needed to start.
             let start = displayedPosition(at: Date())
@@ -560,12 +564,29 @@ private struct DialMotion: Equatable {
     }
 }
 
-/// Title and value above a dial, with an AUTO button on the left when `onAuto` is set.
+/// Title and value above a dial, with an AUTO button on the left when `onAuto` is set and a Done button on the
+/// right when `onDone` is.
 struct DialValueHeader: View {
     let title: String
     let value: String
     var isAuto: Bool = false
+    /// False for a value that holds still without the person having set it, such as one LONG's scene fixes. It
+    /// shows in white like an auto value, without the A that auto gets.
+    var isSetByPerson: Bool = true
+    /// The value is built from several frames, which the STACK badge beside it says.
+    var isStacked: Bool = false
     var onAuto: (() -> Void)? = nil
+    /// False while a shot runs and a change would end up in the picture. Only AUTO locks: Done beside it changes
+    /// nothing in the picture, so the way out stays open.
+    var isAutoEnabled: Bool = true
+    /// Dims AUTO and the value with the rest of a locked dial. Done keeps full strength, so it doesn't look locked.
+    var isDimmed: Bool = false
+    /// What VoiceOver says AUTO does while it is off. nil for the usual return to automatic.
+    var autoHint: String? = nil
+    var onDone: (() -> Void)? = nil
+    /// What VoiceOver says Done does. The shared dial sits where the mode carousel was; a dial inside a panel
+    /// leaves the carousel in view and passes its own words.
+    var doneHint: String = "Closes the dial and shows the modes."
 
     /// Both sides get the same width so the value stays centered over the dial's yellow line.
     private static let sideWidth: CGFloat = 64
@@ -574,16 +595,19 @@ struct DialValueHeader: View {
         HStack(spacing: 0) {
             autoButton
                 .frame(width: Self.sideWidth, alignment: .leading)
+                .opacity(isDimmed ? 0.45 : 1)
             Spacer(minLength: 4)
             readout
+                .opacity(isDimmed ? 0.45 : 1)
             Spacer(minLength: 4)
-            Color.clear
-                .frame(width: Self.sideWidth, height: 1)
-                .accessibilityHidden(true)
+            doneButton
+                .frame(width: Self.sideWidth, alignment: .trailing)
         }
         .padding(.horizontal, 12)
         .frame(height: 44)
         .animation(Theme.snappy, value: isAuto)
+        .animation(Theme.snappy, value: isSetByPerson)
+        .animation(Theme.snappy, value: isStacked)
     }
 
     private var readout: some View {
@@ -592,12 +616,14 @@ struct DialValueHeader: View {
                 .font(.system(size: 10, weight: .semibold))
                 .tracking(0.8)
                 .foregroundStyle(Theme.secondaryText)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
             HStack(spacing: 5) {
                 // Not animated per value: a scrub or a live auto reading changes it many times a second, and the digits
                 // would never stop rolling long enough to read. Switching to or from auto still rolls them.
                 Text(value)
                     .font(Theme.bigValueFont)
-                    .foregroundStyle(isAuto ? Theme.primaryText : Theme.accent)
+                    .foregroundStyle(isAuto || !isSetByPerson ? Theme.primaryText : Theme.accent)
                     .contentTransition(.numericText())
                 if isAuto {
                     Text("A")
@@ -610,10 +636,27 @@ struct DialValueHeader: View {
             }
             .lineLimit(1)
             .minimumScaleFactor(0.7)
+            // Hung off the value's trailing edge instead of sharing its row: the value stays over the yellow line
+            // when the badge comes and goes as the dial crosses the longest single shutter.
+            .overlay(alignment: .trailing) {
+                if isStacked {
+                    StackBadge()
+                        .fixedSize()
+                        .alignmentGuide(.trailing) { $0[.leading] - 6 }
+                        .transition(.opacity.combined(with: .scale(scale: 0.8)))
+                }
+            }
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text(title))
-        .accessibilityValue(Text(isAuto ? "\(value), auto" : value))
+        .accessibilityValue(Text(spokenValue))
+    }
+
+    private var spokenValue: String {
+        var spoken = value
+        if isAuto { spoken += ", auto" }
+        if isStacked { spoken += ", stacked exposure, built from several frames" }
+        return spoken
     }
 
     @ViewBuilder
@@ -631,9 +674,125 @@ struct DialValueHeader: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .disabled(!isAutoEnabled)
             .accessibilityLabel(Text("Auto"))
             .accessibilityValue(Text(isAuto ? "On" : "Off"))
-            .accessibilityHint(Text(isAuto ? "" : "Returns \(title.lowercased()) to automatic."))
+            .accessibilityHint(Text(isAuto ? "" : autoHint ?? "Returns \(title.lowercased()) to automatic."))
+        } else {
+            sidePlaceholder
         }
+    }
+
+    /// The way out of the dial, mirroring AUTO: same capsule, same height, same 44 pt touch area.
+    @ViewBuilder
+    private var doneButton: some View {
+        if let onDone {
+            Button(action: onDone) {
+                Text("Done")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(Theme.primaryText)
+                    .padding(.horizontal, 10)
+                    .frame(height: 26)
+                    .background(Capsule().fill(Color.white.opacity(0.16)))
+                    .frame(minWidth: 44, minHeight: 44)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(Text("Done"))
+            .accessibilityHint(Text(doneHint))
+        } else {
+            sidePlaceholder
+        }
+    }
+
+    /// A side without its button still takes its width. A frame around no view at all takes none, and the value
+    /// would slide off the yellow line toward the empty side.
+    private var sidePlaceholder: some View {
+        Color.clear
+            .frame(height: 1)
+            .accessibilityHidden(true)
+    }
+}
+
+/// Shutter values past the hardware maximum are built from several frames.
+private struct StackBadge: View {
+    var body: some View {
+        Text("STACK")
+            .font(.system(size: 10, weight: .bold))
+            .tracking(0.8)
+            .foregroundStyle(Theme.accent)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(Capsule().fill(Theme.accent.opacity(0.18)))
+            .overlay(Capsule().strokeBorder(Theme.accent.opacity(0.6), lineWidth: 1))
+    }
+}
+
+// MARK: - Closing a dial
+
+extension View {
+    /// The ways out of a dial panel besides its Done button: a swipe down on the panel, and VoiceOver's escape
+    /// gesture (a two-finger scrub). `name` is what VoiceOver calls the panel. `isScrubbing` is the panel's own
+    /// editing state, true from the moment its ruler takes a touch.
+    func closesDial(named name: String, isScrubbing: Bool, perform close: @escaping () -> Void) -> some View {
+        modifier(DialDismissal(name: name, isScrubbing: isScrubbing, close: close))
+    }
+}
+
+private struct DialDismissal: ViewModifier {
+    let name: String
+    /// The ruler takes a touch from 2 pt and this swipe reports from 10 pt, so a scrub can start before the swipe
+    /// sees any of it. The panel tells it instead.
+    let isScrubbing: Bool
+    let close: () -> Void
+
+    @GestureState private var isTouching = false
+    /// Whether this touch can still close the panel: it set off downward and the ruler hasn't taken it. nil until
+    /// it has moved far enough to tell.
+    @State private var swipesDown: Bool?
+
+    /// How far down a swipe travels before the panel closes.
+    private static let closeDistance: CGFloat = 30
+
+    func body(content: Content) -> some View {
+        content
+            .contentShape(Rectangle())
+            // Alongside the ruler's own drag, not instead of it: the ruler takes the sideways drags, this one the
+            // downward ones.
+            .simultaneousGesture(swipe)
+            .onChange(of: isTouching) { _, touching in
+                // A drag the system cancels never reaches onEnded.
+                if !touching { swipesDown = nil }
+            }
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel(Text(name))
+            .accessibilityAction(.escape, close)
+    }
+
+    private var swipe: some Gesture {
+        DragGesture(minimumDistance: 10)
+            .updating($isTouching) { _, touching, _ in
+                touching = true
+            }
+            .onChanged { value in
+                let down = value.translation.height
+                let across = abs(value.translation.width)
+                if swipesDown == nil {
+                    // Decided once per touch, by the way it set off. A scrub that wanders downward later stays
+                    // a scrub.
+                    swipesDown = down > across
+                }
+                // The ruler starts scrubbing the first time a translation is at least as sideways as it is down,
+                // which can happen before this gesture reports anything. From then on the touch is the ruler's, so
+                // a swipe never both moves the value and closes the dial.
+                if across >= down || isScrubbing { swipesDown = false }
+                guard swipesDown == true, !isScrubbing, down >= Self.closeDistance else { return }
+                // Once per touch: the panel stays under the finger while it animates away.
+                swipesDown = false
+                close()
+            }
+            .onEnded { _ in
+                swipesDown = nil
+            }
     }
 }

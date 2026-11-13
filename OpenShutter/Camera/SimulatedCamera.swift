@@ -722,7 +722,9 @@ final class SimulatedCamera: CameraBackend {
     /// Defocus grows with the distance from the in-focus position and with the aperture; digital zoom enlarges it
     /// along with everything else.
     private func defocusBlur(aperture: Double) -> Double {
-        let miss = abs(lensPosition - SimulatedSpec.subjectLensPosition)
+        // The street is far enough that a phone lens focused anywhere beyond it, out to infinity, still holds it
+        // sharp, so only focusing nearer blurs. The scenes that park focus at the far end stay crisp.
+        let miss = max(0, SimulatedSpec.subjectLensPosition - lensPosition)
         let opening = aperture.isFinite && aperture > 0 ? 1.78 / aperture : 1
         return min(SimulatedSpec.defocusPerPosition * miss * opening * lens.defocusScale * zoomFactor, SimulatedSpec.maxDefocus)
     }
@@ -1518,7 +1520,7 @@ private final class SimulatedStackJob: @unchecked Sendable {
         defer { scene.releaseCaches() }
         let frames = framesAccumulated
         guard frames > 0 else {
-            complete(.failure(CameraError.captureFailed("No frames were captured.")))
+            complete(.failure(CameraError.captureFailed("Nothing was captured.")))
             return
         }
         // Discard can land just after an early finish; the frames are not wanted then, so skip the encode.
@@ -1533,7 +1535,7 @@ private final class SimulatedStackJob: @unchecked Sendable {
         report(now: CACurrentMediaTime(), image: result)
         guard let image = SyntheticScene.displayImage(fromLinear: result, upscale: Double(SimulatedSpec.photoScale),
                                                       mirrored: flipsResult, aspect: request.aspect) else {
-            complete(.failure(CameraError.captureFailed("The stacked image couldn't be drawn.")))
+            complete(.failure(CameraError.captureFailed("The picture couldn't be put together.")))
             return
         }
         let date = Date()
@@ -1731,7 +1733,7 @@ private final class SimulatedMovieWriter: @unchecked Sendable {
         isClosed = true
         // finishWriting raises unless the writer is writing; an empty movie isn't worth keeping either way.
         guard frames > 0, writer.status == .writing else {
-            let reason = frames == 0 ? "No frames were recorded." : (writer.error?.localizedDescription ?? "The movie couldn't be written.")
+            let reason = frames == 0 ? "Nothing was recorded." : (writer.error?.localizedDescription ?? "The movie couldn't be written.")
             writer.cancelWriting()
             try? FileManager.default.removeItem(at: url)
             continuation.resume(throwing: CameraError.captureFailed(reason))

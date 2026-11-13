@@ -6,6 +6,10 @@ import CameraCore
 /// mode; the strip follows the finger and springs to the mode it lands on.
 struct ModeCarousel: View {
     @Binding var mode: CaptureMode
+    /// The modes on offer, left to right, each once. The simple interface leaves MANUAL out, and the list can change
+    /// while the strip is on screen: titles are told apart by their mode, so the ones that stay slide to their new
+    /// places.
+    var modes: [CaptureMode] = CaptureMode.carouselOrder
 
     @Environment(\.legibilityWeight) private var legibilityWeight
     @GestureState private var isTouching = false
@@ -13,8 +17,6 @@ struct ModeCarousel: View {
     @State private var dragTranslation: CGFloat = 0
     /// Title widths as laid out. Until the first layout pass a UIFont estimate stands in, so the strip starts centered.
     @State private var measuredWidths: [CaptureMode: CGFloat] = [:]
-
-    private let modes = CaptureMode.carouselOrder
 
     private static let height: CGFloat = 44
     private static let itemPadding: CGFloat = 10
@@ -27,7 +29,7 @@ struct ModeCarousel: View {
 
     var body: some View {
         let centers = itemCenters
-        let selected = modes.firstIndex(of: mode) ?? 0
+        let selected = selectedIndex
         let focus = focusPoint(centers: centers, selected: selected)
         let highlighted = nearest(to: focus, in: centers)
         Color.clear
@@ -35,13 +37,14 @@ struct ModeCarousel: View {
             .frame(height: Self.height)
             .overlay {
                 HStack(spacing: Self.itemSpacing) {
-                    ForEach(modes.indices, id: \.self) { position in
-                        title(modes[position], isHighlighted: position == highlighted)
+                    ForEach(Array(modes.enumerated()), id: \.element) { position, item in
+                        title(item, isHighlighted: position == highlighted)
                     }
                 }
                 .fixedSize()
                 .offset(x: totalWidth(centers) / 2 - focus)
                 .animation(Theme.spring, value: mode)
+                .animation(Theme.spring, value: modes)
             }
             .mask {
                 LinearGradient(
@@ -56,7 +59,7 @@ struct ModeCarousel: View {
                 )
             }
             .contentShape(Rectangle())
-            .gesture(swipe(centers: centers, selected: selected))
+            .gesture(swipe)
             .onChange(of: isTouching) { _, touching in
                 guard !touching else { return }
                 // A swipe the system cancels never reaches onEnded; put the strip back once this update is over.
@@ -103,6 +106,27 @@ struct ModeCarousel: View {
     }
 
     // MARK: - Layout
+
+    /// Where the strip rests. The selected mode can be missing from the list for a moment while the list changes
+    /// (MANUAL leaves with the advanced interface). The strip then rests on that mode's nearest neighbour in the
+    /// usual order, the earlier one of two, which is the mode the camera lands on, instead of jumping to the
+    /// first title.
+    private var selectedIndex: Int {
+        if let index = modes.firstIndex(of: mode) { return index }
+        let order = CaptureMode.carouselOrder
+        guard let wanted = order.firstIndex(of: mode) else { return 0 }
+        var best = 0
+        var bestGap = Int.max
+        for (index, item) in modes.enumerated() {
+            guard let place = order.firstIndex(of: item) else { continue }
+            let gap = abs(place - wanted)
+            if gap < bestGap {
+                best = index
+                bestGap = gap
+            }
+        }
+        return best
+    }
 
     /// Center of every title along the strip, from its leading edge.
     private var itemCenters: [CGFloat] {
@@ -157,7 +181,7 @@ struct ModeCarousel: View {
 
     // MARK: - Interaction
 
-    private func swipe(centers: [CGFloat], selected: Int) -> some Gesture {
+    private var swipe: some Gesture {
         DragGesture(minimumDistance: 8)
             .updating($isTouching) { _, touching, _ in
                 touching = true
@@ -166,12 +190,15 @@ struct ModeCarousel: View {
                 dragTranslation = value.translation.width
             }
             .onEnded { value in
-                finishSwipe(value, centers: centers, selected: selected)
+                finishSwipe(value)
             }
     }
 
-    private func finishSwipe(_ value: DragGesture.Value, centers: [CGFloat], selected: Int) {
-        guard centers.indices.contains(selected) else {
+    private func finishSwipe(_ value: DragGesture.Value) {
+        // Measured at the release, not when the swipe began: the modes on offer may have changed under the finger.
+        let centers = itemCenters
+        let selected = selectedIndex
+        guard !modes.isEmpty, centers.indices.contains(selected) else {
             withAnimation(Theme.spring) { dragTranslation = 0 }
             return
         }
@@ -193,7 +220,7 @@ struct ModeCarousel: View {
     }
 
     private func step(_ direction: AccessibilityAdjustmentDirection) {
-        guard let current = modes.firstIndex(of: mode) else { return }
+        let current = selectedIndex
         let next: Int
         switch direction {
         case .increment: next = current + 1

@@ -1,7 +1,8 @@
 import SwiftUI
 import CameraCore
 
-/// The dial for `model.activeDial`, with its header and presets.
+/// The dial for `model.activeDial`, with its header and presets. It sits where the mode carousel was, so it
+/// carries its own ways back: Done in the header, a swipe down, and VoiceOver's escape gesture.
 struct ActiveDialView: View {
     @Bindable var model: CameraModel
 
@@ -47,15 +48,20 @@ private struct DialPanel: View {
         let locked = DialValues.isLocked(model.activity)
         let dimmed = DialValues.isDimmed(model.activity)
         VStack(spacing: 6) {
-            DialHeader(model: model, kind: kind)
+            // A shot in progress locks what would change the picture and never the way out: Done stays live, like
+            // the swipe and the escape gesture below.
+            DialHeader(model: model, kind: kind, isLocked: locked, isDimmed: dimmed)
             if kind == .whiteBalance {
                 WhiteBalancePresetRow(model: model)
+                    .disabled(locked)
+                    .opacity(dimmed ? 0.45 : 1)
             }
             if scale.values.isEmpty {
                 Text(kind == .aperture ? "This lens has a fixed aperture." : "Not available on this camera.")
                     .font(.footnote)
                     .foregroundStyle(Theme.secondaryText)
                     .frame(height: 56)
+                    .opacity(dimmed ? 0.45 : 1)
             } else {
                 RulerDial(
                     values: scale.values,
@@ -69,7 +75,7 @@ private struct DialPanel: View {
                     onEditingChanged: editingChanged
                 )
                 // RulerDial calls itself "Dial" and speaks a long tick's short label ("250" for 1/250 s).
-                .accessibilityLabel(Text(kind.title))
+                .accessibilityLabel(Text(DialValues.name(kind, model: model)))
                 .accessibilityValue(Text(scale.spokenLabel(scale.clamped(selection ?? fallback))))
                 .overlay {
                     if kind == .focus {
@@ -80,12 +86,16 @@ private struct DialPanel: View {
                     DialFollower(model: model, kind: kind, scale: scale, onTarget: follow)
                         .allowsHitTesting(false)
                 }
+                .disabled(locked)
+                .opacity(dimmed ? 0.45 : 1)
             }
         }
-        .disabled(locked)
-        .opacity(dimmed ? 0.45 : 1)
         .task(id: resyncToken) {
             await resync()
+        }
+        // Outside the lock: closing the dial changes nothing in the picture.
+        .closesDial(named: DialValues.name(kind, model: model) + " dial", isScrubbing: isEditing) {
+            DialValues.close(model)
         }
     }
 
@@ -174,6 +184,8 @@ private struct DialFollower: View {
 private struct DialHeader: View {
     let model: CameraModel
     let kind: DialKind
+    let isLocked: Bool
+    let isDimmed: Bool
 
     var body: some View {
         let readout = DialValues.readout(kind, model: model)
@@ -181,34 +193,23 @@ private struct DialHeader: View {
             title: readout.title,
             value: readout.value,
             isAuto: readout.isAuto,
+            isSetByPerson: readout.isSetByPerson,
+            isStacked: readout.isStacked,
             onAuto: readout.offersAuto ? {
                 Haptics.tap()
+                // Asked before the setter: once a value of the person's is given back the scene holds the control,
+                // and that tap did what AUTO says. The setter runs either way; it clears a value equal to the scene's.
+                let refusal = ControlHolder.autoRefusal(for: kind, model: model)
                 DialValues.setAuto(kind, model: model)
-            } : nil
-        )
-        .overlay(alignment: .trailing) {
-            if readout.isStacked {
-                StackBadge()
-                    .padding(.trailing, 16)
-                    .transition(.opacity.combined(with: .scale(scale: 0.8)))
+                if let refusal { model.showToast(refusal) }
+            } : nil,
+            isAutoEnabled: !isLocked,
+            isDimmed: isDimmed,
+            autoHint: readout.autoHint,
+            onDone: {
+                DialValues.close(model)
             }
-        }
-        .animation(Theme.snappy, value: readout.isStacked)
-    }
-}
-
-/// Shutter values past the hardware maximum are built from several frames.
-private struct StackBadge: View {
-    var body: some View {
-        Text("STACK")
-            .font(.system(size: 10, weight: .bold))
-            .tracking(0.8)
-            .foregroundStyle(Theme.accent)
-            .padding(.horizontal, 7)
-            .padding(.vertical, 3)
-            .background(Capsule().fill(Theme.accent.opacity(0.18)))
-            .overlay(Capsule().strokeBorder(Theme.accent.opacity(0.6), lineWidth: 1))
-            .accessibilityLabel(Text("Stacked exposure, built from several frames"))
+        )
     }
 }
 
@@ -248,7 +249,10 @@ private struct WhiteBalancePresetRow: View {
     private static let presets: [WhiteBalancePreset] = [.auto, .daylight, .cloudy, .shade, .tungsten, .fluorescent, .flash]
 
     var body: some View {
-        let current = model.settings.whiteBalance
+        // The row marks the person's own choice, or Auto. A temperature LONG's scene fixes is neither, even where
+        // it happens to be a preset's.
+        let current: WhiteBalanceSetting? = ControlHolder.of(.whiteBalance, model: model) == .scene
+            ? nil : model.effectiveWhiteBalance
         let grayCardAvailable = model.capabilities.supportsCustomWhiteBalance
         ViewThatFits(in: .horizontal) {
             row(current: current, grayCardAvailable: grayCardAvailable)
@@ -260,13 +264,16 @@ private struct WhiteBalancePresetRow: View {
         }
     }
 
-    private func row(current: WhiteBalanceSetting, grayCardAvailable: Bool) -> some View {
+    private func row(current: WhiteBalanceSetting?, grayCardAvailable: Bool) -> some View {
         HStack(spacing: 4) {
             ForEach(Self.presets) { preset in
                 PresetButton(model: model, systemName: preset.symbolName, title: preset.title,
                              isSelected: Self.isSelected(preset, current: current)) {
                     Haptics.tick()
+                    // Auto answers like the header's AUTO while the scene holds the temperature.
+                    let refusal = preset == .auto ? ControlHolder.autoRefusal(for: .whiteBalance, model: model) : nil
                     model.setWhiteBalance(preset == .auto ? .auto : .preset(preset))
+                    if let refusal { model.showToast(refusal) }
                 }
             }
             PresetButton(model: model, systemName: "eyedropper", title: "Gray card", isSelected: false) {
@@ -280,8 +287,10 @@ private struct WhiteBalancePresetRow: View {
         }
     }
 
-    private static func isSelected(_ preset: WhiteBalancePreset, current: WhiteBalanceSetting) -> Bool {
+    private static func isSelected(_ preset: WhiteBalancePreset, current: WhiteBalanceSetting?) -> Bool {
         switch current {
+        case nil:
+            return false
         case .auto:
             return preset == .auto
         case .preset(let chosen):
@@ -335,6 +344,24 @@ private enum DialValues {
         var isAuto: Bool
         var offersAuto: Bool
         var isStacked: Bool
+        /// False while LONG's scene holds the value: it stands still, but the person didn't set it.
+        var isSetByPerson = true
+        /// What VoiceOver says AUTO does, where that isn't a return to automatic.
+        var autoHint: String? = nil
+    }
+
+    /// What the dial is called, on screen and to VoiceOver. The simple interface knows exposure compensation as
+    /// brightness.
+    static func name(_ kind: DialKind, model: CameraModel) -> String {
+        kind == .bias && !model.isAdvanced ? "Brightness" : kind.title
+    }
+
+    /// Done, a swipe down and VoiceOver's escape gesture all end here.
+    static func close(_ model: CameraModel) {
+        Haptics.tick()
+        withAnimation(Theme.spring) {
+            model.activeDial = nil
+        }
     }
 
     /// Changing exposure while a shot or stack runs would end up in the picture.
@@ -419,39 +446,60 @@ private enum DialValues {
             return Readout(title: kind.title, value: value, isAuto: model.isShutterAuto, offersAuto: true,
                            isStacked: settings.mode == .manual && model.shutterIsStacked)
         case .iso:
-            return Readout(title: kind.title, value: ISOScale.compactLabel(model.displayISO), isAuto: model.isISOAuto,
-                           offersAuto: true, isStacked: false)
+            return sceneAware(kind, value: ISOScale.compactLabel(model.displayISO), offersAuto: true, model: model)
         case .aperture:
-            return Readout(title: kind.title, value: ApertureScale.label(model.displayAperture), isAuto: model.isApertureAuto,
-                           offersAuto: caps.supportsVariableAperture, isStacked: false)
+            return sceneAware(kind, value: ApertureScale.label(model.displayAperture),
+                              offersAuto: caps.supportsVariableAperture, model: model)
         case .bias:
             let bias = bias(model)
-            return Readout(title: kind.title, value: EVFormat.label(bias) + " EV", isAuto: abs(bias) < 0.05,
+            // The unit is for people who count in stops; the simple interface shows the number alone.
+            let value = model.isAdvanced ? EVFormat.label(bias) + " EV" : EVFormat.label(bias)
+            return Readout(title: name(kind, model: model), value: value, isAuto: abs(bias) < 0.05,
                            offersAuto: true, isStacked: false)
         case .whiteBalance:
             let kelvin = Formatting.kelvin(model.displayKelvin)
-            if case .preset(let preset) = settings.whiteBalance, preset != .auto {
-                return Readout(title: kind.title, value: "\(preset.title) \u{00B7} \(kelvin)", isAuto: false,
-                               offersAuto: true, isStacked: false)
+            var readout = sceneAware(kind, value: kelvin, offersAuto: true, model: model)
+            // Only the person picks presets; the scene's temperature shows as the bare number.
+            if readout.isSetByPerson, case .preset(let preset) = model.effectiveWhiteBalance, preset != .auto {
+                readout.value = "\(preset.title) \u{00B7} \(kelvin)"
             }
-            return Readout(title: kind.title, value: kelvin, isAuto: model.isWhiteBalanceAuto, offersAuto: true, isStacked: false)
+            return readout
         case .tint:
             return Readout(title: kind.title, value: Formatting.tint(model.displayTint), isAuto: false,
                            offersAuto: false, isStacked: false)
         case .focus:
             let position = model.displayLensPosition
             let clamped = position.isFinite ? min(max(position, 0), 1) : 0
-            return Readout(title: kind.title, value: "\(Int((clamped * 100).rounded()))%", isAuto: model.isFocusAuto,
-                           offersAuto: caps.supportsManualFocus, isStacked: false)
+            return sceneAware(kind, value: "\(Int((clamped * 100).rounded()))%", offersAuto: caps.supportsManualFocus,
+                              model: model)
         case .zoom:
             let readings = model.readings
             var value = LensMath.zoomLabel(readings.displayZoom, selected: true)
             let focal = caps.lens.equivalentFocalLength * max(readings.zoomFactor, 1)
-            if focal.isFinite, focal > 0 {
+            // Millimeters are for people who think in lenses; the simple interface counts in times.
+            if model.isAdvanced, focal.isFinite, focal > 0 {
                 value += " \u{00B7} " + LensMath.focalLengthLabel(focal)
             }
             return Readout(title: kind.title, value: value, isAuto: false, offersAuto: false, isStacked: false)
         }
+    }
+
+    /// The header of a control LONG's scene can hold. While the scene holds it, the value is neither auto nor the
+    /// person's: the title names the scene ("Focus · Stars"), the value shows in white, and AUTO stays off. A tap
+    /// on AUTO then says that the scene sets the value and that Custom gives auto back; with a value of the
+    /// person's, AUTO leads back to the scene's.
+    private static func sceneAware(_ kind: DialKind, value: String, offersAuto: Bool, model: CameraModel) -> Readout {
+        let holder = ControlHolder.of(kind, model: model)
+        var readout = Readout(title: kind.title, value: value, isAuto: holder == .camera, offersAuto: offersAuto, isStacked: false)
+        guard let scene = ControlHolder.sceneName(for: kind, model: model) else { return readout }
+        if holder == .scene {
+            readout.title = kind.title + " \u{00B7} " + scene
+            readout.isSetByPerson = false
+            readout.autoHint = ControlHolder.autoRefusal(for: kind, model: model)
+        } else {
+            readout.autoHint = "Returns \(kind.title.lowercased()) to the scene's setting."
+        }
+        return readout
     }
 
     private static func bias(_ model: CameraModel) -> Double {

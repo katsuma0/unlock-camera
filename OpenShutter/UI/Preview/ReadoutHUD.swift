@@ -83,10 +83,12 @@ struct ReadoutHUD: View {
         let custom = capabilities.supportsCustomExposure
         let iso = custom ? model.displayISO : model.readings.iso
         let isAuto = model.isISOAuto || !custom
+        let byScene = !isAuto && isHeldByScene(.iso)
         let highest = ISOScale.label(capabilities.exposure.iso.upperBound)
         let template = highest.count > 8 ? highest : "ISO 6400"
-        return ReadoutItem(kind: .iso, text: ISOScale.label(iso), template: template, value: iso, isManual: !isAuto,
-                           marksAuto: isAuto, reservesMark: true, spoken: "ISO \(ISOScale.compactLabel(iso))")
+        return ReadoutItem(kind: .iso, text: ISOScale.label(iso), template: template, value: iso,
+                           isManual: !isAuto && !byScene, marksAuto: isAuto, reservesMark: true,
+                           spoken: Self.spoken("ISO \(ISOScale.compactLabel(iso))", byScene: byScene))
     }
 
     private func apertureItem(_ capabilities: CameraCapabilities) -> ReadoutItem {
@@ -94,9 +96,10 @@ struct ReadoutHUD: View {
         // A fixed iris is neither auto nor manual, so it gets neither the yellow nor the A.
         let variable = capabilities.supportsVariableAperture
         let isAuto = model.isApertureAuto
+        let byScene = variable && !isAuto && isHeldByScene(.aperture)
         return ReadoutItem(kind: .aperture, text: ApertureScale.label(aperture), template: "\u{0192}/8.88", value: aperture,
-                           isManual: variable && !isAuto, marksAuto: variable && isAuto, reservesMark: variable,
-                           spoken: "Aperture f \(ApertureScale.compactLabel(aperture))")
+                           isManual: variable && !isAuto && !byScene, marksAuto: variable && isAuto, reservesMark: variable,
+                           spoken: Self.spoken("Aperture f \(ApertureScale.compactLabel(aperture))", byScene: byScene))
     }
 
     private func biasItem(_ settings: CameraSettings) -> ReadoutItem {
@@ -111,9 +114,11 @@ struct ReadoutHUD: View {
         let custom = capabilities.supportsCustomWhiteBalance
         let kelvin = custom ? model.displayKelvin : model.readings.kelvin
         let isAuto = model.isWhiteBalanceAuto || !custom
+        let byScene = !isAuto && isHeldByScene(.whiteBalance)
         let label = Formatting.kelvin(kelvin)
-        return ReadoutItem(kind: .kelvin, text: label, template: "10000K", value: kelvin, isManual: !isAuto,
-                           marksAuto: isAuto, reservesMark: true, spoken: "White balance \(label.dropLast()) kelvin")
+        return ReadoutItem(kind: .kelvin, text: label, template: "10000K", value: kelvin,
+                           isManual: !isAuto && !byScene, marksAuto: isAuto, reservesMark: true,
+                           spoken: Self.spoken("White balance \(label.dropLast()) kelvin", byScene: byScene))
     }
 
     private func focusItem(_ capabilities: CameraCapabilities) -> ReadoutItem {
@@ -123,9 +128,22 @@ struct ReadoutHUD: View {
                                marksAuto: false, reservesMark: false, spoken: "Autofocus")
         }
         let position = model.displayLensPosition
+        let byScene = isHeldByScene(.focus)
         let label = Formatting.lensPosition(position)
-        return ReadoutItem(kind: .focus, text: label, template: "MF 100%", value: position, isManual: true,
-                           marksAuto: false, reservesMark: false, spoken: "Manual focus \(label.dropFirst(3))")
+        return ReadoutItem(kind: .focus, text: label, template: "MF 100%", value: position, isManual: !byScene,
+                           marksAuto: false, reservesMark: false,
+                           spoken: Self.spoken("Manual focus \(label.dropFirst(3))", byScene: byScene))
+    }
+
+    /// A long exposure scene fixes this value where the person set none. That is neither auto nor manual, so it
+    /// gets neither the A nor the yellow. The strip's chips draw the same line, with the same test.
+    private func isHeldByScene(_ kind: DialKind) -> Bool {
+        ControlHolder.of(kind, model: model) == .scene
+    }
+
+    /// VoiceOver hears who holds such a value, in the words the strip's chips use.
+    private static func spoken(_ value: String, byScene: Bool) -> String {
+        byScene ? value + ", set by the scene" : value
     }
 
     /// "180°", "172.8°": tenths matter for flicker-free angles like 172.8 at 50 Hz mains.
@@ -160,6 +178,8 @@ private struct ReadoutItem: Identifiable {
     let template: String
     /// Drives the direction digits roll in.
     let value: Double
+    /// Yellow: a value set by hand. A fixed iris and the ISO, aperture, white balance or focus a long exposure
+    /// scene supplies are neither that nor auto, and stay white without the "A".
     let isManual: Bool
     /// Auto values carry a small "A", as in the Camera app.
     let marksAuto: Bool

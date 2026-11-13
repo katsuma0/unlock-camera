@@ -2,33 +2,46 @@ import SwiftUI
 import CameraCore
 
 /// Glass panel under the top bar with the settings people change between shots. Tap an item to step through its
-/// values; touch and hold the ones with many values to pick directly.
+/// values; touch and hold the ones with many values to pick directly. The simple interface keeps one row of four.
 struct QuickSettingsDrawer: View {
     @Bindable var model: CameraModel
+    /// Set by the top bar's timer badge to ask for the timer sheet, which is presented from here.
+    @Binding var timerSheetRequested: Bool
     @State private var showsTimerSheet = false
     /// The timer cycle ends with "custom": after that sheet closes, the next tap wraps around to Off.
     @State private var timerCycleReachedCustom = false
 
     var body: some View {
+        let advanced = model.isAdvanced
         VStack(spacing: 10) {
             Grid(horizontalSpacing: 2, verticalSpacing: 12) {
-                GridRow {
-                    aspectItem
-                    timerItem
-                    formatItem
-                    resolutionItem
-                }
-                GridRow {
-                    processingItem
-                    lockItem
-                    gridItem
-                    levelItem
-                }
-                GridRow {
-                    histogramItem
-                    zebraItem
-                    peakingItem
-                    falseColorItem
+                if advanced {
+                    GridRow {
+                        aspectItem(presets: AspectRatio.presets, offersCustom: true)
+                        timerItem(delays: CaptureSchedule.delayPresets, offersCustom: true)
+                        formatItem
+                        resolutionItem
+                    }
+                    GridRow {
+                        processingItem
+                        lockItem
+                        gridItem
+                        levelItem
+                    }
+                    GridRow {
+                        histogramItem
+                        zebraItem
+                        peakingItem
+                        falseColorItem
+                    }
+                } else {
+                    // What the simple interface leaves to choose between shots. Everything else runs on automatic.
+                    GridRow {
+                        aspectItem(presets: CameraSettings.simpleAspects, offersCustom: false)
+                        timerItem(delays: CameraSettings.simpleDelays, offersCustom: false)
+                        simpleGridItem
+                        levelItem
+                    }
                 }
             }
             Capsule()
@@ -44,6 +57,8 @@ struct QuickSettingsDrawer: View {
         .fixedSize(horizontal: false, vertical: true)
         .cameraGlass(in: RoundedRectangle(cornerRadius: 26, style: .continuous))
         .padding(.horizontal, 8)
+        // Outside the glass, so the panel grows and shrinks with its rows when the interface level changes.
+        .animation(Theme.spring, value: advanced)
         // Swiping the panel back up closes it, the way it came.
         .gesture(
             DragGesture(minimumDistance: 12)
@@ -61,6 +76,13 @@ struct QuickSettingsDrawer: View {
         .onChange(of: model.settings.capture.schedule) { _, _ in
             timerCycleReachedCustom = false
         }
+        // Initial covers a request that opened the drawer: it arrives before this view exists.
+        .onChange(of: timerSheetRequested, initial: true) { _, requested in
+            guard requested else { return }
+            timerSheetRequested = false
+            // The sheet holds the intervalometer and the brackets, which the simple interface doesn't have.
+            if advanced { showsTimerSheet = true }
+        }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Quick settings")
         .accessibilityAction(.escape) { close() }
@@ -72,23 +94,24 @@ struct QuickSettingsDrawer: View {
 
     // MARK: - Capture
 
-    private var aspectItem: some View {
+    /// `offersCustom` adds the way to a ratio entered in Settings, which the simple interface leaves out.
+    private func aspectItem(presets: [AspectRatio], offersCustom: Bool) -> some View {
         let aspect = model.settings.capture.aspect
         let selection = Binding<AspectRatio>(
-            get: { AspectRatio.presets.first(where: { $0.matches(aspect) }) ?? aspect },
+            get: { presets.first(where: { $0.matches(aspect) }) ?? aspect },
             set: { value in
                 Haptics.tick()
                 model.updateSettings { $0.capture.aspect = value }
             }
         )
-        let isPreset = AspectRatio.presets.contains(where: { $0.matches(aspect) })
+        let isPreset = presets.contains(where: { $0.matches(aspect) })
         // Video frames are always 16:9; the crop only applies to stills.
         return DrawerMenuItem(model: model, title: "Aspect", value: aspect.label,
                               isActive: !aspect.matches(.fourThree),
                               isEnabled: model.settings.mode != .video,
-                              primaryAction: cycleAspect) {
+                              primaryAction: { cycleAspect(through: presets) }) {
             Picker("Aspect", selection: selection) {
-                ForEach(AspectRatio.presets) { preset in
+                ForEach(presets) { preset in
                     Text(preset.label).tag(preset)
                 }
                 // A ratio entered in Settings gets its own row, so the menu shows which one is in use.
@@ -97,11 +120,13 @@ struct QuickSettingsDrawer: View {
                 }
             }
             .pickerStyle(.inline)
-            Button {
-                // Settings holds the side fields; the drawer stays open underneath and shows the new ratio after.
-                model.isSettingsPresented = true
-            } label: {
-                Label("Custom\u{2026}", systemImage: "slider.horizontal.3")
+            if offersCustom {
+                Button {
+                    // Settings holds the side fields; the drawer stays open underneath and shows the new ratio after.
+                    model.isSettingsPresented = true
+                } label: {
+                    Label("Custom\u{2026}", systemImage: "slider.horizontal.3")
+                }
             }
         } glyph: {
             Text(aspect.label)
@@ -114,8 +139,7 @@ struct QuickSettingsDrawer: View {
 
     /// Steps through the presets. A ratio entered in Settings sits after the last preset, so the next tap goes to
     /// the first one.
-    private func cycleAspect() {
-        let presets = AspectRatio.presets
+    private func cycleAspect(through presets: [AspectRatio]) {
         guard !presets.isEmpty else { return }
         let current = model.settings.capture.aspect
         let index = presets.firstIndex(where: { $0.matches(current) })
@@ -124,7 +148,8 @@ struct QuickSettingsDrawer: View {
         model.updateSettings { $0.capture.aspect = next }
     }
 
-    private var timerItem: some View {
+    /// `offersCustom` ends the tap cycle and the menu with the timer sheet, which the simple interface leaves out.
+    private func timerItem(delays: [Double], offersCustom: Bool) -> some View {
         let schedule = model.settings.capture.schedule
         let selection = Binding<Double>(
             // A burst or intervalometer matches none of the plain delays, so no row gets the checkmark.
@@ -140,27 +165,29 @@ struct QuickSettingsDrawer: View {
         return DrawerMenuItem(model: model, title: "Timer", value: Self.timerValue(schedule),
                               isActive: !schedule.isOff,
                               isEnabled: applies,
-                              primaryAction: cycleTimer) {
+                              primaryAction: { cycleTimer(through: delays, endsInSheet: offersCustom) }) {
             Picker("Timer", selection: selection) {
-                ForEach(CaptureSchedule.delayPresets, id: \.self) { delay in
+                ForEach(delays, id: \.self) { delay in
                     Text(Self.delayTitle(delay)).tag(delay)
                 }
             }
             .pickerStyle(.inline)
-            Button {
-                showsTimerSheet = true
-            } label: {
-                Label("Custom", systemImage: "slider.horizontal.3")
+            if offersCustom {
+                Button {
+                    showsTimerSheet = true
+                } label: {
+                    Label("Custom", systemImage: "slider.horizontal.3")
+                }
             }
         } glyph: {
             Image(systemName: "timer")
         }
     }
 
-    /// Off, 3s, 5s, 10s, 30s, then the timer sheet for anything else; a custom schedule steps back to Off.
-    private func cycleTimer() {
+    /// Off, 3s, 5s, 10s, 30s, then the timer sheet for anything else; a custom schedule steps back to Off. Without
+    /// the sheet the last delay goes straight back to Off.
+    private func cycleTimer(through presets: [Double], endsInSheet: Bool) {
         let schedule = model.settings.capture.schedule
-        let presets = CaptureSchedule.delayPresets
         guard schedule.shots == 1,
               let index = presets.firstIndex(where: { abs($0 - schedule.delay) < 0.01 }) else {
             setSchedule(.off)
@@ -168,7 +195,7 @@ struct QuickSettingsDrawer: View {
         }
         if index + 1 < presets.count {
             setSchedule(CaptureSchedule(delay: presets[index + 1]))
-        } else if timerCycleReachedCustom {
+        } else if !endsInSheet || timerCycleReachedCustom {
             timerCycleReachedCustom = false
             setSchedule(.off)
         } else {
@@ -298,6 +325,18 @@ struct QuickSettingsDrawer: View {
         }
     }
 
+    /// The simple interface's grid is the rule of thirds or nothing.
+    private var simpleGridItem: some View {
+        let isOn = model.settings.display.grid != .off
+        let shown = CameraSettings.simpleGrids.first(where: { $0 != .off }) ?? .thirds
+        return DrawerButtonItem(model: model, title: "Grid", value: isOn ? "On" : "Off", isActive: isOn) {
+            Haptics.tap()
+            model.updateSettings { $0.display.grid = isOn ? .off : shown }
+        } glyph: {
+            Image(systemName: "square.grid.3x3")
+        }
+    }
+
     private var levelItem: some View {
         let isOn = model.settings.display.showLevel
         return DrawerButtonItem(model: model, title: "Level", value: isOn ? "On" : "Off", isActive: isOn) {
@@ -368,8 +407,9 @@ struct QuickSettingsDrawer: View {
         return "\(schedule.shots) shots"
     }
 
+    /// A menu row, worded like the other touch and hold menus ("3 s"); the item's own value stays compact.
     private static func delayTitle(_ delay: Double) -> String {
-        delay > 0 ? Formatting.compactDuration(delay) : "Off"
+        delay > 0 ? HoldMenuText.time(delay) : "Off"
     }
 
     private static func formatValue(_ format: ProcessedFormat) -> String {
@@ -477,23 +517,23 @@ private struct DrawerMenuItem<Glyph: View, Options: View>: View {
     let primaryAction: () -> Void
     @ViewBuilder let options: () -> Options
     @ViewBuilder let glyph: () -> Glyph
+    @State private var press = PressTracker()
 
     var body: some View {
-        Menu {
-            options()
-        } label: {
+        // The same button as the items without a menu, with the menu laid over it. Every step changes the label,
+        // and a label inside the system's menu button would be redrawn through that button each time.
+        Button(action: primaryAction) {
             DrawerItemLabel(model: model, title: title, value: value, isActive: isActive, glyph: glyph())
-        } primaryAction: {
-            primaryAction()
         }
-        .menuStyle(.button)
-        .buttonStyle(DrawerPressStyle())
-        .menuIndicator(.hidden)
-        .disabled(!isEnabled)
-        .opacity(isEnabled ? 1 : 0.35)
+        .buttonStyle(DrawerPressStyle(isPressed: press.isPressed))
         .accessibilityLabel(title)
         .accessibilityValue(value)
-        .accessibilityHint("Touch and hold for every option.")
+        .accessibilityHint("Touch and hold for more options.")
+        .overlay {
+            MenuOnHoldLayer(press: press, action: primaryAction, options: options)
+        }
+        .disabled(!isEnabled)
+        .opacity(isEnabled ? 1 : 0.35)
     }
 }
 
@@ -533,10 +573,14 @@ private struct DrawerItemLabel<Glyph: View>: View {
 }
 
 private struct DrawerPressStyle: ButtonStyle {
+    /// A press that lands on the item's touch and hold layer.
+    var isPressed = false
+
     func makeBody(configuration: Configuration) -> some View {
+        let pressed = configuration.isPressed || isPressed
         configuration.label
-            .scaleEffect(configuration.isPressed ? 0.92 : 1)
-            .animation(Theme.snappy, value: configuration.isPressed)
+            .scaleEffect(pressed ? 0.92 : 1)
+            .animation(Theme.snappy, value: pressed)
     }
 }
 

@@ -18,6 +18,11 @@ public enum CaptureMode: String, Codable, Sendable, CaseIterable, Identifiable {
     public var usesStacking: Bool { self == .night || self == .long }
     /// Left to right in the mode carousel; PHOTO sits in the middle like the Camera app.
     public static let carouselOrder: [CaptureMode] = [.night, .long, .photo, .manual, .video]
+
+    /// The carousel for the simple interface leaves MANUAL out: every mode it keeps runs on auto.
+    public static func carouselOrder(advanced: Bool) -> [CaptureMode] {
+        advanced ? carouselOrder : carouselOrder.filter { $0 != .manual }
+    }
 }
 
 public enum ProcessedFormat: String, Codable, Sendable, CaseIterable, Identifiable {
@@ -519,11 +524,13 @@ public struct NightSettings: Codable, Hashable, Sendable {
 }
 
 public struct LongExposureSettings: Codable, Hashable, Sendable {
-    public var seconds: Double = 4
-    public var blend: StackBlend = .additive
+    /// The subject the settings below were picked for. A fresh install starts on Water, which can't overexpose.
+    public var scene: LongExposureScene = .water
+    public var seconds: Double = 2
+    public var blend: StackBlend = .average
     /// Hold the shutter (or tap to start and stop) instead of a fixed time.
     public var bulb: Bool = false
-    public var align: Bool = false
+    public var align: Bool = true
     public var maxBulbSeconds: Double = 1800
     /// Shutter for each frame of a Blur or Trails stack; nil leaves it to auto exposure. Real ignores it, since its
     /// frames are as long as the sensor allows.
@@ -531,17 +538,43 @@ public struct LongExposureSettings: Codable, Hashable, Sendable {
 
     public init() {}
 
-    enum CodingKeys: String, CodingKey { case seconds, blend, bulb, align, maxBulbSeconds, frameSeconds }
+    /// The scene's own settings; nil for custom.
+    public var recipe: LongExposureRecipe? { scene.recipe }
+
+    /// Picks a scene and loads the blend, time, bulb, frame shutter and alignment of its recipe. Custom keeps
+    /// every value as it is.
+    public mutating func apply(_ scene: LongExposureScene) {
+        self.scene = scene
+        guard let recipe = scene.recipe else { return }
+        blend = recipe.blend
+        seconds = recipe.seconds
+        bulb = recipe.bulb
+        frameSeconds = recipe.frameSeconds
+        align = recipe.align
+    }
+
+    enum CodingKeys: String, CodingKey { case scene, seconds, blend, bulb, align, maxBulbSeconds, frameSeconds }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let d = LongExposureSettings()
+        // Settings saved before scenes existed hold a blend and a time the person chose, which is what Custom means.
+        scene = c.value(.scene, default: c.contains(.blend) || c.contains(.seconds) ? .custom : d.scene)
         seconds = c.value(.seconds, default: d.seconds)
         blend = c.value(.blend, default: d.blend)
         bulb = c.value(.bulb, default: d.bulb)
         align = c.value(.align, default: d.align)
         maxBulbSeconds = c.value(.maxBulbSeconds, default: d.maxBulbSeconds)
         frameSeconds = c.value(.frameSeconds, default: d.frameSeconds)
+        // A scene is only ever saved with its recipe's values (anything else is Custom), so they come from the
+        // recipe as this version has it. One retuned since the save would otherwise read as set by hand, and the
+        // scene would turn into Custom at the next change of any setting.
+        if let recipe = scene.recipe {
+            blend = recipe.blend
+            bulb = recipe.bulb
+            frameSeconds = recipe.frameSeconds
+            align = recipe.align
+        }
     }
 }
 
@@ -602,6 +635,25 @@ public struct ControlOptions: Codable, Hashable, Sendable {
     }
 }
 
+/// How much of the camera the interface shows.
+public struct InterfaceOptions: Codable, Hashable, Sendable {
+    /// Shows MANUAL mode and every detailed control. Off keeps the screen to the basics and everything else on auto.
+    public var advanced: Bool = false
+    /// The first-launch question (simple or advanced) has been answered.
+    public var welcomed: Bool = false
+
+    public init() {}
+
+    enum CodingKeys: String, CodingKey { case advanced, welcomed }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = InterfaceOptions()
+        advanced = c.value(.advanced, default: d.advanced)
+        welcomed = c.value(.welcomed, default: d.welcomed)
+    }
+}
+
 public struct CameraSettings: Codable, Hashable, Sendable {
     public var mode: CaptureMode = .photo
     public var lensID: String? = nil
@@ -617,6 +669,7 @@ public struct CameraSettings: Codable, Hashable, Sendable {
     public var longExposure: LongExposureSettings = .init()
     public var video: VideoSettings = .init()
     public var controls: ControlOptions = .init()
+    public var interface: InterfaceOptions = .init()
 
     public init() {}
 
@@ -624,6 +677,7 @@ public struct CameraSettings: Codable, Hashable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case mode, lensID, zoom, manual, whiteBalance, focus, capture, exposure, focusOptions, display, night, longExposure, video, controls
+        case interface
     }
 
     public init(from decoder: Decoder) throws {
@@ -643,6 +697,7 @@ public struct CameraSettings: Codable, Hashable, Sendable {
         longExposure = c.value(.longExposure, default: d.longExposure)
         video = c.value(.video, default: d.video)
         controls = c.value(.controls, default: d.controls)
+        interface = c.value(.interface, default: d.interface)
     }
 
     public func encoded() throws -> Data {
