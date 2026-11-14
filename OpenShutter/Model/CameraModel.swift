@@ -520,13 +520,16 @@ final class CameraModel {
     }
 
     // Default arguments run outside the main actor, so the main-actor helpers are built in the body.
-    init(backend: CameraBackend, store: SettingsStore = SettingsStore(), motionMonitor: MotionMonitor? = nil, locationProvider: LocationProvider? = nil) {
+    init(backend: CameraBackend, store: SettingsStore = SettingsStore(), motionMonitor: MotionMonitor? = nil,
+         locationProvider: LocationProvider? = nil, library: CaptureLibrary? = nil) {
         self.backend = backend
         self.store = store
         self.motionMonitor = motionMonitor ?? MotionMonitor()
         self.locationProvider = locationProvider ?? LocationProvider()
-        self.library = CaptureLibrary()
-        let loaded = store.load()
+        self.library = library ?? CaptureLibrary()
+        // What the startup options don't keep goes back to where a fresh install starts, before anything is
+        // simplified or applied from it.
+        let loaded = store.load().applyingStartupOptions()
         if loaded.interface.advanced || !loaded.interface.welcomed {
             // Until the first-launch question is answered nothing is simplified, so settings from a version before
             // it come through "Advanced" exactly as they were (finishWelcome).
@@ -541,7 +544,9 @@ final class CameraModel {
             self.settings = simple
         }
         // The first-launch question comes before start(), and its buttons click too.
-        Haptics.isEnabled = settings.controls.haptics
+        mirrorHaptics()
+        mirrorLook()
+        dimmer.onChange = { [weak self] _ in self?.dimmingDidChange() }
     }
 
     // MARK: - Lifecycle
