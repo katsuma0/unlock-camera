@@ -31,6 +31,8 @@ struct LensPicker: View {
     @State private var zoomAtSwitch: Double?
     /// True from the moment a hold goes through until its touch ends, however it ends.
     @GestureState private var isHolding = false
+    /// A hold went through during the touch that is ending, so its lift is not also a tap.
+    @State private var heldThisTouch = false
     /// The button VoiceOver is on, so a zoom that hands the active role to the next button can take the focus along.
     @AccessibilityFocusState private var focusedID: String?
 
@@ -74,7 +76,11 @@ struct LensPicker: View {
                 .onChange(of: isHolding) { _, holding in
                     guard !holding else { return }
                     // A hold the system cancels never reaches onEnded; look again once this gesture update is over.
-                    Task { @MainActor in onHoldEnded() }
+                    // The tap of the same lift has been handled by then.
+                    Task { @MainActor in
+                        onHoldEnded()
+                        heldThisTouch = false
+                    }
                 }
                 .accessibilityElement(children: .contain)
                 .accessibilityLabel(Text("Lenses"))
@@ -147,9 +153,17 @@ struct LensPicker: View {
             .cameraGlass(in: Circle())
             .frame(width: Self.hitSize, height: Self.hitSize)
             .contentShape(Rectangle())
-            .gesture(
-                // The hold has to fail before the tap counts, so holding never also selects on lift. Once it goes
-                // through, the same finger drags the wheel, wherever it wanders.
+            // A plain tap gesture with the hold beside it: a tap tied to the hold's failure (exclusively) never fired
+            // on a phone. A lift that ends a hold is skipped here instead.
+            .onTapGesture {
+                if heldThisTouch {
+                    heldThisTouch = false
+                } else {
+                    onSelect(preset)
+                }
+            }
+            .simultaneousGesture(
+                // Once the hold goes through, the same finger drags the wheel, wherever it wanders.
                 LongPressGesture(minimumDuration: Self.holdDuration, maximumDistance: Self.holdSlop)
                     .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .global))
                     .updating($isHolding) { value, holding, _ in
@@ -157,13 +171,13 @@ struct LensPicker: View {
                     }
                     .onChanged { value in
                         guard case .second(true, let drag) = value else { return }
+                        if !heldThisTouch { heldThisTouch = true }
                         onHold(drag.map { Double($0.translation.width) })
                     }
                     .onEnded { value in
                         guard case .second(true, _) = value else { return }
                         onHoldEnded()
                     }
-                    .exclusively(before: TapGesture().onEnded { onSelect(preset) })
             )
             // The accessible button is its own view, so it can change with the role while the drawn one stays put.
             .accessibilityRepresentation {
