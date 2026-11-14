@@ -21,7 +21,9 @@ struct GalleryPage: View {
         Group {
             if asset.mediaType == .video {
                 VideoPage(asset: asset, manager: manager, isCurrent: isCurrent)
-            } else if asset.mediaSubtypes.contains(.photoLive) {
+            } else if asset.playbackStyle == .livePhoto {
+                // Not the Live subtype: Loop, Bounce and Live off keep it but no longer play as Live Photos, so
+                // they show as stills.
                 LivePhotoPage(asset: asset, manager: manager, isCurrent: isCurrent, onTap: onTap)
             } else {
                 PhotoPage(asset: asset, manager: manager, isCurrent: isCurrent, isZoomed: $isZoomed, onTap: onTap)
@@ -364,6 +366,11 @@ private struct VideoPage: View {
         .task(id: asset.localIdentifier) {
             guard player == nil else { return }
             if let item = await AssetRequests.playerItem(for: asset, manager: manager) {
+                // The app never sets its audio session, so a video would play under whatever the camera left:
+                // the default category, which the Ring/Silent switch mutes, or after filming the capture session's
+                // PlayAndRecord, whose default output is the earpiece. Playback sounds as in Photos; the capture
+                // session sets PlayAndRecord again when it needs the microphone.
+                try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
                 player = AVPlayer(playerItem: item)
             } else if !Task.isCancelled {
                 failed = true

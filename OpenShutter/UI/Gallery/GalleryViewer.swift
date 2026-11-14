@@ -53,7 +53,8 @@ struct GalleryViewer: View {
             }
         }
         .overlay(alignment: .topLeading) {
-            if showsChrome, let current, current.mediaSubtypes.contains(.photoLive), current.mediaType == .image {
+            // The same test as the page's (GalleryPage): only a Live Photo that plays as one gets the badge.
+            if showsChrome, let current, current.playbackStyle == .livePhoto {
                 LivePhotoBadge()
                     .padding(.top, 10)
                     .padding(.leading, 14)
@@ -178,10 +179,11 @@ struct GalleryViewer: View {
                 Label("Info", systemImage: "info.circle")
             }
             .accessibilityHint("Shows everything saved inside the photo.")
-            if asset?.canPerform(.content) ?? false {
+            // The editor's own rule: a loop or bounce passes canPerform(.content) but can't be edited there.
+            if let asset, PhotoEditSession.isEditable(asset) {
                 Spacer()
                 Button {
-                    editing = asset.map(AssetTarget.init)
+                    editing = AssetTarget(asset: asset)
                 } label: {
                     Label("Edit", systemImage: "slider.horizontal.3")
                 }

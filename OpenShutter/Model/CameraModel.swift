@@ -232,6 +232,9 @@ final class CameraModel {
     private static let nightTripodSettleSeconds = 1.0
     /// How much longer a settle waits for a phone that still moves.
     private static let settleExtraSeconds = 3.0
+    /// How far past the hand limit LONG's frame has to go, about a fifth of a stop, before the pill changes its
+    /// mind about a tripod (longSteadyNeed).
+    private static let handLimitMargin = 1.15
 
     /// Display zoom the pinch, the zoom wheel and the zoom dial offer: from the widest lens to five times the
     /// longest button while lenses may switch, else the active lens's own range (ZoomMath.span).
@@ -461,7 +464,7 @@ final class CameraModel {
             return SteadyAdvice.night(stability: settings.night.stability,
                                       seconds: settings.night.seconds ?? nightAutoSeconds)
         case .long:
-            return longSteadyNeed(plan: longPlan)
+            return longSteadyNeed(plan: longPlan, leaning: shownSteadyNeed)
         case .manual:
             // Past the longest shutter MANUAL builds a Real stack, which adds light over the whole time.
             return isAdvanced && shutterIsStacked ? .tripod : nil
@@ -470,10 +473,26 @@ final class CameraModel {
         }
     }
 
-    private func longSteadyNeed(plan: StackPlan) -> SteadyNeed {
+    /// leaning: the need the pill names now. An auto frame time hovering at the hand limit (Water at 2x at dusk)
+    /// would flip the pill between "Hold still" and "Use a tripod" with every reading, so the limit gives way a
+    /// little toward the side on show, and only a frame clearly past it changes the message.
+    private func longSteadyNeed(plan: StackPlan, leaning shown: SteadyNeed? = nil) -> SteadyNeed {
         let focal = capabilities.lens.equivalentFocalLength * max(readings.zoomFactor, 1)
-        return SteadyAdvice.longExposure(plan: plan, align: settings.longExposure.align,
-                                         handheldLimit: ExposureMath.handheldLimit(equivalentFocalLength: focal))
+        var limit = ExposureMath.handheldLimit(equivalentFocalLength: focal)
+        if let shown {
+            limit *= shown == .tripod ? 1 / Self.handLimitMargin : Self.handLimitMargin
+        }
+        return SteadyAdvice.longExposure(plan: plan, align: settings.longExposure.align, handheldLimit: limit)
+    }
+
+    /// The need the pill names, where its message says one.
+    private var shownSteadyNeed: SteadyNeed? {
+        switch steadyStatus {
+        case .useTripod: return .tripod
+        case .holdStill: return .holdStill
+        case .noSensor(let need): return need
+        default: return nil
+        }
     }
 
     // MARK: Battery saver

@@ -51,6 +51,9 @@ final class CaptureLibrary: NSObject, PHPhotoLibraryChangeObserver {
     @ObservationIgnored private var fetchGeneration = 0
     /// What the applied fetch asked for, so a photo saved after it isn't mistaken for a deleted one.
     @ObservationIgnored private var fetchedIDs: Set<String> = []
+    /// Deleted in the gallery during this run. They stay in the list, so a photo restored from Recently Deleted
+    /// comes back, but they don't count as missing: in limited mode the banner would call them not shared.
+    @ObservationIgnored private var deletedHere: Set<String> = []
     @ObservationIgnored private var isObserving = false
     @ObservationIgnored private var latestPixelSide: CGFloat?
     @ObservationIgnored private var latestKey: AssetVersion?
@@ -184,8 +187,16 @@ final class CaptureLibrary: NSObject, PHPhotoLibraryChangeObserver {
     /// iOS asks the person to confirm and moves the asset to Recently Deleted. A refusal throws a cancellation
     /// (`isCancellation`).
     func delete(_ asset: PHAsset) async throws {
-        try await Self.performChanges {
-            PHAssetChangeRequest.deleteAssets([asset] as NSArray)
+        let id = asset.localIdentifier
+        // Marked first: the fetch that the deletion starts can land before this call returns.
+        deletedHere.insert(id)
+        do {
+            try await Self.performChanges {
+                PHAssetChangeRequest.deleteAssets([asset] as NSArray)
+            }
+        } catch {
+            deletedHere.remove(id)
+            throw error
         }
     }
 
@@ -252,7 +263,8 @@ final class CaptureLibrary: NSObject, PHPhotoLibraryChangeObserver {
             guard generation == fetchGeneration, access.canRead else { continue }
             assets = found
             fetchedIDs = Set(identifiers)
-            let missing = max(0, identifiers.count - found.count)
+            let deletedCount = deletedHere.filter { found.index(of: $0) == nil }.count
+            let missing = max(0, identifiers.count - found.count - deletedCount)
             if missingCount != missing { missingCount = missing }
             refreshLatestThumbnail()
         }
