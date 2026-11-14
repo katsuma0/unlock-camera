@@ -346,8 +346,9 @@ final class PhotoEditSession {
 
     private static let log = Logger(subsystem: "ca.katsuma.openshutter", category: "Editor")
 
-    /// Stills and Live Photos. Animated images and looping videos would need a render of their own.
-    private static func isEditable(_ asset: PHAsset) -> Bool {
+    /// Stills and Live Photos. Animated images and looping videos would need a render of their own. The gallery
+    /// asks this too, so it never offers Edit for a loop or bounce that passes canPerform(.content).
+    static func isEditable(_ asset: PHAsset) -> Bool {
         guard asset.mediaType == .image, asset.canPerform(.content) else { return false }
         switch asset.playbackStyle {
         case .image, .livePhoto: return true
