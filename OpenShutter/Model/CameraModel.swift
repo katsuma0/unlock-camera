@@ -3054,6 +3054,65 @@ final class CameraModel {
         lensPresets.first(where: { $0.id == activePresetID })
     }
 
+    // MARK: Macro and close subjects
+
+    /// The ultra wide camera framing like 1x. It focuses far closer than the main camera, which is how Apple's
+    /// Camera takes its close-ups.
+    var isMacro: Bool {
+        guard let lens = lenses.first(where: { $0.id == settings.lensID }), lens.kind == .ultraWide else { return false }
+        return settings.zoom * lens.relativeZoom >= 0.95
+    }
+
+    /// The macro button shows on phones with an ultra wide camera, while a back camera is in use.
+    var macroAvailable: Bool {
+        !capabilities.lens.isFront && lenses.contains { $0.kind == .ultraWide }
+    }
+
+    /// Macro on: the ultra wide at the 1x framing. Off: back to the 1x button.
+    func toggleMacro() {
+        guard !activity.isBusy, macroAvailable else { return }
+        if isMacro {
+            if let wide = backLensPresets.first(where: { abs($0.displayZoom - 1) < 0.01 }) { select(wide) }
+            return
+        }
+        guard let ultra = lenses.first(where: { $0.kind == .ultraWide }) else { return }
+        let factor = clampFactor(1 / max(ultra.relativeZoom, 0.01), for: ultra)
+        select(LensPreset(lensID: ultra.id, zoomFactor: factor, displayZoom: factor * ultra.relativeZoom))
+        showToast("Macro", symbol: "camera.macro")
+    }
+
+    /// Only the running lens reports its range; the backend keeps the top inside what the new lens can do.
+    private func clampFactor(_ factor: Double, for lens: LensInfo) -> Double {
+        factor.isFinite ? max(1, factor) : 1
+    }
+
+    /// A longer lens can't focus closer than its minimum distance, so autofocus parks at the near end and the
+    /// picture stays soft. Apple's Camera switches to a crop of the main camera then; so does this, after the lens
+    /// has sat at its near end for a second.
+    @ObservationIgnored private var nearEndSince: Date?
+
+    private func checkCloseSubject(_ readings: LiveReadings) {
+        guard activity == .idle, zoomTarget == nil, !lensSwitchInFlight, effectiveFocus.lensPosition == nil,
+              settings.mode != .video || activity != .recording,
+              let lens = activeLens, lens.kind == .telephoto,
+              !readings.isAdjustingFocus, readings.lensPosition <= 0.02,
+              let wide = lenses.first(where: { $0.kind == .wide && !$0.isFront }) else {
+            nearEndSince = nil
+            return
+        }
+        guard let since = nearEndSince else {
+            nearEndSince = Date()
+            return
+        }
+        guard Date().timeIntervalSince(since) >= 1 else { return }
+        nearEndSince = nil
+        let zoom = readings.displayZoom.isFinite && readings.displayZoom > 0 ? readings.displayZoom : lens.relativeZoom
+        let factor = clampFactor(zoom / max(wide.relativeZoom, 0.01), for: wide)
+        select(LensPreset(lensID: wide.id, zoomFactor: factor, displayZoom: factor * wide.relativeZoom), haptic: false)
+        showToast("Too close for the \(LensMath.zoomLabel(lens.relativeZoom, selected: true)) lens. Using the main camera.",
+                  symbol: "camera.macro")
+    }
+
     /// The lens buttons. The selfie camera is reached with the flip button, so its presets stay out.
     var backLensPresets: [LensPreset] {
         lensPresets.filter { preset in lenses.first(where: { $0.id == preset.lensID })?.isFront != true }
@@ -3210,6 +3269,7 @@ extension CameraModel: CameraBackendDelegate {
 
     func cameraBackend(_ backend: CameraBackend, didUpdateReadings readings: LiveReadings) {
         self.readings = readings
+        checkCloseSubject(readings)
         updateStackISOLimit()
         adoptExternalChanges(from: readings)
         // NIGHT's automatic time and LONG's frames follow the light, and with them whether a tripod is needed.
