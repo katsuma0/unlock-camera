@@ -211,12 +211,13 @@ public enum ZoomMath {
 
     // MARK: - Tuning
 
-    /// A one-stop lens button zoom takes 0.28 s; Apple's Camera takes about a third of a second.
-    static let baseDuration = 0.24
-    static let durationPerStop = 0.04
-    static let durationRange: ClosedRange<Double> = 0.20...0.45
+    /// A one-stop lens button zoom takes 0.21 s. Apple's Camera takes about a third of a second, which felt slow next
+    /// to its own lens changes once the swap stopped going dark.
+    static let baseDuration = 0.18
+    static let durationPerStop = 0.03
+    static let durationRange: ClosedRange<Double> = 0.15...0.35
     /// Doublings per second.
-    static let rateRange: ClosedRange<Double> = 1.5...14
+    static let rateRange: ClosedRange<Double> = 1.5...18
     /// The controls reach this many times past the longest button: Apple's limit on each of these phones.
     static let buttonReach = 5.0
     /// Lens values a hundredth apart are the same lens; real ones are at least 20 percent apart.
