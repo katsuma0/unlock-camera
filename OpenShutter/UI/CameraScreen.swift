@@ -95,6 +95,11 @@ private struct CameraLayout: View {
     @Environment(\.displayScale) private var displayScale
     @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
 
+    /// The safe area as the screen's own frame in window points. The reader below ignores the safe area so the picture
+    /// can reach the top edge, and a reader that does reports insets of zero, which put the top bar under the
+    /// Dynamic Island where it can't be tapped.
+    @State private var safeFrame: CGRect = .zero
+
     static let topBarHeight: CGFloat = 48
     /// The thumbnail and the flip button are 48 pt, the carousel 44.
     static let modeRowHeight: CGFloat = 48
@@ -114,9 +119,21 @@ private struct CameraLayout: View {
                                   activeVideo: model.capabilities.activeVideo,
                                   formatSummary: model.capabilities.formatSummary)
 
+        ZStack {
+        Color.clear
+            .onGeometryChange(for: CGRect.self) { geometry in
+                geometry.frame(in: .global)
+            } action: { frame in
+                safeFrame = frame
+            }
         GeometryReader { proxy in
             let size = proxy.size
-            let insets = proxy.safeAreaInsets
+            let insets = safeFrame.isEmpty ? proxy.safeAreaInsets : EdgeInsets(
+                top: max(0, safeFrame.minY),
+                leading: max(0, safeFrame.minX),
+                bottom: max(0, size.height - safeFrame.maxY),
+                trailing: max(0, size.width - safeFrame.maxX)
+            )
             let layout = ViewfinderLayout(screenWidth: Double(size.width), screenHeight: Double(size.height),
                                           safeTop: Double(insets.top), topBarHeight: Double(Self.topBarHeight),
                                           shape: shape, imageAspect: imageAspect)
@@ -180,6 +197,7 @@ private struct CameraLayout: View {
             }
         }
         .ignoresSafeArea()
+        }
         .animation(.easeInOut(duration: 0.25), value: fullscreen)
         .modifier(HardwareButtons(model: model, isEnabled: hardwareButtonsEnabled))
         .onChange(of: mode) { oldMode, newMode in
