@@ -33,10 +33,6 @@ final class CameraModel {
     private(set) var isSettling = false
     /// Photos from their request until they are saved. The session can't change lens or mode under them.
     private(set) var photosInFlight = 0
-    /// Counts camera swaps started by select(): lens buttons, double tap, Camera Control Lens picks, flips, queued and
-    /// deferred picks, and the swap step of a lens button's zoom. isSwitchingLensVisibly says while one runs, which is
-    /// what the screen veils on. A pinch or the zoom wheel swaps without either, because the finger is still framing.
-    private(set) var lensSwitchCount = 0
     /// A focus or white balance bracket is running: one capture made of several photos, stopped with the shutter.
     private(set) var bracketInProgress = false
     /// A stopped bracket is still finishing the photo it was taking, so the shutter has nothing left to do.
@@ -360,7 +356,6 @@ final class CameraModel {
     /// A lens change that select() asks for: veiled from its start until the new camera runs. `completion` is the
     /// transition's next step, taken only if nothing newer came meanwhile.
     private func switchLens(to preset: LensPreset, generation: Int, then completion: (() -> Void)? = nil) {
-        lensSwitchCount &+= 1
         lensSwitchInFlight = true
         setSwitchingLensVisibly(true)
         lastZoomCommand = Date()

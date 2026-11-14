@@ -20,8 +20,6 @@ enum Theme {
     @MainActor static var tertiaryText: Color {
         AppearanceStore.shared.increaseContrast ? Palette.strongTertiaryText : Palette.tertiaryText
     }
-    /// Darkens the parts of the sensor outside the chosen aspect ratio.
-    static let maskDim = Color.black.opacity(0.55)
     @MainActor static var hairline: Color {
         AppearanceStore.shared.increaseContrast ? Palette.strongHairline : Palette.hairline
     }
