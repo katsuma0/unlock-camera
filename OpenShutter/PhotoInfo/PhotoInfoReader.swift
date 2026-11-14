@@ -4,28 +4,28 @@ import UniformTypeIdentifiers
 import CameraCore
 
 /// One line of the photo info list. The text is made once, off the main actor, so the list only lays it out.
-struct InfoRow: Identifiable, Sendable {
+struct PhotoInfoRow: Identifiable, Sendable {
     let id: String
     let title: String
     let value: String
     /// The entries of a list or a group, shown folded under the row.
-    var children: [InfoRow] = []
+    var children: [PhotoInfoRow] = []
     /// The row can point at a person, a device or a place.
     var isPersonal = false
 
     /// OutlineGroup's children: nil for a row without any, so it draws no disclosure arrow.
-    var nested: [InfoRow]? { children.isEmpty ? nil : children }
+    var nested: [PhotoInfoRow]? { children.isEmpty ? nil : children }
 }
 
-struct InfoSection: Identifiable, Sendable {
+struct PhotoInfoSection: Identifiable, Sendable {
     let id: String
     let title: String
     var footer: String?
-    let rows: [InfoRow]
+    let rows: [PhotoInfoRow]
 }
 
 /// Where a photo was taken, from its GPS fields.
-struct PhotoLocation: Equatable, Sendable {
+struct PhotoInfoLocation: Equatable, Sendable {
     /// Signed degrees, south and west negative.
     let latitude: Double
     let longitude: Double
@@ -51,13 +51,13 @@ struct PhotoInfo: Sendable {
     let imageCount: Int
     let isRAW: Bool
     let thumbnail: CGImage?
-    let summary: [InfoRow]
-    let location: PhotoLocation?
-    let locationRows: [InfoRow]
+    let summary: [PhotoInfoRow]
+    let location: PhotoInfoLocation?
+    let locationRows: [PhotoInfoRow]
     /// Open Shutter's own fields (ShotXMP), named.
-    let appRows: [InfoRow]
+    let appRows: [PhotoInfoRow]
     /// One per property group, then the image's own properties, the file, its extra images and every XMP tag.
-    let sections: [InfoSection]
+    let sections: [PhotoInfoSection]
     /// What "Everything" would take out, in the order the result sentence names them.
     let categories: [MetadataStripPlan.Category]
     let hasPersonalRows: Bool
@@ -110,31 +110,31 @@ enum PhotoInfoReader {
         let place = placeTaken(groups[PhotoInfoNames.gps] ?? [:])
         let summary = summaryRows(groups: groups, topLevel: topLevel, app: xmp.app, extraImages: extraImages)
         let appRows = ShotXMP.Field.allCases.compactMap { field in
-            xmp.app[field].map { InfoRow(id: "app/" + field.rawValue, title: PhotoInfoNames.appTitle(field),
+            xmp.app[field].map { PhotoInfoRow(id: "app/" + field.rawValue, title: PhotoInfoNames.appTitle(field),
                                          value: PhotoInfoNames.appValue(field, $0)) }
         }
 
-        var sections: [InfoSection] = []
+        var sections: [PhotoInfoSection] = []
         for name in PhotoInfoNames.sortedGroups(groups.keys) {
             guard let group = groups[name], !group.isEmpty else { continue }
-            sections.append(InfoSection(id: "group/" + name, title: PhotoInfoNames.groupTitle(name),
+            sections.append(PhotoInfoSection(id: "group/" + name, title: PhotoInfoNames.groupTitle(name),
                                         rows: rows(group, group: name, id: "group/" + name)))
         }
         if !topLevel.isEmpty {
-            sections.append(InfoSection(id: "image", title: "Image", rows: rows(topLevel, group: nil, id: "image")))
+            sections.append(PhotoInfoSection(id: "image", title: "Image", rows: rows(topLevel, group: nil, id: "image")))
         }
         if !container.isEmpty {
-            sections.append(InfoSection(id: "file", title: "File", rows: rows(container, group: nil, id: "file")))
+            sections.append(PhotoInfoSection(id: "file", title: "File", rows: rows(container, group: nil, id: "file")))
         }
         if !extraImages.isEmpty {
-            sections.append(InfoSection(id: "extra", title: "Extra images", footer: extraImagesFooter,
+            sections.append(PhotoInfoSection(id: "extra", title: "Extra images", footer: extraImagesFooter,
                                         rows: extraImages))
         }
         if !xmp.rows.isEmpty {
             // ImageIO repeats the EXIF and TIFF fields here under their XMP names, so the list opens folded.
-            let all = InfoRow(id: "xmp", title: "All tags", value: count(xmp.rows.count, "tag", "tags"),
+            let all = PhotoInfoRow(id: "xmp", title: "All tags", value: count(xmp.rows.count, "tag", "tags"),
                               children: xmp.rows, isPersonal: xmp.rows.contains(where: \.isPersonal))
-            sections.append(InfoSection(id: "xmp", title: "XMP", rows: [all]))
+            sections.append(PhotoInfoSection(id: "xmp", title: "XMP", rows: [all]))
         }
 
         let inventory = MetadataStripper.inventory(of: source, at: index)
@@ -161,7 +161,7 @@ enum PhotoInfoReader {
     // MARK: - Summary
 
     private static func summaryRows(groups: [String: [String: Any]], topLevel: [String: Any],
-                                    app: [ShotXMP.Field: String], extraImages: [InfoRow]) -> [InfoRow] {
+                                    app: [ShotXMP.Field: String], extraImages: [PhotoInfoRow]) -> [PhotoInfoRow] {
         let exif = groups[key(kCGImagePropertyExifDictionary)] ?? [:]
         let tiff = groups[key(kCGImagePropertyTIFFDictionary)] ?? [:]
         let exifAux = groups[key(kCGImagePropertyExifAuxDictionary)] ?? [:]
@@ -172,10 +172,10 @@ enum PhotoInfoReader {
             PhotoInfoNames.text(value(group, name)).flatMap { $0.isEmpty ? nil : $0 }
         }
 
-        var rows: [InfoRow] = []
+        var rows: [PhotoInfoRow] = []
         func add(_ title: String, _ text: String?, personal: Bool = false) {
             guard let text, !text.isEmpty else { return }
-            rows.append(InfoRow(id: "summary/" + title, title: title, value: text, isPersonal: personal))
+            rows.append(PhotoInfoRow(id: "summary/" + title, title: title, value: text, isPersonal: personal))
         }
 
         if let taken = dateTaken(exif: exif, tiff: tiff) {
@@ -260,7 +260,7 @@ enum PhotoInfoReader {
 
     // MARK: - Location
 
-    private static func placeTaken(_ gps: [String: Any]) -> (place: PhotoLocation, rows: [InfoRow])? {
+    private static func placeTaken(_ gps: [String: Any]) -> (place: PhotoInfoLocation, rows: [PhotoInfoRow])? {
         func value(_ name: CFString) -> Any? { gps[key(name)] }
         func number(_ name: CFString) -> Double? { value(name).flatMap(PhotoInfoNames.number) }
         func text(_ name: CFString) -> String? { PhotoInfoNames.text(value(name)) }
@@ -274,10 +274,10 @@ enum PhotoInfoReader {
                                                            longitudeRef: text(kCGImagePropertyGPSLongitudeRef))
         else { return nil }
 
-        var rows: [InfoRow] = []
+        var rows: [PhotoInfoRow] = []
         func add(_ title: String, _ text: String?) {
             guard let text, !text.isEmpty else { return }
-            rows.append(InfoRow(id: "location/" + title, title: title, value: text, isPersonal: true))
+            rows.append(PhotoInfoRow(id: "location/" + title, title: title, value: text, isPersonal: true))
         }
         add("Coordinates", coordinates)
         add("Altitude", number(kCGImagePropertyGPSAltitude).flatMap {
@@ -301,7 +301,7 @@ enum PhotoInfoReader {
             formatter.timeStyle = .medium
             add("GPS time", formatter.string(from: date))
         }
-        return (PhotoLocation(latitude: north, longitude: east, text: coordinates), rows)
+        return (PhotoInfoLocation(latitude: north, longitude: east, text: coordinates), rows)
     }
 
     // MARK: - Rows
@@ -311,7 +311,7 @@ enum PhotoInfoReader {
     private static let maxChildren = 200
 
     private static func rows(_ dictionary: [String: Any], group: String?, id: String,
-                             personal: Bool = false) -> [InfoRow] {
+                             personal: Bool = false) -> [PhotoInfoRow] {
         dictionary.map { name, value in
             row(key: name, value: value, group: group, siblings: dictionary, id: id + "/" + name, personal: personal)
         }
@@ -319,13 +319,13 @@ enum PhotoInfoReader {
     }
 
     private static func row(key name: String, value: Any, group: String?, siblings: [String: Any], id: String,
-                            personal: Bool) -> InfoRow {
+                            personal: Bool) -> PhotoInfoRow {
         let title = PhotoInfoNames.title(group: group, key: name)
         let isPersonal = personal || PhotoInfoNames.isPersonal(group: group, key: name)
         // Keys inside a nested dictionary have no table of their own, so they keep their split names.
         let nestedGroup = group == PhotoInfoNames.makerApple ? group : ""
         if let nested = value as? [String: Any] {
-            return InfoRow(id: id, title: title, value: count(nested.count, "value", "values"),
+            return PhotoInfoRow(id: id, title: title, value: count(nested.count, "value", "values"),
                            children: rows(nested, group: nestedGroup, id: id, personal: isPersonal),
                            isPersonal: isPersonal)
         }
@@ -334,29 +334,29 @@ enum PhotoInfoReader {
                 row(key: String(offset + 1), value: element, group: nestedGroup, siblings: [:],
                     id: id + "/\(offset)", personal: isPersonal)
             }
-            return InfoRow(id: id, title: title, value: count(array.count, "item", "items"),
+            return PhotoInfoRow(id: id, title: title, value: count(array.count, "item", "items"),
                            children: children + more(array.count, id: id), isPersonal: isPersonal)
         }
         if let array = value as? [Any], array.count > shownListLength {
             let shown = array.prefix(shownListLength).map(PhotoInfoNames.describe).joined(separator: ", ")
-            return InfoRow(id: id, title: title, value: shown + ", and \(array.count - shownListLength) more",
+            return PhotoInfoRow(id: id, title: title, value: shown + ", and \(array.count - shownListLength) more",
                            isPersonal: isPersonal)
         }
         let text = PhotoInfoNames.value(group: group, key: name, value: value, siblings: siblings)
             ?? PhotoInfoNames.describe(value)
-        return InfoRow(id: id, title: title, value: text, isPersonal: isPersonal)
+        return PhotoInfoRow(id: id, title: title, value: text, isPersonal: isPersonal)
     }
 
-    private static func more(_ total: Int, id: String) -> [InfoRow] {
+    private static func more(_ total: Int, id: String) -> [PhotoInfoRow] {
         guard total > maxChildren else { return [] }
-        return [InfoRow(id: id + "/more", title: "More", value: "\(total - maxChildren) not shown")]
+        return [PhotoInfoRow(id: id + "/more", title: "More", value: "\(total - maxChildren) not shown")]
     }
 
     // MARK: - XMP
 
-    private static func xmpTags(_ metadata: CGImageMetadata?) -> (rows: [InfoRow], app: [ShotXMP.Field: String]) {
+    private static func xmpTags(_ metadata: CGImageMetadata?) -> (rows: [PhotoInfoRow], app: [ShotXMP.Field: String]) {
         guard let metadata else { return ([], [:]) }
-        var rows: [InfoRow] = []
+        var rows: [PhotoInfoRow] = []
         var app: [ShotXMP.Field: String] = [:]
         CGImageMetadataEnumerateTagsUsingBlock(metadata, nil, nil) { path, tag in
             let namespace = CGImageMetadataTagCopyNamespace(tag) as String? ?? ""
@@ -374,10 +374,10 @@ enum PhotoInfoReader {
         return (rows, app)
     }
 
-    private static func xmpRow(_ tag: CGImageMetadataTag, title: String, id: String, personal: Bool) -> InfoRow {
+    private static func xmpRow(_ tag: CGImageMetadataTag, title: String, id: String, personal: Bool) -> PhotoInfoRow {
         let value = CGImageMetadataTagCopyValue(tag)
         if let text = value as? String {
-            return InfoRow(id: id, title: title, value: PhotoInfoNames.cleaned(text), isPersonal: personal)
+            return PhotoInfoRow(id: id, title: title, value: PhotoInfoNames.cleaned(text), isPersonal: personal)
         }
         if let array = value as? [AnyObject] {
             let elements = array.prefix(maxChildren).enumerated().map { offset, element in
@@ -385,25 +385,25 @@ enum PhotoInfoReader {
             }
             // A text with one language reads as the text.
             if CGImageMetadataTagGetType(tag) == .alternateText, elements.count == 1, elements[0].children.isEmpty {
-                return InfoRow(id: id, title: title, value: elements[0].value, isPersonal: personal)
+                return PhotoInfoRow(id: id, title: title, value: elements[0].value, isPersonal: personal)
             }
-            return InfoRow(id: id, title: title, value: count(array.count, "item", "items"),
+            return PhotoInfoRow(id: id, title: title, value: count(array.count, "item", "items"),
                            children: elements + more(array.count, id: id), isPersonal: personal)
         }
         if let fields = value as? [String: AnyObject] {
             let children = fields.sorted { $0.key < $1.key }.prefix(maxChildren).map { name, element in
                 xmpElement(element, title: name, id: id + "/" + name, personal: personal)
             }
-            return InfoRow(id: id, title: title, value: count(fields.count, "field", "fields"), children: children,
+            return PhotoInfoRow(id: id, title: title, value: count(fields.count, "field", "fields"), children: children,
                            isPersonal: personal)
         }
-        return InfoRow(id: id, title: title, value: value.map(PhotoInfoNames.describe) ?? "", isPersonal: personal)
+        return PhotoInfoRow(id: id, title: title, value: value.map(PhotoInfoNames.describe) ?? "", isPersonal: personal)
     }
 
     /// A list entry or structure field, which ImageIO hands over as a tag of its own or as a plain value.
-    private static func xmpElement(_ element: AnyObject, title: String, id: String, personal: Bool) -> InfoRow {
+    private static func xmpElement(_ element: AnyObject, title: String, id: String, personal: Bool) -> PhotoInfoRow {
         guard CFGetTypeID(element) == CGImageMetadataTagGetTypeID() else {
-            return InfoRow(id: id, title: title, value: PhotoInfoNames.describe(element), isPersonal: personal)
+            return PhotoInfoRow(id: id, title: title, value: PhotoInfoNames.describe(element), isPersonal: personal)
         }
         let tag = unsafeDowncast(element, to: CGImageMetadataTag.self)
         var name = title
@@ -432,7 +432,7 @@ enum PhotoInfoReader {
 
     private static let extraImagesFooter = "Gain maps let an HDR screen show the photo brighter. Depth maps and mattes hold the shape of the scene and the outline of the people in it."
 
-    private static func auxiliaryImages(_ source: CGImageSource, index: Int) -> [InfoRow] {
+    private static func auxiliaryImages(_ source: CGImageSource, index: Int) -> [PhotoInfoRow] {
         auxiliaryTypes.compactMap { type, title in
             guard let info = CGImageSourceCopyAuxiliaryDataInfoAtIndex(source, index, type) as? [String: Any] else {
                 return nil
@@ -441,7 +441,7 @@ enum PhotoInfoReader {
             let width = description[key(kCGImagePropertyWidth)].flatMap(PhotoInfoNames.int)
             let height = description[key(kCGImagePropertyHeight)].flatMap(PhotoInfoNames.int)
             let size = width.flatMap { w in height.map { h in "\(w) \u{00D7} \(h)" } } ?? "Included"
-            return InfoRow(id: "extra/" + (type as String), title: title, value: size)
+            return PhotoInfoRow(id: "extra/" + (type as String), title: title, value: size)
         }
     }
 
@@ -462,12 +462,12 @@ enum PhotoInfoReader {
     // MARK: - Copy all
 
     private static func text(fileName: String, typeName: String, sizeText: String?, fileSize: Int64?,
-                             summary: [InfoRow], locationRows: [InfoRow], appRows: [InfoRow],
-                             sections: [InfoSection]) -> String {
+                             summary: [PhotoInfoRow], locationRows: [PhotoInfoRow], appRows: [PhotoInfoRow],
+                             sections: [PhotoInfoSection]) -> String {
         var lines = [fileName]
         lines.append([typeName, sizeText, fileSize.map { Formatting.fileSize(bytes: $0) }]
             .compactMap { $0 }.joined(separator: ", "))
-        func section(_ title: String, _ rows: [InfoRow]) {
+        func section(_ title: String, _ rows: [PhotoInfoRow]) {
             guard !rows.isEmpty else { return }
             lines.append("")
             lines.append(title)
@@ -482,7 +482,7 @@ enum PhotoInfoReader {
         return lines.joined(separator: "\n")
     }
 
-    private static func append(_ rows: [InfoRow], depth: Int, to lines: inout [String]) {
+    private static func append(_ rows: [PhotoInfoRow], depth: Int, to lines: inout [String]) {
         let indent = String(repeating: "  ", count: depth)
         for row in rows {
             lines.append(indent + row.title + ": " + row.value)
@@ -500,7 +500,7 @@ enum PhotoInfoReader {
         "\(number) " + (number == 1 ? one : many)
     }
 
-    private static func containsPersonal(_ row: InfoRow) -> Bool {
+    private static func containsPersonal(_ row: PhotoInfoRow) -> Bool {
         row.isPersonal || row.children.contains(where: containsPersonal)
     }
 }

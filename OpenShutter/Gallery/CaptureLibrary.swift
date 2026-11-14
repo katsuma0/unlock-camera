@@ -81,6 +81,9 @@ final class CaptureLibrary: NSObject, PHPhotoLibraryChangeObserver {
         entries[id]
     }
 
+    /// A fetch is under way, so `assets` may not hold the newest photo yet. Not observed: `assets` changes when it ends.
+    var isFetching: Bool { fetchTask != nil }
+
     /// The last fetch looked for `id` and didn't find it: the asset was deleted or hidden, or isn't shared.
     func isGone(_ id: String) -> Bool {
         guard let assets else { return false }

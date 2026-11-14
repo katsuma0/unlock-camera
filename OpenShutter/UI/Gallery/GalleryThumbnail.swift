@@ -1,50 +1,74 @@
 import SwiftUI
+import UIKit
 import CameraCore
 
-// The last capture's thumbnail beside the shutter. In a file of its own so the gallery work and the camera screen's
-// layout don't share one file.
+// The last capture's thumbnail beside the shutter, and the gallery it opens. In a file of its own so the gallery
+// work and the camera screen's layout don't share one file. The gallery is presented here, so its zoom can grow
+// out of the square; keep one ThumbnailButton on screen.
+
+/// Where the gallery's zoom transition starts.
+private enum GalleryZoom {
+    static let thumbnail = "thumbnail"
+}
 
 struct ThumbnailButton: View {
-    let model: CameraModel
+    @Bindable var model: CameraModel
     @State private var press = PressTracker()
+    @Namespace private var galleryZoom
+    @Environment(\.displayScale) private var displayScale
 
     var body: some View {
-        let capture = model.lastCapture
+        let library = model.library
         let activity = model.activity
         let isHidden = activity == .recording || activity == .stacking
-        let hasCaptures = !model.recentCaptures.isEmpty
+        let canOpen = Self.canOpen(model)
+        let picture = ThumbnailPicture(capture: model.lastCapture, library: library)
         Button {
-            Self.showRecent(model)
+            Self.showGallery(model)
         } label: {
             Upright(model: model) {
-                ThumbnailImage(capture: capture)
+                ThumbnailImage(picture: picture)
             }
         }
-        // Before the first capture a tap has nothing to show, so the square stays still under the finger.
-        .buttonStyle(PressScaleButtonStyle(isPressed: press.isPressed && hasCaptures))
-        .disabled(!hasCaptures)
-        .accessibilityLabel("Recent captures")
-        .accessibilityValue(Self.spokenValue(capture, detailed: model.isAdvanced))
-        .accessibilityHint("Touch and hold for more options.")
+        // With nothing to show a tap does nothing, so the square stays still under the finger.
+        .buttonStyle(PressScaleButtonStyle(isPressed: press.isPressed && canOpen))
+        .disabled(!canOpen)
+        .accessibilityLabel("Photos")
+        .modifier(ThumbnailSpokenValue(model: model, picture: picture))
+        .accessibilityHint("Shows the photos and videos you took. Touch and hold for more options.")
         .accessibilityAction(named: "Open Photos") { Self.openPhotos(model) }
         // Laid over the disabled button as well: Photos can be opened before anything has been captured.
         .overlay {
             ThumbnailTouchLayer(model: model, press: press)
         }
+        .matchedTransitionSource(id: GalleryZoom.thumbnail, in: galleryZoom)
         .opacity(isHidden ? 0 : 1)
         .allowsHitTesting(!isHidden)
-        .animation(Theme.spring, value: capture?.id)
+        .animation(Theme.spring, value: picture.key)
         .animation(.easeInOut(duration: 0.2), value: isHidden)
+        .fullScreenCover(isPresented: $model.isReviewPresented) {
+            GalleryView(model: model)
+                .galleryZoomTransition(sourceID: GalleryZoom.thumbnail, in: galleryZoom)
+        }
+        .onAppear {
+            // The newest photo comes back after a relaunch, but only where access was already given: this never asks.
+            library.loadLatestThumbnail(pixelSide: (ThumbnailImage.side * displayScale).rounded(.up))
+        }
     }
 
-    fileprivate static func showRecent(_ model: CameraModel) {
-        guard !model.recentCaptures.isEmpty else { return }
+    /// A capture this session, or any photo taken here before.
+    fileprivate static func canOpen(_ model: CameraModel) -> Bool {
+        !model.recentCaptures.isEmpty || model.library.hasRecordedAssets
+    }
+
+    fileprivate static func showGallery(_ model: CameraModel) {
+        guard canOpen(model) else { return }
         Haptics.tap()
         model.isDrawerOpen = false
         model.isReviewPresented = true
     }
 
-    /// The review sheet's way into Photos, without the sheet.
+    /// The gallery's way into Photos, without the gallery.
     fileprivate static func openPhotos(_ model: CameraModel) {
         Haptics.tap()
         model.isDrawerOpen = false
@@ -54,11 +78,58 @@ struct ThumbnailButton: View {
             }
         }
     }
+}
 
-    /// The exposure summary is shutter speed and ISO, which the simple interface never shows or says.
-    private static func spokenValue(_ capture: CaptureResult?, detailed: Bool) -> String {
-        guard let capture else { return "None yet" }
-        return detailed ? capture.summary : capture.kind.title(detailed: false)
+/// What the square shows: this session's last capture while it still exists, else the newest photo the library
+/// shows, which brings the last photo back after a relaunch and steps past one deleted in the gallery.
+private struct ThumbnailPicture {
+    /// Changes when a different picture shows, for the swap animation.
+    var key: String?
+    var image: Image?
+    var isVideo = false
+    /// From this session: VoiceOver can name the kind and the exposure the camera reported.
+    var capture: CaptureResult?
+    /// From the library: the row the app stored for it.
+    var entry: CapturedAsset?
+
+    @MainActor
+    init(capture: CaptureResult?, library: CaptureLibrary) {
+        // A capture that never reached Photos has no identifier and still shows: it is the newest there is.
+        if let capture, !(capture.assetIdentifier.map(library.isGone) ?? false) {
+            key = capture.id.uuidString
+            image = capture.thumbnail.map { Image(decorative: $0, scale: 1) }
+            isVideo = capture.kind == .video
+            self.capture = capture
+        } else if let image = library.latestThumbnail, let id = library.latestThumbnailID {
+            let entry = library.entry(for: id)
+            key = id
+            self.image = Image(uiImage: image)
+            isVideo = entry?.kind == .video
+            self.entry = entry
+        }
+    }
+}
+
+/// The thumbnail's VoiceOver value. The exposure summary is shutter speed and ISO, which the simple interface never
+/// shows or says. Reading the interface level is reading the settings, which dials write many times a second, so it
+/// happens in this modifier and not in the button.
+private struct ThumbnailSpokenValue: ViewModifier {
+    let model: CameraModel
+    let picture: ThumbnailPicture
+
+    func body(content: Content) -> some View {
+        content.accessibilityValue(Self.value(picture, detailed: model.isAdvanced))
+    }
+
+    private static func value(_ picture: ThumbnailPicture, detailed: Bool) -> String {
+        if let capture = picture.capture {
+            return detailed ? capture.summary : capture.kind.title(detailed: false)
+        }
+        if let entry = picture.entry {
+            if detailed, !entry.summary.isEmpty { return entry.summary }
+            return entry.kind == .video ? "Video" : "Photo"
+        }
+        return "None yet"
     }
 }
 
@@ -70,7 +141,7 @@ private struct ThumbnailTouchLayer: View {
 
     var body: some View {
         MenuOnHoldLayer(press: press) {
-            ThumbnailButton.showRecent(model)
+            ThumbnailButton.showGallery(model)
         } options: {
             ThumbnailOptions(model: model)
         }
@@ -87,31 +158,34 @@ private struct ThumbnailOptions: View {
             Label("Open Photos", systemImage: "photo.on.rectangle")
         }
         Button {
-            ThumbnailButton.showRecent(model)
+            ThumbnailButton.showGallery(model)
         } label: {
-            Label("Show recent", systemImage: "clock")
+            Label("Show gallery", systemImage: "square.grid.3x3")
         }
-        .disabled(model.recentCaptures.isEmpty)
+        .disabled(!ThumbnailButton.canOpen(model))
     }
 }
 
 private struct ThumbnailImage: View {
-    let capture: CaptureResult?
+    static let side: CGFloat = 48
+
+    let picture: ThumbnailPicture
 
     var body: some View {
+        let side = Self.side
         ZStack {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(Color.white.opacity(0.08))
-            if let image = capture?.thumbnail {
-                Image(decorative: image, scale: 1)
+            if let image = picture.image {
+                image
                     .resizable()
                     .scaledToFill()
-                    .frame(width: 48, height: 48)
+                    .frame(width: side, height: side)
                     .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                    .id(capture?.id)
+                    .id(picture.key)
                     .transition(.scale(scale: 0.6).combined(with: .opacity))
             }
-            if capture?.kind == .video {
+            if picture.isVideo {
                 Image(systemName: "video.fill")
                     .font(.system(size: 10, weight: .bold))
                     .foregroundStyle(Theme.primaryText)
@@ -120,9 +194,9 @@ private struct ThumbnailImage: View {
                     .padding(4)
             }
             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .strokeBorder(Color.white.opacity(capture == nil ? 0.25 : 0.9), lineWidth: 1.5)
+                .strokeBorder(Color.white.opacity(picture.image == nil ? 0.25 : 0.9), lineWidth: 1.5)
         }
-        .frame(width: 48, height: 48)
+        .frame(width: side, height: side)
     }
 }
 
