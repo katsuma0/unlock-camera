@@ -547,7 +547,7 @@ private struct CropShapes: View {
                     ForEach(CropPreset.allCases) { preset in
                         let isSelected = preset == selected
                         Button {
-                            choose(preset, portrait: selected == .original ? Self.isPortrait(photo, recipe) : portrait)
+                            choose(preset, portrait: portrait)
                         } label: {
                             Text(preset.title(portrait: portrait))
                         }
@@ -584,7 +584,8 @@ private struct CropShapes: View {
                                      imageHeight: Double(photo.height))
     }
 
-    /// Whether the crop stands, measured on the picture as shown, after the turns.
+    /// Whether the crop stands, measured on the picture as shown, after the turns. Without a crop it is the
+    /// picture's own shape, so a first pick stands in a standing photo.
     private static func isPortrait(_ recipe: EditRecipe, photo: CGSize) -> Bool {
         let turned = recipe.quarterTurns % 2 == 1
         let width = Double(turned ? photo.height : photo.width)
@@ -593,12 +594,6 @@ private struct CropShapes: View {
             return crop.height * height > crop.width * width
         }
         return height > width
-    }
-
-    /// A first shape follows the picture as shown: standing in a standing photo.
-    private static func isPortrait(_ photo: CGSize, _ recipe: EditRecipe) -> Bool {
-        let turned = recipe.quarterTurns % 2 == 1
-        return turned ? photo.width > photo.height : photo.height > photo.width
     }
 }
 
@@ -613,7 +608,7 @@ private struct StraightenHeader: View {
                 Haptics.tap()
                 session.recipe.rotateCounterclockwise()
             } label: {
-                Image(firstAvailableSystemName: ["rotate.left"])
+                Image(systemName: "rotate.left")
             }
             .buttonStyle(GlassCircleButtonStyle(size: Theme.smallControlSize))
             .frame(minWidth: 44, minHeight: 44)
@@ -623,8 +618,7 @@ private struct StraightenHeader: View {
                 Haptics.tap()
                 session.recipe.flipHorizontally()
             } label: {
-                Image(firstAvailableSystemName: ["arrow.left.and.right.righttriangle.left.righttriangle.right",
-                                                 "arrow.left.and.right"])
+                Image(systemName: Self.flipSymbol)
             }
             .buttonStyle(GlassCircleButtonStyle(size: Theme.smallControlSize))
             .frame(minWidth: 44, minHeight: 44)
@@ -668,6 +662,11 @@ private struct StraightenHeader: View {
         .padding(.horizontal, 12)
         .frame(height: 44)
     }
+
+    /// Looked up once: this header redraws at every step of the straighten dial.
+    private static let flipSymbol = ["arrow.left.and.right.righttriangle.left.righttriangle.right",
+                                     "arrow.left.and.right"].first { UIImage(systemName: $0) != nil }
+        ?? "arrow.left.and.right"
 
     /// "0°", "12.5°", "-3°".
     static func degrees(_ value: Double) -> String {
