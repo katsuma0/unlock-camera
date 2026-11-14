@@ -75,6 +75,8 @@ final class PhotoInfoModel {
 
     /// Reads the picture, first writing a library photo's file out of Photos.
     func load() async {
+        // Not awaited: the sweep leaves folders in use alone, so the read needn't wait for it.
+        Task.detached(priority: .utility) { PhotoInfoFiles.sweep() }
         switch source {
         case .file(let url):
             await read(url)
@@ -142,7 +144,9 @@ final class PhotoInfoModel {
         resetCopy()
         copy = .working
         let mode = self.mode
-        let name = info.fileName
+        // Under Everything the name goes too: camera files, this app's among them, are often named after the second
+        // they were taken. Location only keeps it, since that copy keeps the date anyway.
+        let name = mode == .everything ? "Photo" : info.fileName
         do {
             let folder = try workspace.makeFolder()
             copyFolder = folder
@@ -284,7 +288,7 @@ final class PhotoInfoTool {
         }
     }
 
-    /// Clears copies left by a page that closed mid-import or by a crash.
+    /// Clears copies an earlier run left behind, such as one that crashed with a page open.
     func sweep() async {
         await Task.detached(priority: .utility) { PhotoInfoFiles.sweep() }.value
     }

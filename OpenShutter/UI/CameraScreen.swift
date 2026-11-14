@@ -189,6 +189,8 @@ private struct CameraLayout: View {
             // Video needs a session reconfiguration, which takes longer than a photo mode change.
             let involvesVideo = oldMode == .video || newMode == .video
             showVeil(holdNanoseconds: involvesVideo ? 650_000_000 : 350_000_000)
+            // VIDEO's shape at once, before the aspect task starts, so the frame never heads for the photo format's.
+            updateImageAspect()
         }
         .onChange(of: selectedIsFront) { _, _ in
             showVeil(holdNanoseconds: 450_000_000)

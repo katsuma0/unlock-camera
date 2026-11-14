@@ -82,6 +82,8 @@ private struct PickedSection: View {
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
+                // The pick being opened replaces this file when it arrives, and pushes its own page.
+                .disabled(tool.isOpening)
                 if tool.rawSource != nil {
                     Button("Show the RAW file") {
                         Task { await tool.openRAW() }

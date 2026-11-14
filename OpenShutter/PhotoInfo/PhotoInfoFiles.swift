@@ -32,14 +32,20 @@ enum PhotoInfoFiles {
         registry.remove(folder.lastPathComponent)
     }
 
-    /// Removes the folders nothing holds: an import that finished after its page closed, or a run that ended in a
-    /// crash.
+    /// Removes the folders nothing holds. Only an earlier run leaves those, one that ended with a page open (a crash,
+    /// or a memory kill during a large copy): a folder made in this run stays held from `makeFolder()` until
+    /// `remove(_:)`, and its page's workspace removes it. So it sweeps once per launch, called from every page that
+    /// writes here. Blocks the first time; call it off the main actor.
     static func sweep() {
+        _ = sweptThisRun
+    }
+
+    private static let sweptThisRun: Void = {
         let names = (try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? []
         for name in names where !registry.contains(name) {
             try? FileManager.default.removeItem(at: root.appendingPathComponent(name, isDirectory: true))
         }
-    }
+    }()
 
     /// A copy of `file` in a new folder, under its own name. A picker's file can be the original itself, so it is
     /// copied, never moved.

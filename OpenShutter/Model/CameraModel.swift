@@ -640,6 +640,9 @@ final class CameraModel {
     }
 
     func stop() {
+        // Called off before the countdown is, whose end would otherwise replay them on a camera about to stop.
+        pendingPreset = nil
+        pendingZoom = nil
         cancelSchedule()
         cancelZoomTransition()
         motionMonitor.stop()
@@ -735,6 +738,12 @@ final class CameraModel {
         refreshSteadyStatus()
         updateDimming()
         updateGalleryPause()
+        // The camera is free again: a lens button's swap parked behind the shot, a recording, a cancelled countdown or
+        // a bracket happens now. Not as a countdown runs out, whose shot starts in this same turn on the lens it was
+        // framed with, and not under a gallery that has just stopped the camera.
+        if activity == .idle, !countdownRanOut {
+            replayParkedLensChange()
+        }
     }
 
     private func startBackend() async {
@@ -758,6 +767,25 @@ final class CameraModel {
         if sessionState == .starting || sessionState == .idle {
             sessionState = .running
         }
+        // A warm start runs the camera the session had before the pause, wherever an interrupted lens button's
+        // transition left it, and only a cold one reads the settings. They name where the camera belongs, so it goes
+        // there before anything reads the zoom. A fallback camera, whose lens isn't on offer, stays as it is, and a
+        // shot still finishing keeps its lens.
+        if let wanted = settings.lensID, let running = backend.activeLensID, !activity.isBusy, photosInFlight == 0 {
+            if running != wanted, let lens = backend.lenses.first(where: { $0.id == wanted }) {
+                lensSwitchInFlight = true
+                setSwitchingLensVisibly(true)
+                lastZoomCommand = Date()
+                await backend.select(LensPreset(lensID: wanted, zoomFactor: settings.zoom,
+                                                displayZoom: settings.zoom * lens.relativeZoom))
+                lensSwitchInFlight = false
+                setSwitchingLensVisibly(false)
+                guard backendRunning, attempt == backendStarts else { return }
+            } else if running == wanted {
+                lastZoomCommand = Date()
+                backend.setZoomFactor(settings.zoom, rampRate: nil)
+            }
+        }
         refreshLenses()
         requestedDisplayZoom = settingsDisplayZoom
         applyAll()
@@ -769,6 +797,8 @@ final class CameraModel {
         }
         motionMonitor.start()
         locationProvider.setEnabled(settings.capture.saveLocation)
+        // A lens or zoom asked for while the start was bringing the camera back to its lens.
+        replayParkedLensChange()
     }
 
     private func refreshLenses() {
@@ -973,26 +1003,43 @@ final class CameraModel {
             switchLens(to: preset, generation: generation)
             return
         }
-        holdZoomTarget(to)
+        holdZoomTarget(to, generation: generation)
         guard !reducesMotion, framing.isFinite, framing > 0 else {
             switchLens(to: preset, generation: generation)
             return
         }
-        if to > from {
+        // The direction goes by the picture, which a tap during another glide finds midway: from 1x heading to 8x,
+        // a tap on 4 at 1.7x still zooms in, where the old target would make it a zoom out and cut.
+        if to > framing {
             // In: the lens in use zooms the whole way, digitally past its own reach, then the longer lens takes over
             // at the same framing. The swap at the end reads as the camera settling, not as a stutter mid-motion.
             let factor = clampZoomFactor(to / max(currentLens.relativeZoom, 0.01))
-            rampZoom(toFactor: factor, from: from, to: to, generation: generation, endsTransition: false)
+            // Until the swap the camera that runs is the lens in use, zoomed in, and the settings say so: a pause,
+            // a newer zoom or a shot that stops the swap leaves them true to the camera.
+            settings.lensID = currentLens.id
+            settings.zoom = factor
+            scheduleSave()
+            rampZoom(toFactor: factor, from: framing, to: to, generation: generation, endsTransition: false)
             // No margin: the swap starting on the ramp's last frames is hidden by the veil, a late one is not.
-            let wait = ZoomMath.rampDuration(from: from, to: to)
+            let wait = ZoomMath.rampDuration(from: framing, to: to)
             Task { [weak self] in
                 try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
-                guard let self, generation == self.zoomRequestGeneration, self.backendRunning else { return }
-                // A shot started meanwhile keeps its lens; the swap waits for it like any lens change.
-                guard !self.activity.isBusy, self.photosInFlight == 0, !self.lensSwitchInFlight else {
-                    self.pendingPreset = preset
+                guard let self else { return }
+                // A newer request has the zoom, or a stop already let go of the target.
+                guard generation == self.zoomRequestGeneration, self.backendRunning else {
+                    self.releaseZoomTarget(after: 0, generation: generation)
                     return
                 }
+                // A shot started meanwhile keeps its lens; the swap waits for it like any lens change
+                // (replayParkedLensChange). The glide has landed, so the button follows the camera meanwhile.
+                guard !self.activity.isBusy, self.photosInFlight == 0, !self.lensSwitchInFlight else {
+                    self.pendingPreset = preset
+                    self.releaseZoomTarget(after: 0, generation: generation)
+                    return
+                }
+                self.settings.lensID = preset.lensID
+                self.settings.zoom = preset.zoomFactor
+                self.scheduleSave()
                 self.switchLens(to: preset, generation: generation)
             }
         } else {
@@ -1019,7 +1066,7 @@ final class CameraModel {
         let from = requestedDisplayZoom
         // Only a glide shows a target; a finger's zoom lands at once.
         if animated {
-            holdZoomTarget(zoom)
+            holdZoomTarget(zoom, generation: generation)
         } else {
             clearZoomTarget(resync: false)
         }
@@ -1071,7 +1118,9 @@ final class CameraModel {
             releaseLock()
             lensSwitchInFlight = true
             activePresetID = preset.id
+            // The swap brings the lens up at its own button's factor; the asked zoom follows once it runs.
             settings.lensID = targetLens.id
+            settings.zoom = preset.zoomFactor
             requestedDisplayZoom = zoom
             Task {
                 await backend.select(preset)
@@ -1085,9 +1134,7 @@ final class CameraModel {
                 backend.setZoomFactor(clamped, rampRate: nil)
                 updateActivePreset()
                 scheduleSave()
-                if animated, generation == zoomRequestGeneration {
-                    releaseZoomTarget(after: 0, generation: generation)
-                }
+                releaseZoomTarget(after: 0, generation: generation)
                 applyPendingLensChange()
             }
             return
@@ -1095,26 +1142,44 @@ final class CameraModel {
 
         let clamped = clampZoomFactor(factor)
         settings.zoom = clamped
-        requestedDisplayZoom = clamped * base
+        // The camera stays on this lens, which the settings may not name yet: a lens button's zoom in that is still
+        // on its way, or one whose swap waits for photos to be saved.
+        if settings.lensID != targetLens.id { settings.lensID = targetLens.id }
+        let reached = clamped * base
+        requestedDisplayZoom = reached
         if animated {
-            backend.setZoomFactor(clamped, rampRate: ZoomMath.rampRate(from: from, to: zoom))
-            releaseZoomTarget(after: ZoomMath.rampDuration(from: from, to: zoom), generation: generation)
+            // The value this lens reaches, so a button never names one the glide stops short of.
+            holdZoomTarget(reached, generation: generation)
+            rampZoom(toFactor: clamped, from: from, to: reached, generation: generation)
         } else {
             backend.setZoomFactor(clamped, rampRate: nil)
         }
-        updateActivePreset(factor: clamped)
+        // The destination's button lights at the request, while the zoom still moves, as a tap on it would. On one
+        // lens the settings and the device agree all the way, which is what the target's hold on the button is for.
+        updateActivePreset(factor: clamped, force: true)
         scheduleSave()
     }
 
     /// Whatever was asked for last while a lens switch was in flight or photos were being saved: a lens or a zoom.
     private func applyPendingLensChange() {
         if let preset = pendingPreset {
+            // A shot that started during the swap keeps its lens, and select would refuse the choice now: it stays
+            // parked for the shot's end (replayParkedLensChange).
+            guard !activity.isBusy else { return }
             pendingPreset = nil
             select(preset, haptic: false, replaying: true)
         } else if let pending = pendingZoom {
             pendingZoom = nil
             setDisplayZoom(pending.value, animated: pending.animated, continuing: pending.continuing)
         }
+    }
+
+    /// A lens or zoom choice parked behind a shot, a countdown or a bracket, taken as soon as the camera is free:
+    /// nothing running, no photo still saving, no swap on its way.
+    private func replayParkedLensChange() {
+        guard pendingPreset != nil || pendingZoom != nil, activity == .idle, photosInFlight == 0,
+              !lensSwitchInFlight, !bracketInProgress, backendRunning else { return }
+        applyPendingLensChange()
     }
 
     func flipCamera() {
@@ -1711,7 +1776,9 @@ final class CameraModel {
         }
         isSettling = false
         countdownEndedAt = Date()
+        countdownRanOut = true
         activity = .idle
+        countdownRanOut = false
         return true
     }
 
@@ -1909,10 +1976,6 @@ final class CameraModel {
             showToast("Cancelled", symbol: "xmark")
         } else if let failure {
             report(failure)
-        }
-        // The swap a lens button's zoom still had to make when the shot started.
-        if photosInFlight == 0, !lensSwitchInFlight, backendRunning {
-            applyPendingLensChange()
         }
     }
 
@@ -2614,10 +2677,12 @@ final class CameraModel {
         return abs(clamped - 1) <= 0.001 && range.contains(1) ? 1 : clamped
     }
 
-    private func updateActivePreset(factor: Double? = nil) {
-        // A lens button's transition owns the active button until it lands: midway the device can still be on the
-        // lens it leaves while the settings already name the new one. clearZoomTarget brings this back in step.
-        guard zoomTarget == nil else { return }
+    /// force: a zoom on the lens in use, whose destination's button lights at the request.
+    private func updateActivePreset(factor: Double? = nil, force: Bool = false) {
+        // A lens button's transition owns the active button until it lands: a zoom in reaches the next lens's value
+        // on the lens it leaves, and a zoom out names the wider lens while the device is still on the longer one.
+        // clearZoomTarget brings this back in step.
+        guard force || zoomTarget == nil else { return }
         guard let lensID = backend.activeLensID ?? settings.lensID else {
             setActivePreset(lensPresets.first?.id)
             return
@@ -2643,6 +2708,8 @@ final class CameraModel {
         var changed = false
         if !lensSwitchInFlight, !activity.isBusy, now.timeIntervalSince(lastZoomCommand) > 1,
            readings.zoomFactor.isFinite, readings.zoomFactor > 0, abs(readings.zoomFactor - settings.zoom) > 0.01 {
+            // The factor belongs to the lens the camera runs, which the saved lens has to name with it.
+            if let running = backend.activeLensID, settings.lensID != running { settings.lensID = running }
             settings.zoom = readings.zoomFactor
             // The next pinch or wheel turn goes on from the slider's zoom.
             if readings.displayZoom.isFinite, readings.displayZoom > 0 {
@@ -2678,11 +2745,16 @@ final class CameraModel {
     /// so this waits until it rests.
     private func scheduleExternalSync() {
         externalSyncTask?.cancel()
+        // A zoom asked for after the slider (a lens button's glide, a pinch) has given the backend its own target,
+        // and setting the adopted zoom over it would snap the glide back.
+        let generation = zoomRequestGeneration
         externalSyncTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 600_000_000)
             guard !Task.isCancelled, let self, !self.lensSwitchInFlight, !self.activity.isBusy else { return }
-            self.lastZoomCommand = Date()
-            self.backend.setZoomFactor(self.settings.zoom, rampRate: nil)
+            if generation == self.zoomRequestGeneration {
+                self.lastZoomCommand = Date()
+                self.backend.setZoomFactor(self.settings.zoom, rampRate: nil)
+            }
             self.scheduleApply(.exposure)
         }
     }
