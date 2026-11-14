@@ -13,7 +13,7 @@ struct RulerDial: View {
     var spacing: CGFloat = 10
     var onEditingChanged: (Bool) -> Void = { _ in }
 
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
     @Environment(\.displayScale) private var displayScale
 
     /// The finger while it is down.
@@ -33,12 +33,17 @@ struct RulerDial: View {
     @State private var width: CGFloat = 0
     @GestureState private var isTouching = false
 
+    /// The system's Reduce Motion or the app's own switch: either one stops the glide.
+    private var reduceMotion: Bool { systemReduceMotion || AppearanceStore.shared.reduceMotion }
+
     private static let height: CGFloat = 56
     private static let labelCenterY: CGFloat = 12
     private static let tickBottom: CGFloat = 44
     private static let majorTickHeight: CGFloat = 16
     private static let minorTickHeight: CGFloat = 9
-    private static let labelFont = Font.system(size: 11, weight: .semibold).monospacedDigit()
+    private static func labelFont(scale: CGFloat) -> Font {
+        .system(size: 11 * scale, weight: .semibold).monospacedDigit()
+    }
     /// Natural frequency of the spring that snaps a slow release into its tick or bounces a throw off an end, rad/s.
     private static let releaseStiffness = 12.0
     /// Taps and outside changes start at rest, so they can afford a quicker spring.
@@ -90,9 +95,15 @@ struct RulerDial: View {
     // MARK: - Drawing
 
     private func face(at position: Double) -> some View {
-        Canvas { context, size in
-            drawTicks(in: &context, size: size, position: position)
+        // Read here, not in the renderer: the renderer runs after the body, where a change of accent or label size
+        // wouldn't reach it.
+        let accent = Theme.accent
+        let labelFont = Self.labelFont(scale: Theme.labelScale)
+        return Canvas { context, size in
+            drawTicks(in: &context, size: size, position: position, accent: accent, labelFont: labelFont)
         }
+        // At 16:9 the dial sits on the picture with nothing behind it, so the ticks and numbers carry a shadow.
+        .shadow(color: .black.opacity(0.55), radius: 2)
         .mask {
             LinearGradient(
                 stops: [
@@ -116,7 +127,8 @@ struct RulerDial: View {
             .accessibilityHidden(true)
     }
 
-    private func drawTicks(in context: inout GraphicsContext, size: CGSize, position: Double) {
+    private func drawTicks(in context: inout GraphicsContext, size: CGSize, position: Double, accent: Color,
+                           labelFont: Font) {
         guard !values.isEmpty, position.isFinite else { return }
         let step = self.step
         let midX = Double(size.width) / 2
@@ -146,17 +158,18 @@ struct RulerDial: View {
         }
         context.fill(minor, with: .color(Theme.primaryText.opacity(0.45)))
         context.fill(major, with: .color(Theme.primaryText.opacity(0.9)))
-        drawLabels(labelled, in: &context, midX: midX, position: position)
+        drawLabels(labelled, in: &context, midX: midX, position: position, accent: accent, labelFont: labelFont)
     }
 
-    private func drawLabels(_ indices: [Int], in context: inout GraphicsContext, midX: Double, position: Double) {
+    private func drawLabels(_ indices: [Int], in context: inout GraphicsContext, midX: Double, position: Double,
+                            accent: Color, labelFont: Font) {
         let selected = detent(of: position)
         var items: [(index: Int, x: CGFloat, text: GraphicsContext.ResolvedText, width: CGFloat)] = []
         for i in indices {
             let string = label(i)
             guard !string.isEmpty else { continue }
-            var text = context.resolve(Text(string).font(Self.labelFont))
-            text.shading = .color(i == selected ? Theme.accent : Theme.primaryText.opacity(0.75))
+            var text = context.resolve(Text(string).font(labelFont))
+            text.shading = .color(i == selected ? accent : Theme.primaryText.opacity(0.75))
             let width = text.measure(in: CGSize(width: 400, height: 40)).width
             items.append((i, CGFloat(midX + (Double(i) - position) * step), text, width))
         }
@@ -586,7 +599,7 @@ struct DialValueHeader: View {
     var onDone: (() -> Void)? = nil
     /// What VoiceOver says Done does. The shared dial sits where the mode carousel was; a dial inside a panel
     /// leaves the carousel in view and passes its own words.
-    var doneHint: String = "Closes the dial and shows the modes."
+    var doneHint: String = "Closes the dial."
 
     /// Both sides get the same width so the value stays centered over the dial's yellow line.
     private static let sideWidth: CGFloat = 64
@@ -636,6 +649,8 @@ struct DialValueHeader: View {
             }
             .lineLimit(1)
             .minimumScaleFactor(0.7)
+            // At 16:9 the header sits on the picture, so its text carries a shadow.
+            .shadow(color: .black.opacity(0.6), radius: 4)
             // Hung off the value's trailing edge instead of sharing its row: the value stays over the yellow line
             // when the badge comes and goes as the dial crosses the longest single shutter.
             .overlay(alignment: .trailing) {
@@ -666,7 +681,7 @@ struct DialValueHeader: View {
                 Text("AUTO")
                     .font(.system(size: 11, weight: .bold))
                     .tracking(0.6)
-                    .foregroundStyle(isAuto ? Color.black : Theme.primaryText)
+                    .foregroundStyle(isAuto ? Theme.onAccent : Theme.primaryText)
                     .padding(.horizontal, 10)
                     .frame(height: 26)
                     .background(Capsule().fill(isAuto ? Theme.accent : Color.white.opacity(0.16)))

@@ -255,9 +255,13 @@ private struct LightMeter: View {
 
     var body: some View {
         let value = offset.isFinite ? min(max(offset, -Self.range), Self.range) : 0
+        // Read here rather than in the renderer, which runs outside the body: a new accent, or Increase Contrast,
+        // then redraws the scale.
+        let accent = Theme.accent
+        let marks = Theme.secondaryText
         HStack(spacing: 6) {
             Canvas { context, size in
-                Self.drawScale(in: &context, size: size, value: value)
+                Self.drawScale(in: &context, size: size, value: value, accent: accent, marks: marks)
             }
             .frame(width: Self.width, height: Self.height)
             .overlay(alignment: .leading) {
@@ -288,7 +292,8 @@ private struct LightMeter: View {
         return abs(value) < 1.0 / 6.0 ? Theme.primaryText : Theme.accent
     }
 
-    private static func drawScale(in context: inout GraphicsContext, size: CGSize, value: Double) {
+    private static func drawScale(in context: inout GraphicsContext, size: CGSize, value: Double, accent: Color,
+                                  marks: Color) {
         let steps = 18
         var plain = Path()
         var lit = Path()
@@ -316,9 +321,9 @@ private struct LightMeter: View {
             }
         }
         context.stroke(plain, with: .color(.white.opacity(0.55)), lineWidth: 1)
-        context.stroke(lit, with: .color(Theme.accent), lineWidth: 1.5)
-        let minus = context.resolve(Text("-").font(.system(size: 9, weight: .semibold)).foregroundStyle(Theme.secondaryText))
-        let plus = context.resolve(Text("+").font(.system(size: 9, weight: .semibold)).foregroundStyle(Theme.secondaryText))
+        context.stroke(lit, with: .color(accent), lineWidth: 1.5)
+        let minus = context.resolve(Text("-").font(.system(size: 9, weight: .semibold)).foregroundStyle(marks))
+        let plus = context.resolve(Text("+").font(.system(size: 9, weight: .semibold)).foregroundStyle(marks))
         context.draw(minus, at: CGPoint(x: 0, y: size.height / 2), anchor: .leading)
         context.draw(plus, at: CGPoint(x: size.width, y: size.height / 2), anchor: .trailing)
     }

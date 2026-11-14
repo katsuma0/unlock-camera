@@ -1,8 +1,10 @@
 import SwiftUI
 import CameraCore
 
-/// Flash or video light, timer, drawer chevron, RAW, Live Photo, video format and settings, in a row above the
-/// viewfinder. A tap does a button's main thing; touch and hold lists its choices.
+/// The row over the top of the picture: up to three buttons on the left, the drawer chevron in the middle, up to two
+/// on the right and the gear, in seven equal slots on every iPhone. The person picks and orders the buttons in
+/// Settings; one that doesn't work in this mode or on this camera steps aside and the next one moves up. A tap does
+/// a button's main thing; touch and hold lists its choices.
 struct TopBar: View {
     @Bindable var model: CameraModel
     /// Set to ask the quick settings drawer for its timer sheet.
@@ -14,49 +16,62 @@ struct TopBar: View {
         let isRecording = activity == .recording
         // A focus or white balance bracket is one long capture that reads the settings again for every frame.
         let isHeld = Self.holdsControls(activity) || model.bracketInProgress
-        // The level switch brings the RAW chip in or out, animated like the controls under the viewfinder.
+        // The level switch brings buttons in or out, animated like the controls under the viewfinder.
         let advanced = model.isAdvanced
+        let layout = model.settings.topBar.layout(
+            advanced: advanced, mode: mode,
+            wantsBadge: TopBarScheduleBadge.isWanted(model: model, mode: mode),
+            isAvailable: { TopBarItemButton.isAvailable($0, model: model, mode: mode) }
+        )
+        // The right side sits against the gear, where the bar's last buttons have always been.
+        let trailingStart = BarSlots.gear - layout.trailing.count
 
-        ZStack {
-            HStack(spacing: 0) {
-                HStack(spacing: 0) {
-                    FlashButton(model: model, mode: mode)
-                    ScheduleBadge(model: model, mode: mode, timerSheetRequested: $timerSheetRequested)
-                }
-                Spacer(minLength: 0)
-                HStack(spacing: 0) {
-                    RawButton(model: model, mode: mode)
-                    LivePhotoButton(model: model, mode: mode)
-                    VideoFormatChip(model: model, mode: mode)
-                    SettingsButton(model: model)
-                }
+        BarSlots {
+            ForEach(Array(layout.leading.enumerated()), id: \.element) { index, item in
+                // While filming only the light stays: it is wanted most once the recording runs. It keeps clear of the
+                // recording capsule, which spans the middle three slots.
+                let stays = item == .flash
+                let slot = isRecording && stays ? min(index, BarSlots.recording.lowerBound - 1) : index
+                TopBarItemButton(model: model, item: item, mode: mode, timerSheetRequested: $timerSheetRequested)
+                    .modifier(SlotPlacement(slots: slot...slot, isHidden: isRecording && !stays, isHeld: isHeld))
             }
-            .opacity(isRecording ? 0 : (isHeld ? 0.35 : 1))
-            .allowsHitTesting(!isRecording && !isHeld)
-            .accessibilityHidden(isRecording)
-
-            // Outside the row that hides while filming: the light is wanted most once the recording runs. It takes
-            // the flash button's place, which VIDEO leaves empty.
-            TorchButton(model: model, mode: mode)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .opacity(isHeld ? 0.35 : 1)
-                .allowsHitTesting(!isHeld)
-
+            if layout.showsBadge {
+                TopBarScheduleBadge(model: model, mode: mode, timerSheetRequested: $timerSheetRequested)
+                    .modifier(SlotPlacement(slots: layout.leading.count...layout.leading.count,
+                                            isHidden: isRecording, isHeld: isHeld))
+            }
             if isRecording {
                 RecordingCapsule(model: model)
+                    .accessibilitySortPriority(Double(BarSlots.count - BarSlots.recording.lowerBound))
                     .transition(.opacity.combined(with: .scale(scale: 0.9)))
+                    .layoutValue(key: BarSlot.self, value: BarSlots.recording)
             } else {
                 DrawerToggle(model: model)
-                    .opacity(isHeld ? 0.35 : 1)
-                    .allowsHitTesting(!isHeld)
-                    .transition(.opacity)
+                    .modifier(SlotPlacement(slots: BarSlots.chevron...BarSlots.chevron, isHidden: false,
+                                            isHeld: isHeld))
             }
+            ForEach(Array(layout.trailing.enumerated()), id: \.element) { index, item in
+                let slot = trailingStart + index
+                TopBarItemButton(model: model, item: item, mode: mode, timerSheetRequested: $timerSheetRequested)
+                    .modifier(SlotPlacement(slots: slot...slot, isHidden: isRecording, isHeld: isHeld))
+            }
+            // In VIDEO the format takes the right side, which the layout leaves without buttons there.
+            if mode == .video {
+                VideoFormatChip(model: model)
+                    .modifier(SlotPlacement(slots: BarSlots.format, isHidden: isRecording, isHeld: isHeld))
+            }
+            SettingsButton(model: model)
+                .modifier(SlotPlacement(slots: BarSlots.gear...BarSlots.gear, isHidden: isRecording, isHeld: isHeld))
         }
-        .padding(.horizontal, 6)
         .frame(maxWidth: .infinity)
-        .frame(height: 48)
-        // Opaque so the quick settings drawer can slide out from underneath.
-        .background(Theme.background)
+        .frame(height: BarSlots.height)
+        // No background: at 16:9 the bar sits over the top of the picture, as in Apple's Camera, and the drawer slides
+        // out from the clip edge under it. The gaps between buttons still take a stray tap, as the black bar did,
+        // so a near miss doesn't move focus on the picture behind.
+        .contentShape(Rectangle())
+        // VoiceOver reads it left to right: the left side, the chevron, the right side and the gear.
+        .accessibilityElement(children: .contain)
+        .animation(Theme.snappy, value: layout)
         .animation(Theme.snappy, value: mode)
         .animation(Theme.snappy, value: isRecording)
         .animation(Theme.snappy, value: isHeld)
@@ -73,13 +88,74 @@ struct TopBar: View {
     }
 }
 
+// MARK: - Slots
+
+/// Seven equal slots across the bar on every iPhone: three for the left side, the chevron, two for the right side
+/// and the gear. The same seven places on every phone keep each button where the thumb expects it, and the narrowest
+/// phone still leaves 14 pt between the circles, so neighbours never crowd or overlap.
+private struct BarSlots: Layout {
+    static let count = 7
+    static let chevron = 3
+    static let gear = 6
+    /// While filming, the red capsule takes the chevron's slot and one on each side of it.
+    static let recording = 2...4
+    /// VIDEO's format chip, about 90 pt wide, takes both right slots.
+    static let format = 4...5
+    static let height: CGFloat = 48
+    /// From the screen edges, as the bar has always sat.
+    static let inset: CGFloat = 6
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        // Only an unbounded proposal lacks a width; the bar is always offered the screen's.
+        let narrowest = CGFloat(Self.count) * 44 + Self.inset * 2
+        let width = proposal.width.flatMap { $0.isFinite ? max($0, 0) : nil } ?? narrowest
+        return CGSize(width: width, height: Self.height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let pitch = max(bounds.width - Self.inset * 2, 0) / CGFloat(Self.count)
+        for subview in subviews {
+            let span = subview[BarSlot.self]
+            let first = min(max(span.lowerBound, 0), Self.count - 1)
+            let last = min(max(span.upperBound, first), Self.count - 1)
+            let center = bounds.minX + Self.inset + pitch * CGFloat(first + last + 1) / 2
+            subview.place(at: CGPoint(x: center, y: bounds.midY), anchor: .center,
+                          proposal: ProposedViewSize(width: pitch * CGFloat(last - first + 1), height: bounds.height))
+        }
+    }
+}
+
+/// The slots a view takes, the first to the last.
+private struct BarSlot: LayoutValueKey {
+    static let defaultValue: ClosedRange<Int> = 0...0
+}
+
+/// Puts a view in its slots, hides it while filming, dims it while a shot runs and orders it for VoiceOver.
+private struct SlotPlacement: ViewModifier {
+    let slots: ClosedRange<Int>
+    /// Hidden while filming: only the light and the recording capsule stay.
+    let isHidden: Bool
+    /// Countdown, stacks and saving keep the bar visible but inert.
+    let isHeld: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(isHidden ? 0 : (isHeld ? 0.35 : 1))
+            .allowsHitTesting(!isHidden && !isHeld)
+            .accessibilityHidden(isHidden)
+            .accessibilitySortPriority(Double(BarSlots.count - slots.lowerBound))
+            .transition(.opacity.combined(with: .scale(scale: 0.8)))
+            .layoutValue(key: BarSlot.self, value: slots)
+    }
+}
+
 // MARK: - Touch and hold
 
-/// A button's tap and its touch and hold menu, laid over the button. Its own view with inputs that never change, so
-/// the button's redraws with every settings change leave the system's menu button alone.
+/// A control's tap and its touch and hold menu, laid over the control. Its own view with inputs that never change,
+/// so the control's redraws with every settings change leave the system's menu button alone.
 private struct BarTouchLayer: View {
     enum Control {
-        case flash, torch, raw, resolution, frameRate, settings
+        case resolution, frameRate, settings
     }
 
     let model: CameraModel
@@ -89,18 +165,12 @@ private struct BarTouchLayer: View {
     var body: some View {
         MenuOnHoldLayer(press: press) {
             switch control {
-            case .flash: FlashButton.step(model)
-            case .torch: TorchButton.toggle(model)
-            case .raw: RawButton.step(model)
             case .resolution: VideoFormatChip.stepResolution(model)
             case .frameRate: VideoFormatChip.stepFrameRate(model)
             case .settings: SettingsButton.open(model)
             }
         } options: {
             switch control {
-            case .flash: FlashOptions(model: model)
-            case .torch: TorchOptions(model: model)
-            case .raw: RawOptions(model: model)
             case .resolution, .frameRate: VideoFormatOptions(model: model)
             case .settings: SettingsButtonOptions(model: model)
             }
@@ -108,510 +178,81 @@ private struct BarTouchLayer: View {
     }
 }
 
-// MARK: - Buttons
-
-private struct FlashButton: View {
-    let model: CameraModel
-    let mode: CaptureMode
-    @State private var press = PressTracker()
-
-    var body: some View {
-        // Stacks and video never fire the flash, so the button only shows where it does something.
-        if model.capabilities.hasFlash, mode == .photo || mode == .manual {
-            let flash = model.settings.capture.flash
-            // A MANUAL shutter past the hardware limit is shot as a stack. Dimmed rather than hidden, so the bar
-            // doesn't reshuffle while the shutter dial crosses the limit.
-            let stacked = mode == .manual && model.shutterIsStacked
-            Button {
-                Self.step(model)
-            } label: {
-                Upright(model: model) {
-                    Image(systemName: flash.symbolName)
-                }
-            }
-            .buttonStyle(BarCircleStyle(isActive: flash == .on && !stacked, isPressed: press.isPressed))
-            .accessibilityLabel("Flash")
-            .accessibilityValue(flash.title)
-            .accessibilityHint(stacked ? "Stacked exposures don't use the flash." : "Touch and hold for more options.")
-            .overlay {
-                BarTouchLayer(model: model, control: .flash, press: press)
-            }
-            .disabled(stacked)
-            .opacity(stacked ? 0.35 : 1)
-            .transition(.opacity.combined(with: .scale(scale: 0.8)))
-        }
-    }
-
-    fileprivate static func step(_ model: CameraModel) {
-        Haptics.tap()
-        model.updateSettings { $0.capture.flash = $0.capture.flash.nextInCycle }
-    }
-}
-
-/// Off, Auto, On: the order the tap steps through.
-private struct FlashOptions: View {
-    let model: CameraModel
-
-    var body: some View {
-        let flash = model.settings.capture.flash
-        Picker("Flash", selection: Binding(get: { flash }, set: { choose($0) })) {
-            ForEach(FlashSetting.allCases) { setting in
-                Label(setting.title, systemImage: setting.symbolName).tag(setting)
-            }
-        }
-        .pickerStyle(.inline)
-    }
-
-    private func choose(_ flash: FlashSetting) {
-        Haptics.tick()
-        model.updateSettings { $0.capture.flash = flash }
-    }
-}
-
-/// The video light, where the flash button sits in the photo modes. The front camera has none, so it hides there.
-private struct TorchButton: View {
-    let model: CameraModel
-    let mode: CaptureMode
-    @State private var press = PressTracker()
-
-    var body: some View {
-        if model.capabilities.hasTorch, mode == .video {
-            let isOn = model.torchOn
-            Button {
-                Self.toggle(model)
-            } label: {
-                Upright(model: model) {
-                    Image(systemName: isOn ? "flashlight.on.fill" : "flashlight.off.fill")
-                }
-            }
-            .buttonStyle(BarCircleStyle(isActive: isOn, isPressed: press.isPressed))
-            .accessibilityLabel("Flashlight")
-            .accessibilityValue(TorchBrightness.current(isOn: isOn, level: model.torchLevel).spokenValue)
-            .accessibilityHint("Touch and hold for more options.")
-            // The menu layer is hidden from VoiceOver, and the tap only turns the light on or off, so the
-            // brightness steps would otherwise be out of reach.
-            .accessibilityActions {
-                ForEach(TorchBrightness.allCases) { choice in
-                    Button(choice.title) { Self.choose(choice, model: model) }
-                }
-            }
-            .overlay {
-                BarTouchLayer(model: model, control: .torch, press: press)
-            }
-            .transition(.opacity.combined(with: .scale(scale: 0.8)))
-        }
-    }
-
-    fileprivate static func toggle(_ model: CameraModel) {
-        // setTorch plays its own click.
-        model.setTorch(!model.torchOn)
-    }
-
-    /// The model clicks for both.
-    fileprivate static func choose(_ brightness: TorchBrightness, model: CameraModel) {
-        if let level = brightness.level {
-            model.setTorchLevel(level)
-        } else {
-            model.setTorch(false)
-        }
-    }
-}
-
-private struct TorchOptions: View {
-    let model: CameraModel
-
-    var body: some View {
-        let brightness = TorchBrightness.current(isOn: model.torchOn, level: model.torchLevel)
-        Picker("Flashlight", selection: Binding(get: { brightness }, set: { TorchButton.choose($0, model: model) })) {
-            ForEach(TorchBrightness.allCases) { choice in
-                Text(choice.title).tag(choice)
-            }
-        }
-        .pickerStyle(.inline)
-    }
-}
-
-/// The flashlight's touch and hold choices.
-private enum TorchBrightness: CaseIterable, Identifiable {
-    case off, low, medium, full
-
-    var id: Self { self }
-
-    var title: String {
-        switch self {
-        case .off: return "Off"
-        case .low: return "Low"
-        case .medium: return "Medium"
-        case .full: return "Full"
-        }
-    }
-
-    /// Torch level, 0...1; nil is off.
-    var level: Double? {
-        switch self {
-        case .off: return nil
-        case .low: return 0.25
-        case .medium: return 0.6
-        case .full: return 1
-        }
-    }
-
-    var spokenValue: String {
-        switch self {
-        case .off: return "Off"
-        case .low: return "On, low"
-        case .medium: return "On, medium"
-        case .full: return "On"
-        }
-    }
-
-    /// The choice closest to what the light is doing.
-    static func current(isOn: Bool, level: Double) -> TorchBrightness {
-        guard isOn, level.isFinite else { return .off }
-        let lit: [TorchBrightness] = [.low, .medium, .full]
-        return lit.min(by: { abs(($0.level ?? 0) - level) < abs(($1.level ?? 0) - level) }) ?? .full
-    }
-}
-
-private struct RawButton: View {
-    let model: CameraModel
-    let mode: CaptureMode
-    @State private var press = PressTracker()
-
-    var body: some View {
-        let choices = Self.choices(for: model.capabilities)
-        // RAW belongs to single photos; stacks and video write HEIF, JPEG or movies. The simple interface keeps
-        // RAW off, so it has no chip for it.
-        if model.isAdvanced, choices.count > 1, mode == .photo || mode == .manual {
-            let raw = model.settings.capture.rawFormat
-            let isOn = raw != RawFormat.none
-            // A MANUAL shutter past the hardware limit is shot as a stack, which writes HEIF or JPEG only.
-            let stacked = mode == .manual && model.shutterIsStacked
-            // The photo output leaves Bayer RAW out of zoomed shots. Still a button, so RAW can be turned off.
-            let zoomed = !stacked && isOn && model.rawBlockedByZoom
-            Upright(model: model) {
-                Button {
-                    Self.step(model)
-                } label: {
-                    Text(raw == .proRAW ? "ProRAW" : "RAW")
-                        .strikethrough(!isOn, color: Theme.primaryText)
-                }
-                .buttonStyle(BarChipStyle(isActive: isOn && !stacked && !zoomed, isPressed: press.isPressed))
-            }
-            .accessibilityLabel("RAW")
-            .accessibilityValue(raw.title)
-            .accessibilityHint(Self.hint(stacked: stacked, zoomed: zoomed))
-            // Over the chip's level frame, not turned with it: the menu opens from where the chip sits.
-            .overlay {
-                BarTouchLayer(model: model, control: .raw, press: press)
-            }
-            .disabled(stacked)
-            .opacity(stacked || zoomed ? 0.35 : 1)
-            .transition(.opacity.combined(with: .scale(scale: 0.8)))
-        }
-    }
-
-    fileprivate static func step(_ model: CameraModel) {
-        let choices = choices(for: model.capabilities)
-        let index = choices.firstIndex(of: model.settings.capture.rawFormat)
-        // Spelled out: a bare .none next to an optional reads as nil.
-        let next: RawFormat = index.map { choices[($0 + 1) % choices.count] } ?? RawFormat.none
-        Haptics.tap()
-        model.updateSettings { $0.capture.rawFormat = next }
-    }
-
-    private static func hint(stacked: Bool, zoomed: Bool) -> String {
-        if stacked { return "Stacked exposures are saved without RAW." }
-        // Each lens's own zoom works, so a telephoto keeps RAW at its button's value and loses it zoomed past that.
-        if zoomed { return "RAW needs a lens at its own zoom, such as 1\u{00D7}. Zoomed photos are saved without it." }
-        return "Touch and hold for more options."
-    }
-
-    fileprivate static func choices(for capabilities: CameraCapabilities) -> [RawFormat] {
-        var choices: [RawFormat] = [RawFormat.none]
-        if capabilities.rawSupported { choices.append(.bayer) }
-        if capabilities.proRAWSupported { choices.append(.proRAW) }
-        return choices
-    }
-}
-
-/// Off, RAW and ProRAW, as far as this camera has them.
-private struct RawOptions: View {
-    let model: CameraModel
-
-    var body: some View {
-        let choices = RawButton.choices(for: model.capabilities)
-        let raw = model.settings.capture.rawFormat
-        Picker("RAW", selection: Binding(get: { Self.shown(raw, among: choices) }, set: { choose($0) })) {
-            ForEach(choices) { choice in
-                Text(choice.title).tag(choice)
-            }
-        }
-        .pickerStyle(.inline)
-    }
-
-    private func choose(_ raw: RawFormat) {
-        Haptics.tick()
-        model.updateSettings { $0.capture.rawFormat = raw }
-    }
-
-    /// The row to mark. ProRAW saved on a lens without it is shot as a Bayer DNG, so RAW is the row in use.
-    private static func shown(_ raw: RawFormat, among choices: [RawFormat]) -> RawFormat {
-        if choices.contains(raw) { return raw }
-        return choices.contains(.bayer) ? .bayer : RawFormat.none
-    }
-}
-
-private struct LivePhotoButton: View {
-    let model: CameraModel
-    let mode: CaptureMode
-
-    var body: some View {
-        if model.capabilities.livePhotoSupported, mode == .photo {
-            let capture = model.settings.capture
-            // The photo output can't record the movie part while it delivers RAW.
-            let blockedByRaw = capture.rawFormat != RawFormat.none
-            let isOn = capture.livePhoto && !blockedByRaw
-            Button {
-                Haptics.tap()
-                model.updateSettings { $0.capture.livePhoto.toggle() }
-            } label: {
-                Upright(model: model) {
-                    Image(systemName: isOn ? "livephoto" : "livephoto.slash")
-                }
-            }
-            .buttonStyle(BarCircleStyle(isActive: isOn))
-            .disabled(blockedByRaw)
-            .opacity(blockedByRaw ? 0.4 : 1)
-            .transition(.opacity.combined(with: .scale(scale: 0.8)))
-            .accessibilityLabel("Live Photo")
-            .accessibilityValue(isOn ? "On" : "Off")
-            .accessibilityHint(blockedByRaw ? "Turn off RAW to use Live Photos." : "")
-        }
-    }
-}
-
-/// Shows that the next press starts a timer, an intervalometer or a bracket, and opens the drawer to change it.
-/// Touch and hold sets the self timer without the drawer.
-private struct ScheduleBadge: View {
-    let model: CameraModel
-    let mode: CaptureMode
-    @Binding var timerSheetRequested: Bool
-    @State private var press = PressTracker()
-
-    var body: some View {
-        let capture = model.settings.capture
-        let schedule = capture.schedule
-        let isBulb = mode == .long && model.settings.longExposure.bulb
-        // A focus bracket is centered on the manual focus distance. Under autofocus it is wherever the lens is at the
-        // press, which would move this count while framing and through the bracket, so it counts around the middle.
-        let bracketFrames = Self.frameCount(capture.bracket, maxBurst: model.capabilities.maxBracketCount,
-                                            focusCenter: model.effectiveFocus.lensPosition ?? 0.5)
-        // Video and bulb start on the press itself and stacks ignore brackets, so the badge only shows where it
-        // applies. A bracket the photo output can't shoot comes out as a single photo, so it gets no badge either.
-        let showsSchedule = !schedule.isOff && mode != .video && !isBulb
-        let showsBracket = !capture.bracket.isOff && bracketFrames > 1
-            && (mode == .photo || (mode == .manual && !model.shutterIsStacked))
-        if showsSchedule || showsBracket {
-            // Only the glyphs turn with the phone, as on the strip's chips. The whole chip turned upright would
-            // hang out of the bar over the picture and catch taps meant for it.
-            Button {
-                Self.openDrawer(model)
-            } label: {
-                HStack(spacing: 6) {
-                    if showsSchedule {
-                        HStack(spacing: 3) {
-                            Upright(model: model) { Image(systemName: "timer") }
-                            Text(Self.scheduleLabel(schedule))
-                        }
-                    }
-                    if showsBracket {
-                        HStack(spacing: 3) {
-                            Upright(model: model) { Image(systemName: "square.stack.3d.up") }
-                            Text("\(bracketFrames)")
-                        }
-                    }
-                }
-            }
-            .buttonStyle(BarChipStyle(isActive: true, isPressed: press.isPressed))
-            // The simple interface has the self timer only.
-            .accessibilityLabel(model.isAdvanced ? "Timer and brackets" : "Timer")
-            .accessibilityValue(Self.accessibilityValue(schedule: showsSchedule ? schedule : nil,
-                                                        bracket: showsBracket ? capture.bracket : nil))
-            .accessibilityHint("Opens quick settings. Touch and hold for more options.")
-            .overlay {
-                TimerTouchLayer(model: model, press: press, timerSheetRequested: $timerSheetRequested)
-            }
-            .transition(.opacity.combined(with: .scale(scale: 0.8)))
-        }
-    }
-
-    fileprivate static func openDrawer(_ model: CameraModel) {
-        Haptics.tap()
-        withAnimation(Theme.spring) { model.isDrawerOpen = true }
-    }
-
-    /// "3s" for a timer, "×20" for a burst or an intervalometer. With a bracket beside it, anything longer would
-    /// reach the centred chevron on a 375 pt wide phone; the drawer and the timer sheet show the rest.
-    private static func scheduleLabel(_ schedule: CaptureSchedule) -> String {
-        if schedule.shots > 1 {
-            return "\u{00D7}\(schedule.shots)"
-        }
-        return Formatting.compactDuration(schedule.delay)
-    }
-
-    /// The frames the bracket really takes. The photo output caps an exposure bracket at its burst limit and keeps
-    /// the count odd so the metered frame stays in the middle; under two frames it takes a single photo. A focus
-    /// spread wider than the lens travel piles frames on its ends, so that count depends on the center.
-    private static func frameCount(_ bracket: BracketPlan, maxBurst: Int, focusCenter: Double) -> Int {
-        switch bracket.kind {
-        case .off:
-            return 1
-        case .exposure:
-            let planned = bracket.exposureOffsets().count
-            var count = min(planned, max(maxBurst, 1))
-            if count < planned && count % 2 == 0 { count -= 1 }
-            return max(count, 1)
-        case .focus:
-            return bracket.focusPositions(center: focusCenter).count
-        case .whiteBalance:
-            return bracket.kelvinValues(center: 5500).count
-        }
-    }
-
-    private static func accessibilityValue(schedule: CaptureSchedule?, bracket: BracketPlan?) -> String {
-        var parts: [String] = []
-        if let schedule { parts.append(schedule.summary) }
-        if let bracket { parts.append(bracket.summary) }
-        return parts.joined(separator: ", ")
-    }
-}
-
-/// The badge's tap and its touch and hold menu. Its own view with inputs that never change, like the other buttons'.
-private struct TimerTouchLayer: View {
-    let model: CameraModel
-    let press: PressTracker
-    @Binding var timerSheetRequested: Bool
-
-    var body: some View {
-        MenuOnHoldLayer(press: press) {
-            ScheduleBadge.openDrawer(model)
-        } options: {
-            TimerBadgeOptions(model: model, timerSheetRequested: $timerSheetRequested)
-        }
-    }
-}
-
-/// The self timer's delays. The simple interface offers the ones its drawer steps through; the advanced one adds
-/// the rest and the way into the timer sheet.
-private struct TimerBadgeOptions: View {
-    let model: CameraModel
-    @Binding var timerSheetRequested: Bool
-
-    var body: some View {
-        let advanced = model.isAdvanced
-        let schedule = model.settings.capture.schedule
-        let delays = advanced ? CaptureSchedule.delayPresets : CameraSettings.simpleDelays
-        ForEach(delays, id: \.self) { delay in
-            // A burst or an intervalometer is none of the plain delays, so no row is marked for it.
-            let isCurrent = schedule.shots == 1 && abs(schedule.delay - delay) < 0.01
-            Toggle(isOn: Binding(get: { isCurrent }, set: { _ in choose(delay) })) {
-                // Worded like the other touch and hold menus; the badge itself keeps the compact "3s".
-                Text(delay > 0 ? HoldMenuText.time(delay) : "Off")
-            }
-        }
-        if advanced {
-            Section {
-                Button(action: showSheet) {
-                    Label("More\u{2026}", systemImage: "slider.horizontal.3")
-                }
-            }
-        }
-    }
-
-    private func choose(_ delay: Double) {
-        Haptics.tick()
-        model.updateSettings { $0.capture.schedule = CaptureSchedule(delay: delay) }
-    }
-
-    /// The sheet belongs to the drawer, which opens for it and presents it.
-    private func showSheet() {
-        timerSheetRequested = true
-        withAnimation(Theme.spring) { model.isDrawerOpen = true }
-    }
-}
+// MARK: - Furniture
 
 /// "4K · 30" like the Camera app: tap the resolution or the frame rate to step through what this lens can record.
 /// Touch and hold either one lists every size and rate together.
 private struct VideoFormatChip: View {
     let model: CameraModel
-    let mode: CaptureMode
     @State private var resolutionPress = PressTracker()
     @State private var frameRatePress = PressTracker()
 
     var body: some View {
-        if mode == .video {
-            // What this lens records: a lens without the saved 4K 120 shows 4K 60 here, and a tap steps from that.
-            let video = model.recordedVideo
-            let formats = model.capabilities.formats
-            let resolutions = FormatSelector.availableResolutions(colorMode: video.colorMode, among: formats)
-            let rates = FormatSelector.availableFrameRates(resolution: video.resolution, colorMode: video.colorMode,
-                                                           among: formats)
-            // Stays level when the phone turns, like the strip's text chips: turned upright, the chip would hang
-            // out of the bar and its two buttons would sit over the picture.
-            HStack(spacing: 0) {
-                Button {
-                    Self.stepResolution(model)
-                } label: {
-                    Text(video.resolution.title)
-                        .padding(.leading, 12)
-                        .padding(.trailing, 5)
-                        .frame(minWidth: 44, minHeight: 44, alignment: .trailing)
-                        .contentShape(Rectangle())
-                }
-                .accessibilityLabel("Video resolution")
-                .accessibilityValue(video.resolution.title)
-                .accessibilityHint("Touch and hold for more options.")
-                // The touch lands on the menu layer, so the plain style's dimming is done by hand.
-                .opacity(resolutionPress.isPressed ? 0.5 : 1)
-                .overlay {
-                    BarTouchLayer(model: model, control: .resolution, press: resolutionPress)
-                }
-                .disabled(!Self.canStep(resolutions, from: video.resolution, matches: ==))
-
-                Text("\u{00B7}")
-                    .foregroundStyle(Theme.secondaryText)
-                    .accessibilityHidden(true)
-
-                Button {
-                    Self.stepFrameRate(model)
-                } label: {
-                    Text(Self.rateLabel(video.frameRate))
-                        .padding(.leading, 5)
-                        .padding(.trailing, 12)
-                        .frame(minWidth: 44, minHeight: 44, alignment: .leading)
-                        .contentShape(Rectangle())
-                }
-                .accessibilityLabel("Frame rate")
-                .accessibilityValue(Formatting.frameRate(video.frameRate))
-                .accessibilityHint("Touch and hold for more options.")
-                .opacity(frameRatePress.isPressed ? 0.5 : 1)
-                .overlay {
-                    BarTouchLayer(model: model, control: .frameRate, press: frameRatePress)
-                }
-                .disabled(!Self.canStep(rates, from: video.frameRate, matches: Self.sameRate))
+        // What this lens records: a lens without the saved 4K 120 shows 4K 60 here, and a tap steps from that.
+        let video = model.recordedVideo
+        let formats = model.capabilities.formats
+        let resolutions = FormatSelector.availableResolutions(colorMode: video.colorMode, among: formats)
+        let rates = FormatSelector.availableFrameRates(resolution: video.resolution, colorMode: video.colorMode,
+                                                       among: formats)
+        // Stays level when the phone turns, like the strip's text chips: turned upright, the chip would hang out of
+        // the bar and its two buttons would sit over the picture.
+        HStack(spacing: 0) {
+            Button {
+                Self.stepResolution(model)
+            } label: {
+                Text(video.resolution.title)
+                    .padding(.leading, 12)
+                    .padding(.trailing, 5)
+                    .frame(minWidth: 44, minHeight: 44, alignment: .trailing)
+                    .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
-            .font(Theme.chipFont)
-            .foregroundStyle(Theme.primaryText)
-            .background {
-                Color.clear
-                    .frame(height: 28)
-                    .cameraGlass(in: Capsule())
+            .accessibilityLabel("Video resolution")
+            .accessibilityValue(video.resolution.title)
+            .accessibilityHint(HoldMenuText.hint)
+            // The touch lands on the menu layer, so the plain style's dimming is done by hand.
+            .opacity(resolutionPress.isPressed ? 0.5 : 1)
+            .overlay {
+                BarTouchLayer(model: model, control: .resolution, press: resolutionPress)
             }
-            .contentTransition(.numericText())
-            .transition(.opacity.combined(with: .scale(scale: 0.8)))
+            .disabled(!Self.canStep(resolutions, from: video.resolution, matches: ==))
+
+            Text("\u{00B7}")
+                .foregroundStyle(Theme.secondaryText)
+                .accessibilityHidden(true)
+
+            Button {
+                Self.stepFrameRate(model)
+            } label: {
+                Text(Self.rateLabel(video.frameRate))
+                    .padding(.leading, 5)
+                    .padding(.trailing, 12)
+                    .frame(minWidth: 44, minHeight: 44, alignment: .leading)
+                    .contentShape(Rectangle())
+            }
+            .accessibilityLabel("Frame rate")
+            .accessibilityValue(Formatting.frameRate(video.frameRate))
+            .accessibilityHint(HoldMenuText.hint)
+            .opacity(frameRatePress.isPressed ? 0.5 : 1)
+            .overlay {
+                BarTouchLayer(model: model, control: .frameRate, press: frameRatePress)
+            }
+            .disabled(!Self.canStep(rates, from: video.frameRate, matches: Self.sameRate))
         }
+        .buttonStyle(.plain)
+        .font(Theme.chipFont)
+        // Its two slots hold "1080p · 29.97" on the narrowest phone; with Larger labels the text shrinks to fit them
+        // rather than reach the chevron or the gear.
+        .lineLimit(1)
+        .minimumScaleFactor(0.7)
+        .foregroundStyle(Theme.primaryText)
+        .background {
+            Color.clear
+                .frame(height: 28)
+                .cameraGlass(in: Capsule())
+        }
+        .contentTransition(.numericText())
+        // One unit for the bar's reading order, so both its buttons come before the gear.
+        .accessibilityElement(children: .contain)
     }
 
     fileprivate static func stepResolution(_ model: CameraModel) {
@@ -715,13 +356,15 @@ private struct DrawerToggle: View {
 
     var body: some View {
         let isOpen = model.isDrawerOpen
+        // With Reduce motion, in the app or in iOS, the chevron switches direction instead of turning over.
+        let still = AppearanceStore.shared.reduceMotion
         Button {
             Haptics.tap()
             withAnimation(Theme.spring) { model.isDrawerOpen.toggle() }
         } label: {
-            Image(systemName: "chevron.down")
-                .rotationEffect(.degrees(isOpen ? 180 : 0))
-                .animation(Theme.spring, value: isOpen)
+            Image(systemName: still && isOpen ? "chevron.up" : "chevron.down")
+                .rotationEffect(.degrees(isOpen && !still ? 180 : 0))
+                .animation(still ? nil : Theme.spring, value: isOpen)
         }
         .buttonStyle(BarCircleStyle(isActive: isOpen))
         .accessibilityLabel(isOpen ? "Hide quick settings" : "Show quick settings")
@@ -742,7 +385,7 @@ private struct SettingsButton: View {
         }
         .buttonStyle(BarCircleStyle(isPressed: press.isPressed))
         .accessibilityLabel("Settings")
-        .accessibilityHint("Touch and hold for more options.")
+        .accessibilityHint(HoldMenuText.hint)
         .overlay {
             BarTouchLayer(model: model, control: .settings, press: press)
         }
@@ -827,8 +470,9 @@ private struct RecordingCapsule: View {
 
 // MARK: - Styles and helpers
 
-/// The shared glass circle, with the touch area grown to 44 pt around it.
-private struct BarCircleStyle: ButtonStyle {
+/// The shared glass circle, with the touch area grown to 44 pt around it. Every customizable button uses it, so each
+/// fills one of the bar's slots exactly.
+struct BarCircleStyle: ButtonStyle {
     var isActive = false
     /// A press on the button's touch and hold layer.
     var isPressed = false
@@ -837,21 +481,6 @@ private struct BarCircleStyle: ButtonStyle {
         GlassCircleButtonStyle(size: Theme.controlSize, isActive: isActive, isPressed: isPressed)
             .makeBody(configuration: configuration)
             .frame(width: 44, height: 44)
-            .contentShape(Rectangle())
-    }
-}
-
-/// The shared glass chip, with the touch area grown to 44 pt high.
-private struct BarChipStyle: ButtonStyle {
-    var isActive = false
-    /// A press on the chip's touch and hold layer.
-    var isPressed = false
-
-    func makeBody(configuration: Configuration) -> some View {
-        GlassChipButtonStyle(isActive: isActive, isPressed: isPressed)
-            .makeBody(configuration: configuration)
-            .padding(.horizontal, 3)
-            .frame(minWidth: 44, minHeight: 44)
             .contentShape(Rectangle())
     }
 }
@@ -869,16 +498,5 @@ private struct Upright<Content: View>: View {
 
     var body: some View {
         content.uprightRotation(model.motion.iconRotationDegrees)
-    }
-}
-
-private extension FlashSetting {
-    /// Off, Auto, On, the Camera app's order.
-    var nextInCycle: FlashSetting {
-        switch self {
-        case .off: return .auto
-        case .auto: return .on
-        case .on: return .off
-        }
     }
 }

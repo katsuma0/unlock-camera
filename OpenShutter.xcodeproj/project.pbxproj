@@ -283,11 +283,10 @@
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Adds where a photo or video was taken to its details, only while location tags are on in Settings.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Records sound with your videos.";
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Saves your photos and videos to your library.";
+				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Shows the photos and videos you take with Open Shutter, so you can view and edit them.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
-				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UIStatusBarHidden = YES;
-				INFOPLIST_KEY_UIUserInterfaceStyle = Dark;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = UIInterfaceOrientationPortrait;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -323,11 +322,10 @@
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Adds where a photo or video was taken to its details, only while location tags are on in Settings.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Records sound with your videos.";
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Saves your photos and videos to your library.";
+				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Shows the photos and videos you take with Open Shutter, so you can view and edit them.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
-				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UIStatusBarHidden = YES;
-				INFOPLIST_KEY_UIUserInterfaceStyle = Dark;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = UIInterfaceOrientationPortrait;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",

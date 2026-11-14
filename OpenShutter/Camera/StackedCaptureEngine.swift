@@ -42,10 +42,33 @@ final class StackedCaptureEngine: @unchecked Sendable {
 
     private struct Status {
         var framesAccumulated = 0
+        var framesSeen = 0
+        var firstFrameDate: Date?
+        var lastFrameDate: Date?
+        var frameExif: FrameExif?
         var isFinished = false
         var isCancelled = false
         var isDelivered = false
         var failure: String?
+    }
+
+    /// What the stack recorded about itself, for the photo's metadata.
+    struct Facts: Sendable {
+        /// Frames that reached the engine after the exposure was set, merged or not.
+        var framesSeen: Int
+        var framesAccumulated: Int
+        /// When the first merged frame began gathering light, and when the last one ended.
+        var firstFrameDate: Date?
+        var lastFrameDate: Date?
+        /// An early merged frame's own `{Exif}`: what the hardware really did, and the lens it did it through.
+        var frameExif: FrameExif?
+
+        /// From the first merged frame's start to the last one's end; nil until a frame is in.
+        var captureSeconds: Double? {
+            guard let first = firstFrameDate, let last = lastFrameDate else { return nil }
+            let seconds = last.timeIntervalSince(first)
+            return seconds.isFinite && seconds >= 0 ? seconds : nil
+        }
     }
 
     private enum FrameOutcome {
@@ -74,8 +97,12 @@ final class StackedCaptureEngine: @unchecked Sendable {
         let timestamp = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         if start.isNumeric, timestamp.isNumeric, CMTimeCompare(timestamp, start) < 0 { return false }
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return false }
+        let arrival = Date()
+        // Only the first few frames are asked, and only until one answers: the exposure is the same for all.
+        let wantsExif = withStatus { $0.frameExif == nil && $0.framesAccumulated < Tuning.exifFrames }
+        let exif = wantsExif ? FrameExif(sampleBuffer: sampleBuffer) : nil
 
-        let step = workLock.withLock { merge(pixelBuffer) }
+        let step = workLock.withLock { merge(pixelBuffer, arrival: arrival, exif: exif) }
         // Outside the lock, so a handler that calls back into the engine can't deadlock it. A cancel that
         // landed meanwhile already took the overlay down; a late report would bring it back.
         if let report = step.report, !isCancelled {
@@ -87,6 +114,14 @@ final class StackedCaptureEngine: @unchecked Sendable {
     var isFinished: Bool { withStatus { $0.isFinished } }
     var isCancelled: Bool { withStatus { $0.isCancelled } }
     var framesAccumulated: Int { withStatus { $0.framesAccumulated } }
+
+    var facts: Facts {
+        withStatus { status in
+            Facts(framesSeen: status.framesSeen, framesAccumulated: status.framesAccumulated,
+                  firstFrameDate: status.firstFrameDate, lastFrameDate: status.lastFrameDate,
+                  frameExif: status.frameExif)
+        }
+    }
 
     /// Stop collecting and keep what is there.
     func finishEarly() {
@@ -174,7 +209,8 @@ final class StackedCaptureEngine: @unchecked Sendable {
         return rendered
     }
 
-    private func merge(_ pixelBuffer: CVPixelBuffer) -> (isDone: Bool, report: StackProgress?) {
+    /// `arrival` is when the frame reached the engine, which is when its exposure ended.
+    private func merge(_ pixelBuffer: CVPixelBuffer, arrival: Date, exif: FrameExif?) -> (isDone: Bool, report: StackProgress?) {
         let before = withStatus { $0 }
         if before.isFinished {
             if before.isCancelled { releaseResources() }
@@ -189,10 +225,19 @@ final class StackedCaptureEngine: @unchecked Sendable {
         // finish. Past twice the plan the stack ends with what it has.
         let seenLimit = target > Int.max / 2 ? Int.max : max(target * 2, target + 8)
         let seen = framesSeen
+        let frameSeconds = plan.frameSeconds.isFinite ? max(plan.frameSeconds, 0) : 0
         let after = withStatus { status -> Status in
+            status.framesSeen = seen
             switch outcome {
             case .merged:
                 status.framesAccumulated += 1
+                if status.firstFrameDate == nil {
+                    status.firstFrameDate = arrival.addingTimeInterval(-frameSeconds)
+                }
+                status.lastFrameDate = arrival
+                if status.frameExif == nil {
+                    status.frameExif = exif
+                }
             case .failed(let reason):
                 status.failure = reason
                 status.isFinished = true
@@ -369,6 +414,8 @@ final class StackedCaptureEngine: @unchecked Sendable {
         static let reportInterval: UInt64 = 150_000_000
         static let previewLongSide: CGFloat = 720
         static let gainTolerance = 1e-6
+        /// Merged frames after which a frame's `{Exif}` attachment stops being looked for.
+        static let exifFrames = 3
     }
 
     /// Highlight shoulder, in sRGB-encoded units so the table steps are finer than an 8-bit output step

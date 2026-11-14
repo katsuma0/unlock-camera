@@ -1,14 +1,15 @@
 import SwiftUI
 import CameraCore
 
-/// Grid, level, aspect mask, focus reticle and warning badges over the preview.
+/// Grid, level, focus reticle and warning badges over the picture, above the bands. Laid out in the viewfinder's
+/// screen space; the camera screen hands in where the frame, the picture and the open part of the frame are.
 struct ViewfinderOverlays: View {
-    @Bindable var model: CameraModel
+    let model: CameraModel
+    let geometry: ViewfinderGeometry
+    /// How far the corner badges move down to clear the steady status at the top of the frame.
+    let topShift: CGFloat
 
-    /// Bumped a few times after a mode, video or lens change, because the preview can take a moment to
-    /// report the new format's shape.
-    @State private var measurePass = 0
-    /// A zoom or lens change since the last focus tap moved the picture under the focus point.
+    /// A zoom, lens or picture change since the last focus tap moved the picture under the focus point.
     @State private var focusPointIsStale = false
     /// The focus point the flags around it describe. A model.focusPoint that differs is a tap this view hasn't
     /// caught up with yet (change handlers run after the frame that shows it), so that frame reads the model alone.
@@ -18,19 +19,18 @@ struct ViewfinderOverlays: View {
     @State private var lockIsAtFocusPoint = false
 
     var body: some View {
-        GeometryReader { proxy in
-            let frame = PreviewFrame(size: proxy.size, imageAspect: imageAspect, crop: cropAspect)
-            let square = focusSquare
-            ZStack(alignment: .topLeading) {
-                AspectMask(cropRect: frame.cropRect, isVisible: frame.isCropped)
-                GridLines(style: model.settings.display.grid, rect: frame.cropRect)
-                    .animation(Theme.spring, value: frame.cropRect)
-                LevelIndicator(model: model, center: CGPoint(x: frame.cropRect.midX, y: frame.cropRect.midY))
-                FocusReticleLayer(model: model, size: proxy.size, square: square)
-                StatusBadges(model: model, rect: frame.imageRect, reticleShowsLock: square?.isLocked == true)
-            }
-            .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
+        let frame = geometry.frame
+        let square = focusSquare
+        ZStack(alignment: .topLeading) {
+            GridLines(style: model.settings.display.grid, rect: frame)
+                .frameMotion(value: frame)
+            LevelIndicator(model: model, center: CGPoint(x: frame.midX, y: frame.midY))
+            FocusReticleLayer(model: model, size: geometry.screen.size, origin: geometry.picture.origin,
+                              bounds: geometry.visibleFrame, square: square)
+            StatusBadges(model: model, rect: geometry.open, topShift: topShift,
+                         reticleShowsLock: square?.isLocked == true)
         }
+        .frame(width: geometry.screen.width, height: geometry.screen.height, alignment: .topLeading)
         .allowsHitTesting(false)
         .onChange(of: model.focusPoint, initial: true) { _, point in
             trackedFocusPoint = point
@@ -50,19 +50,10 @@ struct ViewfinderOverlays: View {
         .onChange(of: model.activePresetID) {
             if !focusPointIsStale { focusPointIsStale = true }
         }
-        .task(id: FormatKey(mode: model.settings.mode, video: model.settings.video, lensID: model.settings.lensID)) {
-            for delay: UInt64 in [300_000_000, 600_000_000, 1_200_000_000] {
-                try? await Task.sleep(nanoseconds: delay)
-                guard !Task.isCancelled else { return }
-                measurePass &+= 1
-            }
+        // So does a new picture rect (another aspect ratio, VIDEO): the same point lands somewhere else now.
+        .onChange(of: geometry.picture) {
+            if !focusPointIsStale { focusPointIsStale = true }
         }
-    }
-
-    private struct FormatKey: Equatable {
-        var mode: CaptureMode
-        var video: VideoSettings
-        var lensID: String?
     }
 
     /// Either half of a lock keeps the square: a long press in a scene that fixes the ISO holds the focus alone,
@@ -71,97 +62,13 @@ struct ViewfinderOverlays: View {
         model.aeLocked || model.focusLocked
     }
 
-    /// The focus square to draw, or nil.
+    /// The focus square to draw, or nil. Its point is in the preview layer's coordinates.
     private var focusSquare: FocusSquare? {
         guard let point = model.focusPoint else { return nil }
         // A tap clears the lock and a long press sets it, so a new point that arrives locked is a long press.
         guard point == trackedFocusPoint else { return FocusSquare(point: point, isLocked: isLocked) }
         guard !focusPointIsStale else { return nil }
         return FocusSquare(point: point, isLocked: isLocked && lockIsAtFocusPoint)
-    }
-
-    /// Photos are cropped to the chosen ratio; video keeps the whole frame.
-    private var cropAspect: AspectRatio? {
-        let settings = model.settings
-        return settings.mode == .video ? nil : settings.capture.aspect
-    }
-
-    /// Width over height of the picture inside the preview layer, which letterboxes it (resize aspect).
-    private var imageAspect: CGFloat {
-        // Capabilities are rebuilt after every lens and format change, so reading them here re-measures then;
-        // the measure passes catch a preview that switches over a little later.
-        let capabilities = model.capabilities
-        _ = measurePass
-        if model.sessionState == .running, let measured = Self.measuredAspect(of: model.backend) {
-            return measured
-        }
-        let settings = model.settings
-        return Self.expectedAspect(mode: settings.mode, video: settings.video, capabilities: capabilities, simulated: model.isSimulated)
-    }
-
-    /// Where the sensor's corners land in the layer, straight from the backend, so it follows the active format.
-    private static func measuredAspect(of backend: CameraBackend) -> CGFloat? {
-        guard let first = backend.layerPoint(fromDevicePoint: CGPoint(x: 0, y: 0)),
-              let second = backend.layerPoint(fromDevicePoint: CGPoint(x: 1, y: 1)) else { return nil }
-        let width = abs(second.x - first.x)
-        let height = abs(second.y - first.y)
-        guard width.isFinite, height.isFinite, width > 1, height > 1 else { return nil }
-        let aspect = width / height
-        // The interface is portrait; a landscape answer means the preview rotation isn't applied yet.
-        guard aspect >= 0.4, aspect <= 1 else { return nil }
-        return aspect
-    }
-
-    /// The shape to assume until the backend can say: 4:3 photo formats and 16:9 video formats, upright.
-    private static func expectedAspect(mode: CaptureMode, video: VideoSettings, capabilities: CameraCapabilities, simulated: Bool) -> CGFloat {
-        // The simulated camera renders its 3:4 scene in every mode.
-        guard mode == .video, !simulated else { return 3.0 / 4.0 }
-        let requirement = VideoRequirement(resolution: video.resolution, frameRate: video.frameRate, colorMode: video.colorMode)
-        let size = FormatSelector.bestVideoFormat(for: requirement, among: capabilities.formats)
-            .map { (width: $0.width, height: $0.height) } ?? video.resolution.dimensions
-        let long = Double(max(size.width, size.height))
-        let short = Double(min(size.width, size.height))
-        guard long > 0, short > 0 else { return 3.0 / 4.0 }
-        return CGFloat(short / long)
-    }
-}
-
-// MARK: - Geometry
-
-/// Where the picture and the photo crop sit inside the viewfinder.
-private struct PreviewFrame {
-    let imageRect: CGRect
-    let cropRect: CGRect
-    let isCropped: Bool
-
-    init(size: CGSize, imageAspect: CGFloat, crop: AspectRatio?) {
-        let image = Self.fit(aspect: imageAspect, in: size)
-        var cropped = image
-        if let crop, image.width > 0, image.height > 0 {
-            // The crop's long side runs along the sensor's long axis, vertical in the portrait preview.
-            let unit = crop.normalizedCrop(imageAspect: Double(image.width / image.height))
-            cropped = CGRect(
-                x: image.minX + CGFloat(unit.x) * image.width,
-                y: image.minY + CGFloat(unit.y) * image.height,
-                width: CGFloat(unit.width) * image.width,
-                height: CGFloat(unit.height) * image.height
-            )
-        }
-        imageRect = image
-        cropRect = cropped
-        isCropped = cropped.width < image.width - 0.5 || cropped.height < image.height - 0.5
-    }
-
-    private static func fit(aspect: CGFloat, in size: CGSize) -> CGRect {
-        guard size.width > 0, size.height > 0, aspect.isFinite, aspect > 0 else {
-            return CGRect(origin: .zero, size: size)
-        }
-        if size.width / size.height > aspect {
-            let width = size.height * aspect
-            return CGRect(x: (size.width - width) / 2, y: 0, width: width, height: size.height)
-        }
-        let height = size.width / aspect
-        return CGRect(x: 0, y: (size.height - height) / 2, width: size.width, height: height)
     }
 }
 
@@ -199,60 +106,10 @@ private enum Upright {
     }
 }
 
-// MARK: - Aspect mask
-
-private struct AspectMask: View {
-    let cropRect: CGRect
-    let isVisible: Bool
-    @Environment(\.displayScale) private var displayScale
-
-    var body: some View {
-        ZStack {
-            CropCutout(crop: cropRect)
-                .fill(Theme.maskDim, style: FillStyle(eoFill: true))
-            CropOutline(crop: cropRect)
-                .stroke(Color.white.opacity(0.3), lineWidth: 1 / max(displayScale, 1))
-        }
-        .opacity(isVisible ? 1 : 0)
-        .animation(Theme.spring, value: cropRect)
-        .animation(.easeInOut(duration: 0.25), value: isVisible)
-        .accessibilityHidden(true)
-    }
-}
-
-/// The whole view with the crop cut out (even-odd fill).
-private struct CropCutout: Shape {
-    var crop: CGRect
-
-    var animatableData: AnimatableRect {
-        get { crop.animatableRect }
-        set { crop = CGRect(newValue) }
-    }
-
-    func path(in rect: CGRect) -> Path {
-        var path = Path(rect)
-        path.addRect(crop)
-        return path
-    }
-}
-
-private struct CropOutline: Shape {
-    var crop: CGRect
-
-    var animatableData: AnimatableRect {
-        get { crop.animatableRect }
-        set { crop = CGRect(newValue) }
-    }
-
-    func path(in rect: CGRect) -> Path {
-        Path(crop)
-    }
-}
-
 // MARK: - Grid
 
-/// Hairline composition guides inside the photo crop. Animatable so the lines glide with the mask when
-/// the aspect ratio changes.
+/// Hairline composition guides inside the photo frame. Animatable so the lines glide with the bands when the
+/// aspect ratio changes.
 private struct GridLines: View, Animatable {
     let style: GridStyle
     var rect: CGRect
@@ -351,8 +208,9 @@ private struct LevelIndicator: View {
         let isEnabled = model.settings.display.showLevel
         // A level that is turned off doesn't read the attitude at all, so its many small updates skip this view.
         let motion = isEnabled ? model.motion : MotionState()
-        // Pointing at the floor or the sky there is no horizon to show.
-        let isVisible = isEnabled && abs(motion.pitch) <= 70
+        // Pointing at the floor or the sky there is no horizon to show. During a stack the drift crosses take the
+        // frame's middle, and a level line through them would hide the very cross the status asks to line up.
+        let isVisible = isEnabled && abs(motion.pitch) <= 70 && !model.drift.isTracking
         // A line looks the same turned half way round, so landscape left and right share one base angle. The
         // deviation is measured from the nearest quarter turn of the roll, so the base angle must come from the
         // roll too: the icons' quarter turn is held a little past the diagonal.
@@ -361,6 +219,8 @@ private struct LevelIndicator: View {
             .rotationEffect(.degrees(sideways ? 90 : 0))
             .animation(Theme.spring, value: sideways)
             .position(center)
+            // A new shape moves the frame's middle; the level glides there with the grid.
+            .frameMotion(value: center)
             .opacity(isVisible ? 1 : 0)
             .animation(.easeInOut(duration: 0.2), value: isVisible)
             .accessibilityHidden(true)
@@ -451,6 +311,10 @@ private struct LockWording {
 private struct FocusReticleLayer: View {
     let model: CameraModel
     let size: CGSize
+    /// The preview layer's origin on screen: the model keeps the point in the layer's own coordinates.
+    let origin: CGPoint
+    /// The part of the frame that shows, which the lock label stays inside.
+    let bounds: CGRect
     let square: FocusSquare?
 
     var body: some View {
@@ -458,14 +322,15 @@ private struct FocusReticleLayer: View {
             if let square {
                 // Read only while a square is up, so the attitude's frequent updates cost nothing the rest of the time.
                 let turns = model.motion.quarterTurns
+                let point = CGPoint(x: square.point.x + origin.x, y: square.point.y + origin.y)
                 FocusReticle(
                     isLocked: square.isLocked,
                     lock: LockWording(focus: model.focusLocked, exposure: model.aeLocked, advanced: model.isAdvanced),
                     bias: Self.bias(model),
                     quarterTurns: turns,
-                    labelBelow: labelBelow(square.point, turns: turns)
+                    labelBelow: labelBelow(point, turns: turns)
                 )
-                .position(square.point)
+                .position(point)
                 // Every tap gets a new square, which replays the arrival and restarts the fade in the very frame
                 // the point moves, instead of dragging the old square across first.
                 .id(square.point)
@@ -481,12 +346,13 @@ private struct FocusReticleLayer: View {
         model.settings.mode == .night ? model.settings.night.biasEV : model.settings.manual.bias
     }
 
-    /// The lock label goes above the square in the user's frame, or below it near the edge.
+    /// The lock label goes above the square in the user's frame, or below it near the edge of what shows.
     private func labelBelow(_ point: CGPoint, turns: Int) -> Bool {
         let offset = Upright.screenVector(CGPoint(x: 0, y: -(FocusReticle.side / 2 + 26)), quarterTurns: turns)
         let label = CGPoint(x: point.x + offset.x, y: point.y + offset.y)
         let margin: CGFloat = 8
-        return label.x < margin || label.x > size.width - margin || label.y < margin || label.y > size.height - margin
+        return label.x < bounds.minX + margin || label.x > bounds.maxX - margin
+            || label.y < bounds.minY + margin || label.y > bounds.maxY - margin
     }
 }
 
@@ -518,7 +384,7 @@ private struct FocusReticle: View {
             if isLocked {
                 Text(lock.squareLabel)
                     .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(Color.black)
+                    .foregroundStyle(Theme.onAccent)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 3)
                     .background(Theme.accent, in: Capsule())
@@ -573,11 +439,14 @@ private struct ReticleShape: Shape {
 
 // MARK: - Badges
 
-/// Status badges in the picture's top right corner. Each one turns upright with the phone where it stands,
-/// like the other chips, so nothing moves into the histogram's corner or under the controls.
+/// Status badges in the top right corner of the open part of the frame. Each one turns upright with the phone where
+/// it stands, like the other chips, so nothing moves into the histogram's corner or under the controls.
 private struct StatusBadges: View {
     let model: CameraModel
+    /// The open part of the frame, between the top bar and the controls.
     let rect: CGRect
+    /// The steady status sits at the top of the frame; the column starts under it while it shows.
+    let topShift: CGFloat
     /// The focus square is on screen with its own lock label.
     let reticleShowsLock: Bool
 
@@ -605,12 +474,14 @@ private struct StatusBadges: View {
             ClippingBadge(model: model, quarterTurns: turns)
             SensorBadges(model: model, quarterTurns: turns)
         }
-        .padding(.top, 10)
+        .padding(.top, 10 + topShift)
         .padding(.trailing, 10)
         .frame(width: max(rect.width, 0), height: max(rect.height, 0), alignment: .topTrailing)
         .position(x: rect.midX, y: rect.midY)
+        .frameMotion(value: rect)
         .animation(Theme.snappy, value: stacked)
         .animation(Theme.snappy, value: showsLock)
+        .animation(Theme.spring, value: topShift)
         // The Camera Control overlay takes over the screen; the badges step aside while it shows.
         .opacity(model.controlsFullscreen ? 0 : 1)
         .animation(Theme.snappy, value: model.controlsFullscreen)

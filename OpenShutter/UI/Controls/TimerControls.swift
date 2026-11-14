@@ -48,8 +48,7 @@ struct TimerControls: View {
                 }
             }
         }
-        .tint(Theme.accent)
-        .preferredColorScheme(.dark)
+        .sheetAppearance()
         // Swiping the sheet away would drop the draft without a word; Cancel says it out loud.
         .interactiveDismissDisabled(hasChanges)
     }
@@ -152,13 +151,15 @@ struct TimerControls: View {
             Haptics.tick()
             schedule.delay = preset
         } label: {
+            // The sheet follows the appearance setting, so the chips use the sheet's own text color, and the
+            // accent's partner color on the chosen one.
             Text(title)
                 .font(.subheadline.weight(.semibold))
                 .monospacedDigit()
-                .foregroundStyle(selected ? Color.black : Theme.primaryText)
+                .foregroundStyle(selected ? Theme.onAccent : Color.primary)
                 .frame(maxWidth: .infinity)
                 .frame(height: 32)
-                .background(Capsule().fill(selected ? Theme.accent : Theme.primaryText.opacity(0.12)))
+                .background(Capsule().fill(selected ? Theme.accent : Color.primary.opacity(0.12)))
                 .frame(minHeight: 44)
                 .contentShape(Rectangle())
         }

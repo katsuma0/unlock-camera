@@ -3,6 +3,7 @@ import CoreGraphics
 import CoreVideo
 import ImageIO
 import UniformTypeIdentifiers
+import os
 import CameraCore
 
 struct EncodedImage: @unchecked Sendable {
@@ -13,27 +14,15 @@ struct EncodedImage: @unchecked Sendable {
     var thumbnail: CGImage?
 }
 
-/// EXIF facts for images the app builds itself (stacks, simulator shots).
-struct CaptureMetadata: Sendable {
-    var exposureSeconds: Double
-    var iso: Double
-    var aperture: Double
-    var focalLength35mm: Double?
-    var lensModel: String
-    /// Goes into EXIF UserComment, e.g. "Stacked 30 × 1s, Real".
-    var comment: String?
-    var date: Date
-    var location: LocationStamp?
-}
-
 enum MediaWriter {
-    /// Encodes an upright CGImage as HEIF or JPEG (`.none` is treated as HEIF) with EXIF, TIFF and GPS
-    /// dictionaries from `metadata`. HEIF falls back to JPEG if the encoder is unavailable.
-    static func encode(_ image: CGImage, as format: ProcessedFormat, quality: Double, metadata: CaptureMetadata) throws -> EncodedImage {
+    /// Encodes an upright CGImage as HEIF or JPEG (`.none` is treated as HEIF) with `metadata`: its EXIF, TIFF, GPS
+    /// and IPTC as properties, then its XMP packet merged in without a second encode. HEIF falls back to JPEG if the
+    /// encoder is unavailable.
+    static func encode(_ image: CGImage, as format: ProcessedFormat, quality: Double, metadata: ImageMetadata) throws -> EncodedImage {
         guard image.width > 0, image.height > 0 else {
             throw CameraError.captureFailed("The image is empty.")
         }
-        var options = properties(for: metadata)
+        var options = ImageIOMetadata.properties(metadata)
         options[kCGImageDestinationLossyCompressionQuality] = compressionQuality(quality)
         // Camera originals carry a small preview that file browsers and share sheets show without a full decode.
         options[kCGImageDestinationEmbedThumbnail] = true
@@ -44,13 +33,18 @@ enum MediaWriter {
             // finalize step fails there, and JPEG still gets the shot saved.
             guard let data = write(pixels, as: type, properties: options, auxiliary: []) else { continue }
             return EncodedImage(
-                data: data,
+                data: ImageIOMetadata.addingXMP(to: data, metadata),
                 typeIdentifier: type.identifier,
                 pixelSize: PixelSize(width: image.width, height: image.height),
                 thumbnail: thumbnail(of: image, maxPixelSize: thumbnailPixelSize)
             )
         }
         throw CameraError.captureFailed("The image couldn't be encoded.")
+    }
+
+    /// Whether `image` is drawn in sRGB, which EXIF ColorSpace names; anything else is written as uncalibrated.
+    static func isSRGB(_ image: CGImage) -> Bool {
+        image.colorSpace?.name == CGColorSpace.sRGB
     }
 
     /// Crops encoded photo data (HEIF or JPEG from AVCapturePhoto) to `aspect` in the photo's displayed
@@ -103,9 +97,16 @@ enum MediaWriter {
         var exif = properties[kCGImagePropertyExifDictionary] as? [CFString: Any] ?? [:]
         exif[kCGImagePropertyExifPixelXDimension] = cropped.width
         exif[kCGImagePropertyExifPixelYDimension] = cropped.height
-        // The subject area and location are given in uncropped pixel coordinates and would point at the wrong place.
-        exif.removeValue(forKey: kCGImagePropertyExifSubjectArea)
-        exif.removeValue(forKey: kCGImagePropertyExifSubjectLocation)
+        // The subject is given in the uncropped frame's stored pixels; it moves with the crop, or goes when it falls
+        // outside it.
+        let cut = CropRect(x: Double(rect.minX), y: Double(rect.minY), width: Double(rect.width), height: Double(rect.height))
+        for key in [kCGImagePropertyExifSubjectArea, kCGImagePropertyExifSubjectLocation] {
+            if let area = integers(exif[key]), let moved = ExifFormat.subjectArea(area, croppedTo: cut) {
+                exif[key] = moved
+            } else {
+                exif.removeValue(forKey: key)
+            }
+        }
         output[kCGImagePropertyExifDictionary] = exif
         output[kCGImageDestinationLossyCompressionQuality] = compressionQuality(quality)
         // The camera's embedded preview showed the uncropped frame and is not carried over; this writes a new one.
@@ -128,6 +129,10 @@ enum MediaWriter {
             let encoded = write(cropped, as: type, properties: output, auxiliary: gainMaps)
                 ?? (gainMaps.isEmpty ? nil : write(cropped, as: type, properties: output, auxiliary: []))
             guard let encoded else { continue }
+            if properties[kCGImagePropertyMakerAppleDictionary] != nil, !hasMakerNote(encoded) {
+                // It holds the Live Photo pairing and the HDR headroom; a phone check tells whether this happens.
+                log.error("The cropped photo lost its maker note")
+            }
             let photo = displayedSize(width: image.width, height: image.height, orientation: orientation)
             return EncodedImage(
                 data: encoded,
@@ -166,55 +171,6 @@ enum MediaWriter {
         drawThumbnail(image, orientation: .up, maxPixelSize: maxPixelSize)
     }
 
-    /// ImageIO property dictionary (EXIF, TIFF, GPS) for `metadata`.
-    static func properties(for metadata: CaptureMetadata) -> [CFString: Any] {
-        let localTime = exifDate(metadata.date, timeZone: .current)
-        var exif: [CFString: Any] = [
-            kCGImagePropertyExifDateTimeOriginal: localTime,
-            kCGImagePropertyExifDateTimeDigitized: localTime,
-            kCGImagePropertyExifOffsetTimeOriginal: utcOffset(for: metadata.date),
-            kCGImagePropertyExifOffsetTimeDigitized: utcOffset(for: metadata.date),
-        ]
-        if isPositive(metadata.exposureSeconds) {
-            exif[kCGImagePropertyExifExposureTime] = metadata.exposureSeconds
-            // APEX values let viewers that ignore ExposureTime show the shutter too.
-            exif[kCGImagePropertyExifShutterSpeedValue] = -log2(metadata.exposureSeconds)
-        }
-        if isPositive(metadata.iso) {
-            exif[kCGImagePropertyExifISOSpeedRatings] = [Int(min(metadata.iso, 1_000_000).rounded())]
-        }
-        if isPositive(metadata.aperture) {
-            exif[kCGImagePropertyExifFNumber] = metadata.aperture
-            exif[kCGImagePropertyExifApertureValue] = 2 * log2(metadata.aperture)
-        }
-        if let focal = metadata.focalLength35mm, isPositive(focal) {
-            exif[kCGImagePropertyExifFocalLenIn35mmFilm] = Int(min(focal, 100_000).rounded())
-        }
-        if !metadata.lensModel.isEmpty {
-            exif[kCGImagePropertyExifLensMake] = "Apple"
-            exif[kCGImagePropertyExifLensModel] = metadata.lensModel
-        }
-        if let comment = metadata.comment, !comment.isEmpty {
-            exif[kCGImagePropertyExifUserComment] = comment
-        }
-
-        let tiff: [CFString: Any] = [
-            kCGImagePropertyTIFFMake: "Apple",
-            kCGImagePropertyTIFFSoftware: "Open Shutter",
-            kCGImagePropertyTIFFOrientation: 1,
-            kCGImagePropertyTIFFDateTime: localTime,
-        ]
-        var result: [CFString: Any] = [
-            kCGImagePropertyExifDictionary: exif,
-            kCGImagePropertyTIFFDictionary: tiff,
-            kCGImagePropertyOrientation: 1,
-        ]
-        if let location = metadata.location, let gps = gpsDictionary(location) {
-            result[kCGImagePropertyGPSDictionary] = gps
-        }
-        return result
-    }
-
     /// "1/250 · ISO 100 · ƒ/1.8".
     static func summary(exposureSeconds: Double, iso: Double, aperture: Double) -> String {
         // A value the source didn't record is left out rather than shown as "ISO 0".
@@ -229,6 +185,22 @@ enum MediaWriter {
 
     /// Long side of the thumbnails attached to results; sharp in the review grid at 3x.
     private static let thumbnailPixelSize = 400
+
+    private static let log = Logger(subsystem: "ca.katsuma.openshutter", category: "Metadata")
+
+    private static func integers(_ value: Any?) -> [Int]? {
+        guard let numbers = value as? [NSNumber], !numbers.isEmpty else { return nil }
+        return numbers.map(\.intValue)
+    }
+
+    private static func hasMakerNote(_ data: Data) -> Bool {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil), CGImageSourceGetCount(source) > 0 else {
+            return false
+        }
+        let properties = CGImageSourceCopyPropertiesAtIndex(source, CGImageSourceGetPrimaryImageIndex(source), nil)
+            as? [CFString: Any]
+        return properties?[kCGImagePropertyMakerAppleDictionary] != nil
+    }
 
     private static func isPositive(_ value: Double) -> Bool {
         value.isFinite && value > 0
@@ -452,48 +424,5 @@ enum MediaWriter {
         case kCVPixelFormatType_128RGBAFloat: return 16
         default: return nil
         }
-    }
-
-    private static func gpsDictionary(_ location: LocationStamp) -> [CFString: Any]? {
-        guard location.latitude.isFinite, location.longitude.isFinite,
-              abs(location.latitude) <= 90, abs(location.longitude) <= 180 else { return nil }
-        let utc = TimeZone(identifier: "UTC") ?? TimeZone(secondsFromGMT: 0) ?? .current
-        let stamp = exifDate(location.timestamp, timeZone: utc)
-        let parts = stamp.split(separator: " ")
-        var gps: [CFString: Any] = [
-            kCGImagePropertyGPSLatitude: abs(location.latitude),
-            kCGImagePropertyGPSLatitudeRef: location.latitude >= 0 ? "N" : "S",
-            kCGImagePropertyGPSLongitude: abs(location.longitude),
-            kCGImagePropertyGPSLongitudeRef: location.longitude >= 0 ? "E" : "W",
-        ]
-        if parts.count == 2 {
-            gps[kCGImagePropertyGPSDateStamp] = String(parts[0])
-            gps[kCGImagePropertyGPSTimeStamp] = String(parts[1])
-        }
-        if location.altitude.isFinite {
-            gps[kCGImagePropertyGPSAltitude] = abs(location.altitude)
-            gps[kCGImagePropertyGPSAltitudeRef] = location.altitude >= 0 ? 0 : 1
-        }
-        if location.horizontalAccuracy.isFinite, location.horizontalAccuracy >= 0 {
-            gps[kCGImagePropertyGPSHPositioningError] = location.horizontalAccuracy
-        }
-        return gps
-    }
-
-    /// "yyyy:MM:dd HH:mm:ss" as EXIF wants it, built from calendar fields so no shared formatter is needed
-    /// across the capture queues.
-    private static func exifDate(_ date: Date, timeZone: TimeZone) -> String {
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = timeZone
-        let c = calendar.dateComponents([.year, .month, .day, .hour, .minute, .second], from: date)
-        return String(format: "%04ld:%02ld:%02ld %02ld:%02ld:%02ld",
-                      c.year ?? 1970, c.month ?? 1, c.day ?? 1, c.hour ?? 0, c.minute ?? 0, c.second ?? 0)
-    }
-
-    /// "+01:00": EXIF stores local time, and this says which zone it was.
-    private static func utcOffset(for date: Date) -> String {
-        let seconds = TimeZone.current.secondsFromGMT(for: date)
-        let minutes = abs(seconds) / 60
-        return (seconds < 0 ? "-" : "+") + String(format: "%02ld:%02ld", minutes / 60, minutes % 60)
     }
 }

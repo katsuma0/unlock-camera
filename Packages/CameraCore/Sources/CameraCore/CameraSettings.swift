@@ -365,7 +365,9 @@ public struct CaptureOptions: Codable, Hashable, Sendable {
     public var resolution: PhotoResolution = .automatic
     public var processing: ProcessingLevel = .balanced
     public var flash: FlashSetting = .off
-    public var aspect: AspectRatio = .fourThree
+    /// Fresh settings frame 16:9, which spans the width of the screen as in Apple's Camera. Every save carries the
+    /// shape it had, so saved settings keep theirs.
+    public var aspect: AspectRatio = .sixteenNine
     public var livePhoto: Bool = false
     public var silentShutter: Bool = false
     public var depth: Bool = false
@@ -376,6 +378,13 @@ public struct CaptureOptions: Codable, Hashable, Sendable {
     public var saveLocation: Bool = false
     public var schedule: CaptureSchedule = .off
     public var bracket: BracketPlan = .off
+    /// Lets the camera lower the quality of photos taken in quick succession so it keeps up, where the camera
+    /// supports it: a slightly softer photo instead of a missed moment.
+    public var prioritizeSpeed: Bool = false
+    /// The person's name for every file (EXIF Artist, XMP dc:creator). Empty writes nothing.
+    public var artist: String = ""
+    /// A copyright line for every file (EXIF Copyright, XMP dc:rights). Empty writes nothing.
+    public var copyright: String = ""
 
     public init() {}
 
@@ -385,6 +394,7 @@ public struct CaptureOptions: Codable, Hashable, Sendable {
     enum CodingKeys: String, CodingKey {
         case processedFormat, rawFormat, quality, resolution, processing, flash, aspect, livePhoto, silentShutter, depth
         case constantColor, lensCorrection, mirrorFront, saveLocation, schedule, bracket
+        case prioritizeSpeed, artist, copyright
     }
 
     public init(from decoder: Decoder) throws {
@@ -406,6 +416,9 @@ public struct CaptureOptions: Codable, Hashable, Sendable {
         saveLocation = c.value(.saveLocation, default: d.saveLocation)
         schedule = c.value(.schedule, default: d.schedule)
         bracket = c.value(.bracket, default: d.bracket)
+        prioritizeSpeed = c.value(.prioritizeSpeed, default: d.prioritizeSpeed)
+        artist = c.value(.artist, default: d.artist)
+        copyright = c.value(.copyright, default: d.copyright)
         if !isValid { processedFormat = .heif }
     }
 }
@@ -476,11 +489,15 @@ public struct DisplaySettings: Codable, Hashable, Sendable {
     public var falseColor: Bool = false
     public var showReadout: Bool = true
     public var clippingWarnings: Bool = true
+    /// Battery saver: darkens the screen during night and long exposure shots of 10 seconds or more once the phone
+    /// is steady. Off by default, since a screen that goes black by itself surprises someone watching the shot.
+    public var dimDuringLongShots: Bool = false
 
     public init() {}
 
     enum CodingKeys: String, CodingKey {
         case grid, showLevel, histogram, zebras, zebraThreshold, peaking, peakingColor, peakingSensitivity, falseColor, showReadout, clippingWarnings
+        case dimDuringLongShots
     }
 
     public init(from decoder: Decoder) throws {
@@ -497,6 +514,7 @@ public struct DisplaySettings: Codable, Hashable, Sendable {
         falseColor = c.value(.falseColor, default: d.falseColor)
         showReadout = c.value(.showReadout, default: d.showReadout)
         clippingWarnings = c.value(.clippingWarnings, default: d.clippingWarnings)
+        dimDuringLongShots = c.value(.dimDuringLongShots, default: d.dimDuringLongShots)
     }
 }
 
@@ -591,11 +609,15 @@ public struct VideoSettings: Codable, Hashable, Sendable {
     public var lowLightNoiseReduction: Bool = false
     /// Show shutter as an angle (180°) instead of a fraction while filming.
     public var showShutterAngle: Bool = true
+    /// Music and other apps keep playing while filming. Off, as the camera has always worked, stops them while it
+    /// records sound.
+    public var allowAudioPlayback: Bool = false
 
     public init() {}
 
     enum CodingKeys: String, CodingKey {
         case resolution, frameRate, codec, colorMode, stabilization, audio, windNoiseReduction, lowLightNoiseReduction, showShutterAngle
+        case allowAudioPlayback
     }
 
     public init(from decoder: Decoder) throws {
@@ -610,20 +632,36 @@ public struct VideoSettings: Codable, Hashable, Sendable {
         windNoiseReduction = c.value(.windNoiseReduction, default: d.windNoiseReduction)
         lowLightNoiseReduction = c.value(.lowLightNoiseReduction, default: d.lowLightNoiseReduction)
         showShutterAngle = c.value(.showShutterAngle, default: d.showShutterAngle)
+        allowAudioPlayback = c.value(.allowAudioPlayback, default: d.allowAudioPlayback)
     }
 }
 
 public struct ControlOptions: Codable, Hashable, Sendable {
-    /// Volume buttons and the Camera Control press take the photo.
+    /// The volume buttons and a Camera Control click act in the camera, as the two actions below say. Off gives them
+    /// back to iOS: iOS has one switch for all of them, so the app can't keep one button and release another.
     public var volumeShutter: Bool = true
     public var cameraControlItems: [CameraControlItem] = CameraControlItem.defaultSelection
     public var haptics: Bool = true
     /// Pinching past a lens switches to the next one, like the Camera app.
     public var autoLensSwitching: Bool = true
+    /// Volume up, the capture interaction's secondary event. Both default to the shutter, as both always were.
+    public var volumeUpAction: HardwareButtonAction = .shutter
+    /// Volume down, the primary event, which a Camera Control click and an AirPods click arrive as too, so they do
+    /// the same. Which press raises which event is for a phone to confirm.
+    public var volumeDownAction: HardwareButtonAction = .shutter
+    /// How firm the taps are while `haptics` is on.
+    public var hapticStrength: HapticStrength = .normal
+    /// The selection ticks of dials, the mode carousel, menus and the level.
+    public var dialTicks: Bool = true
+    /// Where the zoom ticks as it turns.
+    public var zoomTicks: ZoomTickStyle = .everyStep
 
     public init() {}
 
-    enum CodingKeys: String, CodingKey { case volumeShutter, cameraControlItems, haptics, autoLensSwitching }
+    enum CodingKeys: String, CodingKey {
+        case volumeShutter, cameraControlItems, haptics, autoLensSwitching
+        case volumeUpAction, volumeDownAction, hapticStrength, dialTicks, zoomTicks
+    }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -632,6 +670,11 @@ public struct ControlOptions: Codable, Hashable, Sendable {
         cameraControlItems = c.value(.cameraControlItems, default: d.cameraControlItems)
         haptics = c.value(.haptics, default: d.haptics)
         autoLensSwitching = c.value(.autoLensSwitching, default: d.autoLensSwitching)
+        volumeUpAction = c.value(.volumeUpAction, default: d.volumeUpAction)
+        volumeDownAction = c.value(.volumeDownAction, default: d.volumeDownAction)
+        hapticStrength = c.value(.hapticStrength, default: d.hapticStrength)
+        dialTicks = c.value(.dialTicks, default: d.dialTicks)
+        zoomTicks = c.value(.zoomTicks, default: d.zoomTicks)
     }
 }
 
@@ -670,6 +713,13 @@ public struct CameraSettings: Codable, Hashable, Sendable {
     public var video: VideoSettings = .init()
     public var controls: ControlOptions = .init()
     public var interface: InterfaceOptions = .init()
+    /// The look of Settings and the lists it leads to, and the accent color everywhere.
+    public var appearance: AppearanceOptions = .init()
+    public var accessibility: AccessibilityOptions = .init()
+    /// The top bar's own buttons. Not in `display`: a change there re-runs the viewfinder's analysis.
+    public var topBar: TopBarOptions = .init()
+    /// What the camera keeps from last time when it opens.
+    public var startup: StartupOptions = .init()
 
     public init() {}
 
@@ -677,7 +727,7 @@ public struct CameraSettings: Codable, Hashable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case mode, lensID, zoom, manual, whiteBalance, focus, capture, exposure, focusOptions, display, night, longExposure, video, controls
-        case interface
+        case interface, appearance, accessibility, topBar, startup
     }
 
     public init(from decoder: Decoder) throws {
@@ -698,6 +748,10 @@ public struct CameraSettings: Codable, Hashable, Sendable {
         video = c.value(.video, default: d.video)
         controls = c.value(.controls, default: d.controls)
         interface = c.value(.interface, default: d.interface)
+        appearance = c.value(.appearance, default: d.appearance)
+        accessibility = c.value(.accessibility, default: d.accessibility)
+        topBar = c.value(.topBar, default: d.topBar)
+        startup = c.value(.startup, default: d.startup)
     }
 
     public func encoded() throws -> Data {

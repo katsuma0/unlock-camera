@@ -87,7 +87,7 @@ struct PermissionView: View {
                 HStack(spacing: 8) {
                     if isRequesting {
                         ProgressView()
-                            .tint(Color.black)
+                            .tint(Theme.onAccent)
                     }
                     Text("Allow Camera")
                 }
@@ -149,7 +149,7 @@ private struct ProminentCapsuleStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.headline)
-            .foregroundStyle(Color.black)
+            .foregroundStyle(Theme.onAccent)
             .frame(maxWidth: .infinity, minHeight: 50)
             .background(Theme.accent.opacity(isEnabled ? 1 : 0.6), in: Capsule())
             .scaleEffect(configuration.isPressed ? 0.97 : 1)

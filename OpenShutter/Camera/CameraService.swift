@@ -282,10 +282,10 @@ final class CameraService: NSObject, CameraBackend, @unchecked Sendable {
         }
     }
 
-    @MainActor func setZoomFactor(_ factor: Double, animated: Bool) {
+    @MainActor func setZoomFactor(_ factor: Double, rampRate: Double?) {
         sessionQueue.async {
             self.zoomTarget = factor
-            self.applyZoom(animated: animated)
+            self.applyZoom(rate: rampRate.map { Float($0) })
         }
     }
 
@@ -563,7 +563,22 @@ extension CameraService {
         }
         startReadings()
         refreshCapabilities()
+        resolveDeviceModel()
         publishSnapshot(state: currentState(), forceState: true, then: completion)
+    }
+
+    /// iOS 26 recommends movie metadata that names the phone as Apple does ("iPhone 16 Pro"), which stacks and movies
+    /// write as their model. It describes the running session, so it is read once that runs.
+    nonisolated private func resolveDeviceModel() {
+        #if compiler(>=6.2)
+        if #available(iOS 26.0, *), DeviceIdentityResolver.shared.wantsRecommendedModel, session.isRunning,
+           session.outputs.contains(videoDataOutput),
+           // It raises for a codec the output doesn't list for movies.
+           videoDataOutput.availableVideoCodecTypesForAssetWriter(writingTo: .mov).contains(.hevc),
+           let items = videoDataOutput.recommendedMovieMetadata(forVideoCodecType: .hevc, assetWriterOutputFileType: .mov) {
+            DeviceIdentityResolver.shared.learn(recommendedMetadata: items)
+        }
+        #endif
     }
 
     /// First-time topology: the camera, the photo output and the video data output, with the `.photo` preset
@@ -587,7 +602,7 @@ extension CameraService {
         session.commitConfiguration()
         activeCamera = camera
         observeDevice(camera.device)
-        applyZoom(animated: false)
+        applyZoom(rate: nil)
         return true
     }
 
@@ -709,7 +724,7 @@ extension CameraService {
         }
         if camera.lens.id == activeCamera?.lens.id {
             zoomTarget = preset.zoomFactor
-            applyZoom(animated: true)
+            applyZoom(rate: Self.zoomRampRate)
         } else if stackJob == nil, !recorder.isRecording {
             switchCamera(to: camera, zoomFactor: preset.zoomFactor)
         }
@@ -781,7 +796,7 @@ extension CameraService {
         applyFocus()
         applyWhiteBalance()
         applyTorch()
-        applyZoom(animated: false)
+        applyZoom(rate: nil)
         installedControls = nil
         installCameraControls()
         refreshCapabilities()
@@ -1113,6 +1128,9 @@ extension CameraService {
             if let engine = job.engine, job.phase == .collecting {
                 engine.finishEarly()
                 finishStack(job)
+                // Said before the restart: a restart that works publishes only .running, which the model already
+                // has, so without this it would go on asking to keep still while the picture is put together.
+                publishState(.interrupted("The camera stopped, so the shot ends with the frames it has."))
             } else if job.phase == .settingExposure {
                 endStack(job, result: .failure(CameraError.captureFailed(message ?? "The camera stopped unexpectedly.")))
             }
@@ -1278,18 +1296,42 @@ extension CameraService {
             connection.automaticallyAdjustsVideoMirroring = false
             connection.isVideoMirrored = camera.lens.isFront && mirrorFront
         }
+        // Read now: a zoom still ramping is recorded as it was at the press.
+        let zoomFactor = Double(device.videoZoomFactor)
+        let described = RecordedShot.context(of: request, displayZoom: zoomFactor * camera.lens.relativeZoom)
+        var shot = RecordedShot(
+            record: ShotRecord(source: .camera, context: described.context, device: DeviceIdentityResolver.shared.identity,
+                               lens: LensRecord(camera.lens, zoomFactor: zoomFactor, hasFlash: device.hasFlash),
+                               exposure: Self.currentExposure(of: device) ?? ExposureValues(seconds: 0, iso: 0, aperture: 0),
+                               date: Date()),
+            knownFields: described.knownFields
+        )
         let settings: AVCapturePhotoSettings
         do {
-            settings = try PhotoCaptureCoordinator.makeSettings(for: request, output: photoOutput, capabilities: sessionCapabilities)
+            settings = try PhotoCaptureCoordinator.makeSettings(for: request, shot: shot, output: photoOutput,
+                                                                capabilities: sessionCapabilities)
         } catch {
             completion(.failure(error))
             return
         }
+        // The output can take fewer frames than the bracket asked for; the files count the ones it took.
+        if let bracket = settings as? AVCapturePhotoBracketSettings, var position = shot.record.context.bracket,
+           position.kind == .exposure {
+            position.count = bracket.bracketedSettings.count
+            shot.record.context.bracket = position
+        }
+        // The settings leave out what the camera can't do with this shot right now (a Live movie beside RAW, constant
+        // color or a bracket, a flash on a lens without one, the processing asked for under Bayer RAW and brackets),
+        // and the files say what it took. A bracket takes no flash mode at all, so its files name none.
+        shot.record.context.livePhoto = settings.livePhotoMovieFileURL != nil
+        shot.record.context.processing = PhotoCaptureCoordinator.processingLevel(of: settings.photoQualityPrioritization)
+        shot.record.context.flash = settings is AVCapturePhotoBracketSettings
+            ? nil
+            : PhotoCaptureCoordinator.flashSetting(of: settings.flashMode)
         let id = settings.uniqueID
         let coordinator = PhotoCaptureCoordinator(
             request: request,
-            lensName: camera.lens.name,
-            focalLength35mm: camera.lens.equivalentFocalLength * Double(device.videoZoomFactor),
+            shot: shot,
             willCapture: { [weak self] in
                 guard let self else { return }
                 self.delegate?.cameraBackendWillCapture(self)
@@ -1342,7 +1384,7 @@ extension CameraService {
         // device reports that stack's frame.
         let lockSettled = exposureRequest.aeLocked && camera.device.exposureMode != .autoExpose && !meteringPointPending
         let job = StackJob(request: request, orientation: orientation, progress: progress, completion: completion,
-                           lens: camera.lens, zoomFactor: Double(camera.device.videoZoomFactor),
+                           shot: stackShot(request, camera: camera),
                            exposureBefore: restoreTarget ?? Self.currentExposure(of: camera.device), wasAELocked: lockSettled)
         stackJob = job
         // The preview's longer exposure may have left the frame stretched, and the stack would get one frame per
@@ -1368,6 +1410,31 @@ extension CameraService {
         sessionQueue.asyncAfter(deadline: .now() + patience) { [weak self] in
             self?.stackExposureReady(id, syncTime: .invalid)
         }
+    }
+
+    /// What the stack's file will say, as far as the press knows it: the context, the phone, the lens at its zoom,
+    /// and the frame exposure as the device will run it (applyStackExposure clamps the same way). Frames that report
+    /// their own exposure replace it when the photo is made.
+    nonisolated private func stackShot(_ request: StackRequest, camera: DeviceCatalog.Camera) -> RecordedShot {
+        let device = camera.device
+        let format = device.activeFormat
+        let plan = request.plan
+        let zoomFactor = Double(device.videoZoomFactor)
+        let seconds = Self.clampedDuration(plan.frameSeconds, in: format)?.seconds ?? plan.frameSeconds
+        var aperture = Double(device.lensAperture)
+        #if compiler(>=6.4)
+        if #available(iOS 27.0, *), CapabilitiesBuilder.apertureInfo(device: device, format: format).variable,
+           let fNumber = Self.clampedAperture(plan.aperture, in: format) {
+            aperture = Double(fNumber)
+        }
+        #endif
+        let frame = ExposureValues(seconds: seconds, iso: Double(Self.clampedISO(plan.iso, in: format)), aperture: aperture)
+        let described = RecordedShot.context(of: request, displayZoom: zoomFactor * camera.lens.relativeZoom)
+        let record = ShotRecord(source: .rendered, context: described.context,
+                                device: DeviceIdentityResolver.shared.identity,
+                                lens: LensRecord(camera.lens, zoomFactor: zoomFactor, hasFlash: device.hasFlash),
+                                exposure: frame, date: Date())
+        return RecordedShot(record: record, knownFields: described.knownFields)
     }
 
     /// The device confirmed the stack exposure; frames from `syncTime` on carry it.
@@ -1513,10 +1580,9 @@ extension CameraService {
         if job.cancelRequested || engine.isCancelled {
             completeMerge(job, engine: engine, result: .failure(CameraError.cancelled))
         } else {
-            let frames = engine.framesAccumulated
-            let date = Date()
+            let facts = engine.facts
             DispatchQueue.main.async {
-                self.mergeWhenActive(job, engine: engine, frames: frames, date: date, earlierFailure: nil)
+                self.mergeWhenActive(job, engine: engine, facts: facts, earlierFailure: nil)
             }
         }
         // Only now: going back to preview-sized frames rebuilds the pipeline, and the merge needn't wait for that.
@@ -1577,19 +1643,19 @@ extension CameraService {
         // A zoom asked for during the stack goes on now. Otherwise the zoom stays where it is, which may be where
         // the Camera Control's system zoom slider put it.
         if zoomTarget != appliedZoomTarget {
-            applyZoom(animated: false)
+            applyZoom(rate: nil)
         }
     }
 
     /// A background app gets no GPU time, so the merge waits for the app to be active; the frames stay in memory.
-    @MainActor private func mergeWhenActive(_ job: StackJob, engine: StackedCaptureEngine, frames: Int, date: Date,
+    @MainActor private func mergeWhenActive(_ job: StackJob, engine: StackedCaptureEngine, facts: StackedCaptureEngine.Facts,
                                             earlierFailure: Error?) {
         let merge: @MainActor () -> Void = { [weak self] in
             // The task captureStack began may have run out while the app was away, and leaving again mid-merge must
             // still let the merge and the save finish. captureStack ends it once the result is back.
             self?.beginStackBackgroundTask()
             self?.renderQueue.async {
-                self?.renderStack(job, engine: engine, frames: frames, date: date, earlierFailure: earlierFailure)
+                self?.renderStack(job, engine: engine, facts: facts, earlierFailure: earlierFailure)
             }
         }
         if UIApplication.shared.applicationState == .active {
@@ -1610,14 +1676,17 @@ extension CameraService {
         job.complete(result)
     }
 
-    /// Render queue: merge, encode, save. `date` is when the stack ended, which can be well before a merge put off
-    /// while the app was away. `earlierFailure` marks the second try of a merge that failed.
-    nonisolated private func renderStack(_ job: StackJob, engine: StackedCaptureEngine, frames: Int, date: Date,
+    /// Render queue: merge, encode, save. `facts` are what the engine recorded when the stack ended, which can be well
+    /// before a merge put off while the app was away. `earlierFailure` marks the second try of a merge that failed.
+    nonisolated private func renderStack(_ job: StackJob, engine: StackedCaptureEngine, facts: StackedCaptureEngine.Facts,
                                          earlierFailure: Error?) {
         let request = job.request
+        let frames = facts.framesAccumulated
         var captured = request.plan
-        // A bulb or an early stop exposed fewer frames than planned; the metadata says what really happened.
+        // A bulb or an early stop exposed fewer frames than planned; the summary says what really happened.
         captured.frameCount = max(1, frames)
+        // A stack is taken when its first frame was, however long it ran.
+        let date = facts.firstFrameDate ?? job.shot.record.date
         let image: CGImage
         do {
             image = try engine.renderFinal(aspect: request.aspect, noiseReduction: request.noiseReduction)
@@ -1632,7 +1701,7 @@ extension CameraService {
             // a repeat would.
             if earlierFailure == nil {
                 DispatchQueue.main.async {
-                    self.mergeWhenActive(job, engine: engine, frames: frames, date: date, earlierFailure: error)
+                    self.mergeWhenActive(job, engine: engine, facts: facts, earlierFailure: error)
                 }
                 return
             }
@@ -1641,20 +1710,11 @@ extension CameraService {
             completeMerge(job, engine: engine, result: .failure(earlierFailure ?? error))
             return
         }
+        let shot = renderedShot(job, facts: facts, image: image)
         let encoded: EncodedImage
         do {
-            let metadata = CaptureMetadata(
-                exposureSeconds: captured.effectiveExposureSeconds,
-                iso: captured.iso,
-                aperture: captured.aperture,
-                focalLength35mm: job.lens.equivalentFocalLength * job.zoomFactor,
-                lensModel: job.lens.name,
-                comment: "Stacked \(frames) \u{00D7} \(ShutterSpeed(seconds: captured.frameSeconds).label), \(captured.blend.title)",
-                date: date,
-                location: request.location
-            )
             let format: ProcessedFormat = request.processedFormat == .none ? .heif : request.processedFormat
-            encoded = try MediaWriter.encode(image, as: format, quality: request.quality, metadata: metadata)
+            encoded = try MediaWriter.encode(image, as: format, quality: request.quality, metadata: shot.rendered)
         } catch {
             completeMerge(job, engine: engine, result: .failure(error))
             return
@@ -1671,7 +1731,8 @@ extension CameraService {
             var saved = false
             do {
                 identifier = try await PhotoLibrary.savePhoto(primary: encoded.data, primaryType: encoded.typeIdentifier,
-                                                              raw: nil, livePhotoMovie: nil, location: request.location)
+                                                              raw: nil, livePhotoMovie: nil, location: shot.assetLocation,
+                                                              creationDate: date, isCapture: true)
                 saved = true
             } catch {
                 // The result still reaches the model, which tells the person the photo wasn't saved.
@@ -1682,6 +1743,41 @@ extension CameraService {
                 summary: summary, date: date, savedToLibrary: saved
             )))
         }
+    }
+
+    /// The stack's file as it was really taken: the frames' own exposure and lens where they reported it, what the
+    /// engine counted, and the first and last frame's times.
+    nonisolated private func renderedShot(_ job: StackJob, facts: StackedCaptureEngine.Facts, image: CGImage) -> RecordedShot {
+        let request = job.request
+        let frame = facts.frameExif
+        DeviceIdentityResolver.shared.learn(lensModel: frame?.lensModel)
+        var shot = job.shot
+        let planned = shot.record.exposure
+        shot.record.device = DeviceIdentityResolver.shared.identity
+        shot.record.exposure = ExposureValues(seconds: frame?.exposureSeconds ?? planned.seconds,
+                                              iso: frame?.iso ?? planned.iso,
+                                              aperture: frame?.fNumber ?? planned.aperture)
+        shot.record.brightness = frame?.brightness
+        if let frame {
+            shot.record.lens.make = frame.lensMake ?? shot.record.lens.make
+            shot.record.lens.model = frame.lensModel
+            shot.record.lens.focalLength = frame.focalLength
+            shot.record.lens.specification = frame.lensSpecification
+        }
+        shot.record.stack = StackRecord(
+            plan: request.plan, framesSeen: max(facts.framesSeen, facts.framesAccumulated),
+            framesUsed: facts.framesAccumulated, bulb: request.isBulb,
+            noiseReduction: request.plan.purpose == .night ? request.noiseReduction : nil,
+            captureSeconds: facts.captureSeconds
+        )
+        shot.record.date = facts.firstFrameDate ?? shot.record.date
+        shot.record.endDate = facts.lastFrameDate
+        shot.record.writtenDate = Date()
+        shot.record.timeZone = .current
+        shot.record.pixelWidth = image.width
+        shot.record.pixelHeight = image.height
+        shot.record.isSRGB = MediaWriter.isSRGB(image)
+        return shot
     }
 }
 
@@ -1713,7 +1809,8 @@ extension CameraService {
         if !session.outputs.contains(recorder.output), session.canAddOutput(recorder.output) {
             session.addOutput(recorder.output)
         }
-        setAudioInput(enabled: audio, windNoiseReduction: settings.windNoiseReduction)
+        setAudioInput(enabled: audio, windNoiseReduction: settings.windNoiseReduction,
+                      mixesWithOthers: settings.allowAudioPlayback)
         selectVideoPixelFormat()
         configureVideoDataConnection()
         session.commitConfiguration()
@@ -1850,8 +1947,24 @@ extension CameraService {
         }
     }
 
-    /// Inside begin/commitConfiguration.
-    nonisolated private func setAudioInput(enabled: Bool, windNoiseReduction: Bool = false) {
+    /// Inside begin/commitConfiguration. `mixesWithOthers` lets music and other apps keep playing while filming; nil
+    /// leaves the session as it is.
+    nonisolated private func setAudioInput(enabled: Bool, windNoiseReduction: Bool = false, mixesWithOthers: Bool? = nil) {
+        if let mixesWithOthers, session.configuresApplicationAudioSessionToMixWithOthers != mixesWithOthers {
+            session.configuresApplicationAudioSessionToMixWithOthers = mixesWithOthers
+            // The session sets up the app's audio session as the microphone joins, so a microphone already in goes
+            // out and back in for the change to count.
+            if let input = audioInput {
+                session.removeInput(input)
+                audioInput = nil
+            }
+        }
+        #if compiler(>=6.2)
+        // Lets AirPods that support it be picked as a high quality microphone for movies, as in Apple's Camera.
+        if #available(iOS 26.0, *), enabled, !session.configuresApplicationAudioSessionForBluetoothHighQualityRecording {
+            session.configuresApplicationAudioSessionForBluetoothHighQualityRecording = true
+        }
+        #endif
         if enabled {
             if audioInput == nil {
                 guard let microphone = AVCaptureDevice.default(for: .audio),
@@ -1884,10 +1997,38 @@ extension CameraService {
             throw CameraError.captureFailed("Video isn't ready yet.")
         }
         guard !recorder.isRecording, !recorder.output.isRecording else { throw CameraError.busy }
-        recorder.start(rotationAngle: rotationAngle, location: request.location) { [weak self] result in
+        recorder.start(rotationAngle: rotationAngle, shot: movieShot(request)) { [weak self] result in
             self?.recordingFinished(result, generation: generation)
         }
         startRecordingTimer()
+    }
+
+    /// The movie's metadata as it starts: the context with the format the camera really records, the phone, the
+    /// lens at its zoom, and the exposure the camera runs now, which the iOS 26 keys carry only where it stays fixed.
+    nonisolated private func movieShot(_ request: VideoRequest) -> RecordedShot {
+        let device = activeCamera?.device
+        let lens = activeCamera?.lens ?? sessionCapabilities.lens
+        let zoomFactor = device.map { Double($0.videoZoomFactor) } ?? 1
+        var described = RecordedShot.context(of: request, displayZoom: zoomFactor * lens.relativeZoom)
+        if var video = described.context.video {
+            if let recorded = activeVideo?.recorded {
+                video.resolution = recorded.resolution
+                video.frameRate = recorded.frameRate
+                video.colorMode = recorded.colorMode
+            }
+            video.audio = audioInput != nil
+            // From the microphone rather than the switch: setAudioInput turns removal on only for an input that
+            // supports it on multichannel audio, and a movie without sound has none.
+            video.windNoiseReduction = audioInput.map {
+                $0.isWindNoiseRemovalSupported && $0.multichannelAudioMode != .none && $0.isWindNoiseRemovalEnabled
+            } ?? false
+            described.context.video = video
+        }
+        let exposure = device.flatMap { Self.currentExposure(of: $0) } ?? ExposureValues(seconds: 0, iso: 0, aperture: 0)
+        let record = ShotRecord(source: .camera, context: described.context, device: DeviceIdentityResolver.shared.identity,
+                                lens: LensRecord(lens, zoomFactor: zoomFactor, hasFlash: device?.hasFlash ?? false),
+                                exposure: exposure, date: Date())
+        return RecordedShot(record: record, knownFields: described.knownFields)
     }
 
     @MainActor private func recordingFinished(_ result: Result<CaptureResult, Error>, generation: Int) {
@@ -2007,8 +2148,8 @@ private final class StackJob: @unchecked Sendable {
     let request: StackRequest
     let orientation: StackOrientation
     let progress: @MainActor (StackProgress) -> Void
-    let lens: LensInfo
-    let zoomFactor: Double
+    /// What the file will say, from the press: context, phone, lens at its zoom, the frame exposure as set.
+    let shot: RecordedShot
     /// What the camera exposed just before the stack took over, which the preview goes back to.
     let exposureBefore: ExposureValues?
     let wasAELocked: Bool
@@ -2025,14 +2166,13 @@ private final class StackJob: @unchecked Sendable {
     private var completed = false
 
     init(request: StackRequest, orientation: StackOrientation, progress: @escaping @MainActor (StackProgress) -> Void,
-         completion: @escaping @Sendable (Result<CaptureResult, Error>) -> Void, lens: LensInfo, zoomFactor: Double,
+         completion: @escaping @Sendable (Result<CaptureResult, Error>) -> Void, shot: RecordedShot,
          exposureBefore: ExposureValues?, wasAELocked: Bool) {
         self.request = request
         self.orientation = orientation
         self.progress = progress
         self.completion = completion
-        self.lens = lens
-        self.zoomFactor = zoomFactor
+        self.shot = shot
         self.exposureBefore = exposureBefore
         self.wasAELocked = wasAELocked
     }

@@ -4,7 +4,8 @@ import CameraCore
 /// LONG mode. The simple interface picks a scene, one of the times that scene offers, and reads its tip. The advanced
 /// one has the scene as a menu, with how the frames combine, bulb, the total duration, the frame shutter for Blur and
 /// Trails, and the frames the shot will take; it sits under the manual strip, whose shutter chip opens the same
-/// duration dial.
+/// duration dial. Whether the shot needs a tripod, and whether the phone is steady, is the status pill's over the
+/// picture (SteadyBanner).
 struct LongExposureControls: View {
     @Bindable var model: CameraModel
 
@@ -42,6 +43,7 @@ private struct SimpleLongPanel: View {
                         .foregroundStyle(Theme.primaryText)
                         .lineLimit(1)
                         .minimumScaleFactor(0.8)
+                        .overPicture()
                         .padding(.horizontal, 16)
                         .transition(.opacity)
                 } else {
@@ -60,6 +62,7 @@ private struct SimpleLongPanel: View {
                     // Two lines whatever the tip needs, so the controls above don't move when the scene changes.
                     .lineLimit(2, reservesSpace: true)
                     .minimumScaleFactor(0.8)
+                    .overPicture()
                     .id(long.scene)
                     .transition(.opacity)
             }
@@ -133,6 +136,7 @@ private struct AdvancedLongPanel: View {
                         .foregroundStyle(Theme.secondaryText)
                         .lineLimit(2)
                         .minimumScaleFactor(0.8)
+                        .overPicture()
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .transition(.opacity)
                 } else {
@@ -420,73 +424,21 @@ private struct FrameMenu: View {
 
 // MARK: - Plan
 
+/// What the shot will take. Whether it needs a tripod is the pill's over the picture, which follows the motion sensor.
 private struct LongPlanLine: View {
     let model: CameraModel
 
     var body: some View {
-        let long = model.settings.longExposure
-        let plan = model.longPlan
-        let text = LongText.plan(plan, bulb: long.bulb)
-        let focal = model.capabilities.lens.equivalentFocalLength * max(model.readings.zoomFactor, 1)
-        let needsTripod = LongText.needsTripod(plan: plan, align: long.align,
-                                               handheldLimit: ExposureMath.handheldLimit(equivalentFocalLength: focal))
-        HStack(spacing: 8) {
-            Text(text)
-                .font(Theme.readoutFont)
-                .foregroundStyle(Theme.secondaryText)
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
-                // Rolls only inside an explicit animation: with auto frames the plan follows the 10 Hz readings.
-                .contentTransition(.numericText())
-                .accessibilityLabel(Text("Plan: " + text))
-            Spacer(minLength: 4)
-            if needsTripod {
-                TripodHint(model: model)
-                    .transition(.opacity)
-            }
-        }
-        .animation(Theme.snappy, value: needsTripod)
-    }
-}
-
-/// Reads motion on its own, so the 30 Hz attitude updates only redraw this hint.
-private struct TripodHint: View {
-    let model: CameraModel
-
-    var body: some View {
-        let steady = model.motion.isSteady
-        HStack(spacing: 4) {
-            TripodGlyph()
-                .frame(width: 10, height: 11)
-                .uprightRotation(model.motion.iconRotationDegrees)
-            Text(steady ? "Steady" : "Use a tripod")
-        }
-        .font(Theme.readoutFont)
-        .foregroundStyle(steady ? Theme.accent : Theme.primaryText)
-        .fixedSize()
-        .animation(Theme.snappy, value: steady)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(Text(steady ? "The phone is steady" : "This exposure needs a tripod or a steady surface"))
-    }
-}
-
-/// SF Symbols has no tripod, so a small one is drawn here: a camera head on three legs.
-private struct TripodGlyph: View {
-    var body: some View {
-        Canvas { context, size in
-            let width = size.width
-            let height = size.height
-            let head = CGRect(x: width * 0.2, y: 0, width: width * 0.6, height: height * 0.3)
-            context.fill(Path(roundedRect: head, cornerRadius: height * 0.07), with: .foreground)
-            let top = CGPoint(x: width * 0.5, y: height * 0.34)
-            var legs = Path()
-            for foot in [CGPoint(x: width * 0.1, y: height), CGPoint(x: width * 0.5, y: height), CGPoint(x: width * 0.9, y: height)] {
-                legs.move(to: top)
-                legs.addLine(to: foot)
-            }
-            context.stroke(legs, with: .foreground, style: StrokeStyle(lineWidth: max(1, width * 0.13), lineCap: .round))
-        }
-        .accessibilityHidden(true)
+        let text = LongText.plan(model.longPlan, bulb: model.settings.longExposure.bulb)
+        Text(text)
+            .font(Theme.readoutFont)
+            .foregroundStyle(Theme.secondaryText)
+            .lineLimit(1)
+            .minimumScaleFactor(0.8)
+            .overPicture()
+            // Rolls only inside an explicit animation: with auto frames the plan follows the 10 Hz readings.
+            .contentTransition(.numericText())
+            .accessibilityLabel(Text("Plan: " + text))
     }
 }
 
@@ -549,13 +501,12 @@ private enum LongText {
         let frames = plan.frameCount == 1 ? "1 frame" : "\(plan.frameCount) frames"
         return "\(frames) \u{00D7} \(shutter) \u{00B7} \(iso)"
     }
+}
 
-    static func needsTripod(plan: StackPlan, align: Bool, handheldLimit: Double) -> Bool {
-        // Real adds light over the whole duration, so any movement smears the picture.
-        if plan.blend == .additive { return true }
-        // Each frame on its own is longer than a steady hand can hold this lens.
-        if plan.frameSeconds > handheldLimit { return true }
-        // Without alignment, a handheld phone smears the background along with the moving subject.
-        return !align
+private extension View {
+    /// The panel sits on the picture with no scrim behind it, so plain text carries a shadow of its own, like the
+    /// countdown's hint, to read over a bright scene.
+    func overPicture() -> some View {
+        shadow(color: .black.opacity(0.6), radius: 4)
     }
 }

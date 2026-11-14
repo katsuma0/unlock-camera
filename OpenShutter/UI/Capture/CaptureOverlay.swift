@@ -1,47 +1,89 @@
 import SwiftUI
 import CameraCore
 
-/// Countdown, stacking progress, intervalometer and bracket status and the shutter flash, drawn over the viewfinder.
+/// Countdown, stacking progress, intervalometer and bracket status, drawn over the viewfinder. The camera screen
+/// frames it to the part of the photo frame the top bar and the controls leave open. The two layers that belong to
+/// the picture itself, the running stack and the capture blink, are StackPreviewLayer and ShutterBlink below.
 struct CaptureOverlay: View {
     @Bindable var model: CameraModel
+    /// The middle of the photo frame, where the drift crosses are drawn, in this overlay's coordinates. A stack's
+    /// status keeps clear of it.
+    var crossCenter: CGPoint? = nil
 
-    // Each layer reads only the state it shows, so a stack's progress or the flash never redraws the others.
+    // Each layer reads only the state it shows, so a stack's progress never redraws the others.
     var body: some View {
         ZStack {
-            StackPreviewLayer(model: model)
             CountdownLayer(model: model)
-            StatusLayer(model: model)
+            StatusLayer(model: model, crossCenter: crossCenter)
             SavingLayer(model: model)
-            ShutterFlashLayer(model: model)
         }
     }
 }
 
 // MARK: - Stack preview
 
-/// The running result of a night or long exposure, laid exactly over the live preview so the picture builds up
-/// where the scene is.
-private struct StackPreviewLayer: View {
+/// The running result of a night or long exposure, laid exactly over the live picture so it builds up where the
+/// scene is. It sits with the picture, under the bands and every overlay.
+struct StackPreviewLayer: View {
     let model: CameraModel
+    /// The whole camera image as the camera screen lays it out, in the coordinates of the screen this layer covers.
+    let picture: CGRect
+
+    /// The last preview shown before the battery saver darkened the screen. Nobody sees newer ones under the black
+    /// layer, and leaving the picture as it was spares the drawing several times a second.
+    @State private var lastShown: CGImage?
 
     var body: some View {
-        let preview = model.activity == .stacking ? model.stackProgress?.preview : nil
+        let isDimmed = model.dimmer.isDimmed
+        let live = model.activity == .stacking ? model.stackProgress?.preview : nil
+        let preview = isDimmed ? lastShown : live
         ZStack {
             if let preview {
                 Image(decorative: preview, scale: 1)
                     .resizable()
                     .interpolation(.medium)
                     .aspectRatio(contentMode: .fit)
+                    .frame(width: picture.width, height: picture.height)
+                    .position(x: picture.midX, y: picture.midY)
                     .transition(.opacity)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        // The camera screen insets the overlay where its controls cover the picture; the preview must still fill
-        // the whole frame to line up with the live image underneath.
-        .ignoresSafeArea()
         .animation(.easeIn(duration: 0.4), value: preview != nil)
         .allowsHitTesting(false)
         .accessibilityHidden(true)
+        .onChange(of: live.map(ObjectIdentifier.init)) {
+            // Kept one step behind the live preview, so the frame the screen showed when it went dark stays.
+            if !model.dimmer.isDimmed { lastShown = live }
+        }
+    }
+}
+
+// MARK: - Capture blink
+
+/// The picture blinks black each time the backend fires the shutter, like Apple's Camera, so timer, intervalometer
+/// and bracket shots show too. It covers the picture only: the bands, the overlays and the controls sit above it.
+struct ShutterBlink: View {
+    let model: CameraModel
+    @State private var opacity = 0.0
+    @Environment(\.accessibilityDimFlashingLights) private var dimFlashingLights
+
+    var body: some View {
+        Rectangle()
+            .fill(Color.black)
+            .opacity(opacity)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+            .onChange(of: model.shutterCount) { _, _ in
+                // Dim Flashing Lights asks for softer flashes; half the darkness still says the shot was taken.
+                let peak = dimFlashingLights ? 0.5 : 1.0
+                // Two steps: a change and its reversal in one transaction would never reach the screen.
+                withAnimation(.easeIn(duration: 0.05)) {
+                    opacity = peak
+                } completion: {
+                    withAnimation(.easeOut(duration: 0.22)) { opacity = 0 }
+                }
+            }
     }
 }
 
@@ -49,10 +91,12 @@ private struct StackPreviewLayer: View {
 
 private struct CountdownLayer: View {
     let model: CameraModel
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
 
     var body: some View {
         let remaining = Self.remaining(model.activity)
+        // The app's own Reduce motion switch counts as much as the system's.
+        let reduceMotion = systemReduceMotion || AppearanceStore.shared.reduceMotion
         ZStack {
             if let remaining {
                 CountdownNumber(model: model, remaining: remaining)
@@ -94,15 +138,16 @@ private struct CountdownNumber: View {
     }
 }
 
-/// Sits just under the numerals rather than at the viewfinder's edge, where the controls can cover it, and turns
-/// with them. Kept apart from the numerals so it doesn't replay their per-second transition.
+/// Sits just under the numerals rather than at the frame's edge, where the controls can cover it, and turns with
+/// them. Kept apart from the numerals so it doesn't replay their per-second transition.
 private struct CountdownHint: View {
     let model: CameraModel
 
     var body: some View {
-        // A tripod scene's wait counts down like a self timer nobody set, so it says what it is for. The break falls
-        // between the sentences rather than wherever the width runs out.
-        Text(model.isSettling ? "Letting the phone settle.\nTap the shutter to cancel." : "Tap the shutter to cancel.")
+        // A tripod scene's wait counts down like a self timer nobody set, so it says what it is for, and its last
+        // second holds while the phone still moves, which needs saying too. The break falls between the sentences
+        // rather than wherever the width runs out.
+        Text(Self.text(waiting: model.isWaitingForSteady, settling: model.isSettling))
             .font(.footnote.weight(.semibold))
             .foregroundStyle(Theme.secondaryText)
             .multilineTextAlignment(.center)
@@ -112,6 +157,12 @@ private struct CountdownHint: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .uprightRotation(model.motion.iconRotationDegrees)
     }
+
+    private static func text(waiting: Bool, settling: Bool) -> String {
+        if waiting { return "Waiting for the phone to settle.\nTap the shutter to cancel." }
+        if settling { return "Letting the phone settle.\nTap the shutter to cancel." }
+        return "Tap the shutter to cancel."
+    }
 }
 
 // MARK: - Status
@@ -119,13 +170,14 @@ private struct CountdownHint: View {
 /// Intervalometer, bracket and stack status with the buttons that end them. Only exists while something runs.
 private struct StatusLayer: View {
     let model: CameraModel
+    let crossCenter: CGPoint?
 
     var body: some View {
         let isStacking = model.activity == .stacking
         let hasSequence = model.intervalometer != nil || model.bracketInProgress
         ZStack {
             if isStacking || hasSequence {
-                StatusBlock(model: model)
+                StatusBlock(model: model, crossCenter: crossCenter)
                     .transition(.opacity)
             }
         }
@@ -136,13 +188,26 @@ private struct StatusLayer: View {
 
 private struct StatusBlock: View {
     let model: CameraModel
+    /// The drift crosses' centre in this view's coordinates.
+    let crossCenter: CGPoint?
     /// Stop was tapped and the backend is merging what it has; the capsule says so instead of counting on.
     @State private var isFinishing = false
+    /// The block as laid out, before it turns with the phone. A typical size stands in until it is measured.
+    @State private var blockSize = CGSize(width: 190, height: 88)
+
+    /// How far the block stays from the crosses' centre: the moving cross's farthest reach (DriftMath.radius and its
+    /// 15 pt arm) and a margin.
+    private static let crossClearance = CGFloat(DriftMath.radius) + 28
 
     var body: some View {
         let degrees = model.motion.iconRotationDegrees
         let isStacking = model.activity == .stacking
+        // The shutter, a hardware button and the end of a bulb hold finish a stack too, and look the same as a tap on
+        // Stop. The model's flag lands an update after a tap, and the local one covers that moment.
+        let finishing = isFinishing || model.isFinishingStack
         GeometryReader { proxy in
+            let point = Self.place(in: proxy.size, block: blockSize, degrees: degrees,
+                                   crossCenter: isStacking ? crossCenter : nil)
             VStack(spacing: 10) {
                 if let status = model.intervalometer {
                     IntervalStatusLine(status: status)
@@ -151,11 +216,11 @@ private struct StatusBlock: View {
                     BracketStatusLine(model: model)
                 }
                 if isStacking {
-                    StackStatusLine(progress: model.stackProgress, isFinishing: isFinishing,
-                                    countsFrames: model.isAdvanced)
+                    StackStatusLine(progress: model.stackProgress, isFinishing: finishing,
+                                    countsFrames: model.isAdvanced, isQuiet: model.dimmer.isDimmed)
                 }
                 StatusButtons(
-                    canDiscard: isStacking && !isFinishing,
+                    canDiscard: isStacking && !finishing,
                     onStop: {
                         if model.activity == .stacking { isFinishing = true }
                         Haptics.tap()
@@ -166,16 +231,43 @@ private struct StatusBlock: View {
                         model.cancelCapture()
                     }
                 )
-                .disabled(isFinishing)
+                .disabled(finishing)
+            }
+            .onGeometryChange(for: CGSize.self) { $0.size } action: { size in
+                blockSize = size
             }
             .uprightRotation(degrees)
-            // Below the middle in portrait, clear of the subject; centred when turned, where a sideways block fits.
-            .position(x: proxy.size.width / 2, y: degrees == 0 ? proxy.size.height * 0.72 : proxy.size.height / 2)
-            .animation(Theme.spring, value: degrees)
+            .position(point)
+            // Keyed on the place, not on what moved it: a turn, Cancel leaving and each stack of an intervalometer
+            // starting or ending all move the block. Every move glides on the frame's spring, and cuts under Reduce
+            // motion like the turn itself.
+            .frameMotion(value: point)
         }
         .onChange(of: model.activity) { _, activity in
             if activity != .stacking { isFinishing = false }
         }
+    }
+
+    /// Below the middle in portrait, clear of the subject; centred when turned, where a sideways block fits. A stack
+    /// keeps it off the drift crosses too, since lining them up is what the steady status asks for: lower down in
+    /// portrait, and toward the open area's top end when the phone is turned or upside down. Turned, the status, the
+    /// histogram and the badges keep to the sides of that end, so its middle is free. Where the open area is too short
+    /// to clear the crosses' reach, as with the phone turned at the shorter shapes, the block stays on screen and the
+    /// camera screen draws the crosses over it.
+    private static func place(in size: CGSize, block: CGSize, degrees: Double, crossCenter: CGPoint?) -> CGPoint {
+        let usual = CGPoint(x: size.width / 2, y: degrees == 0 ? size.height * 0.72 : size.height / 2)
+        guard let cross = crossCenter, cross.y.isFinite else { return usual }
+        let margin: CGFloat = 8
+        let y: CGFloat
+        if degrees == 0 {
+            y = min(max(usual.y, cross.y + crossClearance + block.height / 2), size.height - block.height / 2 - margin)
+        } else if degrees == 180 {
+            y = max(min(usual.y, cross.y - crossClearance - block.height / 2), block.height / 2 + margin)
+        } else {
+            // On its side the block runs along the open area's height.
+            y = max(min(usual.y, cross.y - crossClearance - block.width / 2), block.width / 2 + margin)
+        }
+        return CGPoint(x: usual.x, y: y)
     }
 }
 
@@ -263,6 +355,8 @@ private struct StackStatusLine: View {
     let isFinishing: Bool
     /// The advanced interface counts the frames a shot is built from. The simple one shows the clock alone.
     let countsFrames: Bool
+    /// The battery saver has the screen dark: nothing under it animates, so the display can rest.
+    var isQuiet = false
 
     var body: some View {
         let fraction = Self.fraction(progress)
@@ -276,16 +370,22 @@ private struct StackStatusLine: View {
                     .tint(Theme.primaryText)
             } else if progress?.framesPlanned == 0 {
                 // Bulb has no end to measure against, so a pulsing dot marks the open shutter.
-                Circle()
-                    .fill(Theme.recording)
-                    .frame(width: 8, height: 8)
-                    .phaseAnimator([1.0, 0.35]) { dot, opacity in
-                        dot.opacity(opacity)
-                    } animation: { _ in
-                        .easeInOut(duration: 0.6)
-                    }
+                if isQuiet {
+                    Circle()
+                        .fill(Theme.recording)
+                        .frame(width: 8, height: 8)
+                } else {
+                    Circle()
+                        .fill(Theme.recording)
+                        .frame(width: 8, height: 8)
+                        .phaseAnimator([1.0, 0.35]) { dot, opacity in
+                            dot.opacity(opacity)
+                        } animation: { _ in
+                            .easeInOut(duration: 0.6)
+                        }
+                }
             } else {
-                ProgressRing(fraction: fraction)
+                ProgressRing(fraction: fraction, isQuiet: isQuiet)
             }
             Text(processing ? "Processing" : Self.text(progress, countsFrames: countsFrames))
                 .contentTransition(.numericText())
@@ -330,6 +430,8 @@ private struct StackStatusLine: View {
 
 private struct ProgressRing: View {
     let fraction: Double
+    /// Under the battery saver's black layer each report jumps instead of gliding.
+    var isQuiet = false
 
     var body: some View {
         ZStack {
@@ -341,7 +443,7 @@ private struct ProgressRing: View {
                 .rotationEffect(.degrees(-90))
         }
         .frame(width: 16, height: 16)
-        .animation(.linear(duration: 0.15), value: fraction)
+        .animation(isQuiet ? nil : .linear(duration: 0.15), value: fraction)
     }
 }
 
@@ -388,7 +490,7 @@ private struct StatusButtons: View {
                     Text("Stop")
                 }
                 .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(Color.black)
+                .foregroundStyle(Theme.onAccent)
                 .padding(.horizontal, 18)
                 .frame(height: 36)
                 .background(Theme.accent, in: Capsule())
@@ -403,7 +505,7 @@ private struct StatusButtons: View {
     }
 }
 
-// MARK: - Saving and flash
+// MARK: - Saving
 
 private struct SavingLayer: View {
     let model: CameraModel
@@ -430,28 +532,5 @@ private struct SavingLayer: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .animation(.easeInOut(duration: 0.2), value: isSaving)
         .allowsHitTesting(false)
-    }
-}
-
-/// A short white blink each time the backend fires the shutter, so timer and intervalometer shots are visible too.
-private struct ShutterFlashLayer: View {
-    let model: CameraModel
-    @State private var opacity = 0.0
-
-    var body: some View {
-        Rectangle()
-            .fill(Color.white)
-            .opacity(opacity)
-            .ignoresSafeArea()
-            .allowsHitTesting(false)
-            .accessibilityHidden(true)
-            .onChange(of: model.shutterCount) { _, _ in
-                // Two steps: a change and its reversal in one transaction would never reach the screen.
-                withAnimation(.linear(duration: 0.04)) {
-                    opacity = 0.6
-                } completion: {
-                    withAnimation(.easeOut(duration: 0.3)) { opacity = 0 }
-                }
-            }
     }
 }

@@ -2,6 +2,7 @@ import Foundation
 import AVFoundation
 import ImageIO
 import UIKit
+import os
 import CameraCore
 
 /// Owns one capturePhoto(with:delegate:) call: builds the settings, collects every photo the output
@@ -10,7 +11,8 @@ import CameraCore
 final class PhotoCaptureCoordinator: NSObject, AVCapturePhotoCaptureDelegate {
     let request: PhotoRequest
 
-    private let focalLength35mm: Double
+    /// What the file says about the shot; each photo of a bracket fills in its own place in it.
+    private let shot: RecordedShot
     private let willCapture: @MainActor () -> Void
     private let completion: @MainActor (Result<[CaptureResult], Error>) -> Void
     /// iOS suspends a backgrounded app within seconds, while processing, cropping and saving a shot taken just
@@ -29,16 +31,14 @@ final class PhotoCaptureCoordinator: NSObject, AVCapturePhotoCaptureDelegate {
     private var finished = false
 
     /// - Parameters:
-    ///   - lensName / focalLength35mm: for the summary line.
+    ///   - shot: the shot's context, the phone and the lens at its zoom, for every file's metadata.
     ///   - willCapture: called on the main actor at the moment of exposure (flash + haptic).
     ///   - completion: called once, on the main actor, after everything is saved or failed.
-    init(request: PhotoRequest, lensName: String, focalLength35mm: Double,
+    init(request: PhotoRequest, shot: RecordedShot,
          willCapture: @escaping @MainActor () -> Void,
          completion: @escaping @MainActor (Result<[CaptureResult], Error>) -> Void) {
         self.request = request
-        // The EXIF focal length wins when present because it includes zoom; the lens value covers the rest.
-        // The lens name is not shown: localized device names are too long for the one-line summary.
-        self.focalLength35mm = focalLength35mm
+        self.shot = shot
         self.willCapture = willCapture
         self.completion = completion
         super.init()
@@ -90,15 +90,19 @@ final class PhotoCaptureCoordinator: NSObject, AVCapturePhotoCaptureDelegate {
         let zeroShutterLag = output.isZeroShutterLagSupported
         if output.isZeroShutterLagEnabled != zeroShutterLag { output.isZeroShutterLagEnabled = zeroShutterLag }
         // Responsive capture builds on zero shutter lag, so its support is read after that is settled.
-        // Fast capture prioritization stays off: it would quietly lower the processing the user picked.
         let responsive = output.isResponsiveCaptureSupported
         if output.isResponsiveCaptureEnabled != responsive { output.isResponsiveCaptureEnabled = responsive }
+        // Fast capture lowers the processing of photos taken in quick succession, so it is on only when asked for.
+        // It builds on responsive capture, whose state is settled above.
+        let fast = options.prioritizeSpeed && output.isFastCapturePrioritizationSupported
+        if output.isFastCapturePrioritizationEnabled != fast { output.isFastCapturePrioritizationEnabled = fast }
     }
 
     /// Settings for `request` checked against what `output` supports right now. Unsupported extras
     /// (flash on a lens without one, RAW where none is available) are dropped, never passed through,
     /// because AVFoundation raises an exception for them. Session queue.
-    static func makeSettings(for request: PhotoRequest, output: AVCapturePhotoOutput, capabilities: CameraCapabilities) throws -> AVCapturePhotoSettings {
+    static func makeSettings(for request: PhotoRequest, shot: RecordedShot, output: AVCapturePhotoOutput,
+                             capabilities: CameraCapabilities) throws -> AVCapturePhotoSettings {
         // capturePhoto raises when there is no live video connection to take the picture from.
         guard let connection = output.connection(with: .video), connection.isEnabled, connection.isActive else {
             throw CameraError.captureFailed("The camera isn't ready yet.")
@@ -175,6 +179,9 @@ final class PhotoCaptureCoordinator: NSObject, AVCapturePhotoCaptureDelegate {
            output.isLivePhotoCaptureEnabled, !output.isLivePhotoCaptureSuspended {
             settings.livePhotoMovieFileURL = FileManager.default.temporaryDirectory
                 .appendingPathComponent("OpenShutter-live-\(UUID().uuidString).mov")
+            // The location and the app's mode go into the movie too, so a shared Live Photo keeps them. The photo
+            // output adds the rest itself, including the content identifier that pairs the movie with the still.
+            settings.livePhotoMovieMetadata = MovieMetadata.items(shot.movie(livePhoto: true))
         }
 
         // Depth is embedded in HEIF and JPEG only, so it rides on processed single shots. A cropped photo can't
@@ -198,12 +205,7 @@ final class PhotoCaptureCoordinator: NSObject, AVCapturePhotoCaptureDelegate {
             settings.rawEmbeddedThumbnailPhotoFormat = [AVVideoCodecKey: codec]
         }
 
-        // GPS goes into the file itself as well as the Photos asset, so exported originals keep it.
-        if let location = request.location, let gps = gpsMetadata(location) {
-            var metadata = settings.metadata
-            metadata[kCGImagePropertyGPSDictionary as String] = gps
-            settings.metadata = metadata
-        }
+        // GPS goes into every file through the customizer at delivery, DNGs included, from the fix taken at the press.
         return settings
     }
 
@@ -226,14 +228,23 @@ final class PhotoCaptureCoordinator: NSObject, AVCapturePhotoCaptureDelegate {
             record(error)
             return
         }
+        // The camera's own TIFF model is the phone's name as Apple writes it, which stacks and movies borrow.
+        DeviceIdentityResolver.shared.learn(photoMetadata: photo.metadata)
+        let metadata = additions(for: photo)
         // Flattening now, rather than holding the AVCapturePhoto, lets the output recycle its buffers
         // before the next shot.
-        guard let data = photo.fileDataRepresentation(), !data.isEmpty else {
+        var flattened = photo.fileDataRepresentation(with: ShotMetadataCustomizer(additions: metadata))
+        if flattened?.isEmpty ?? true {
+            // A container that refuses the additions still holds the photo the camera took, with its own metadata.
+            Self.log.error("The photo was flattened without the app's additions")
+            flattened = photo.fileDataRepresentation()
+        }
+        guard let data = flattened, !data.isEmpty else {
             record(CameraError.captureFailed("The camera returned no image data."))
             return
         }
         let captured = CapturedPhoto(data: data, isRaw: photo.isRawPhoto, sequence: photo.sequenceCount,
-                                     facts: ExposureFacts(photo))
+                                     facts: ExposureFacts(photo), metadata: metadata)
         lock.withLock { photos.append(captured) }
     }
 
@@ -260,7 +271,7 @@ final class PhotoCaptureCoordinator: NSObject, AVCapturePhotoCaptureDelegate {
         }
         guard let batch else { return }
         let request = self.request
-        let focalLength = focalLength35mm
+        let shot = self.shot
         let completion = self.completion
         let backgroundTime = self.backgroundTime
         // Cropping a 48 MP frame and waiting on Photos must not hold up the output's delegate queue.
@@ -269,7 +280,7 @@ final class PhotoCaptureCoordinator: NSObject, AVCapturePhotoCaptureDelegate {
             Self.lastDelivery = Task.detached(priority: .userInitiated) {
                 // Never throws or returns early, even if cancelled, so a queued photo can't lose its completion.
                 await previous?.value
-                let result = await Self.deliver(batch, request: request, focalLength35mm: focalLength)
+                let result = await Self.deliver(batch, request: request, shot: shot)
                 await MainActor.run {
                     completion(result)
                     backgroundTime.end()
@@ -292,9 +303,33 @@ final class PhotoCaptureCoordinator: NSObject, AVCapturePhotoCaptureDelegate {
         }
     }
 
+    /// The shot's additions for this photo: when it was taken and, in an exposure bracket, which frame it is and
+    /// how far it sits from the metered exposure (frames come center first, as the offsets do).
+    private func additions(for photo: AVCapturePhoto) -> ImageMetadata {
+        var shot = self.shot
+        if let date = lock.withLock({ shutterDate }) {
+            shot.record.date = date
+            shot.record.writtenDate = date
+        }
+        if photo.sequenceCount > 0, var bracket = shot.record.context.bracket, bracket.kind == .exposure {
+            let offsets = request.bracket.exposureOffsets()
+            bracket.index = photo.sequenceCount
+            if photo.sequenceCount <= offsets.count {
+                bracket.value = offsets[photo.sequenceCount - 1]
+            }
+            shot.record.context.bracket = bracket
+        }
+        // Fast capture can lower the processing of a photo taken in quick succession, and the output doesn't say how
+        // far, so the level is left out rather than guessed. Minimal is as low as it goes, so it stays.
+        if photo.resolvedSettings.isFastCapturePrioritizationEnabled, shot.record.context.processing != .minimal {
+            shot.record.context.processing = nil
+        }
+        return shot.additions
+    }
+
     /// Crops, saves and summarizes every asset of the batch. One asset per bracket frame; a RAW and a
     /// processed photo of the same frame become one asset with the DNG as its alternate resource.
-    private static func deliver(_ batch: Batch, request: PhotoRequest, focalLength35mm: Double) async -> Result<[CaptureResult], Error> {
+    private static func deliver(_ batch: Batch, request: PhotoRequest, shot: RecordedShot) async -> Result<[CaptureResult], Error> {
         defer {
             // Photos moves the movie on success; anything still there belongs to a failed save.
             if let movie = batch.movie { try? FileManager.default.removeItem(at: movie) }
@@ -314,12 +349,15 @@ final class PhotoCaptureCoordinator: NSObject, AVCapturePhotoCaptureDelegate {
             }
             let pairedRaw = processed == nil ? nil : raw?.data
             let movie = !isBracket && processed != nil ? batch.movie : nil
-            let outcome = await save(primary, raw: pairedRaw, movie: movie, location: request.location)
+            let outcome = await save(primary, additions: processed?.metadata, raw: pairedRaw, movie: movie,
+                                     location: shot.assetLocation, date: batch.date)
 
             let facts = (processed?.facts ?? ExposureFacts()).filled(from: raw?.facts)
             let kind: CaptureResult.Kind = isBracket ? .bracket : (raw != nil ? .raw : .photo)
+            // The EXIF focal length wins when present because it includes zoom; the lens at its zoom covers the rest.
+            let lens = shot.record.lens
             results.append(CaptureResult(kind: kind, assetIdentifier: outcome.identifier, thumbnail: primary.thumbnail,
-                                         summary: summary(facts, fallbackFocalLength: focalLength35mm),
+                                         summary: summary(facts, fallbackFocalLength: lens.equivalentFocalLength * lens.zoomFactor),
                                          date: batch.date, savedToLibrary: outcome.saved))
         }
 
@@ -332,16 +370,29 @@ final class PhotoCaptureCoordinator: NSObject, AVCapturePhotoCaptureDelegate {
         return .success(results)
     }
 
-    private static func save(_ primary: EncodedImage, raw: Data?, movie: URL?, location: LocationStamp?) async -> (saved: Bool, identifier: String?) {
+    /// - Parameter additions: a processed photo's, whose XMP is merged in here because only the save knows whether
+    ///   the still keeps its movie.
+    private static func save(_ primary: EncodedImage, additions: ImageMetadata?, raw: Data?, movie: URL?,
+                             location: GeoTag?, date: Date) async -> (saved: Bool, identifier: String?) {
+        var data = primary.data
+        if var additions {
+            // A still saved without its movie (none was recorded, or Photos refused the pair) is no Live Photo.
+            if movie == nil {
+                additions.xmp.removeAll { $0.field == .livePhoto }
+            }
+            // After the crop, which encodes from the property dictionary and would drop an XMP packet.
+            data = ImageIOMetadata.addingXMP(to: data, additions)
+        }
         do {
-            let identifier = try await PhotoLibrary.savePhoto(primary: primary.data, primaryType: primary.typeIdentifier,
-                                                              raw: raw, livePhotoMovie: movie, location: location)
+            let identifier = try await PhotoLibrary.savePhoto(primary: data, primaryType: primary.typeIdentifier,
+                                                              raw: raw, livePhotoMovie: movie, location: location,
+                                                              creationDate: date, isCapture: true)
             return (true, identifier)
         } catch {
             // Photos refuses the whole asset when the still and movie don't pair up; the still alone is
             // still worth keeping. Without add access a retry would only fail again.
             guard movie != nil, await PhotoLibrary.ensureAddAccess() else { return (false, nil) }
-            return await save(primary, raw: raw, movie: nil, location: location)
+            return await save(primary, additions: additions, raw: raw, movie: nil, location: location, date: date)
         }
     }
 
@@ -404,6 +455,8 @@ final class PhotoCaptureCoordinator: NSObject, AVCapturePhotoCaptureDelegate {
     }
 
     // MARK: - Settings helpers
+
+    private static let log = Logger(subsystem: "ca.katsuma.openshutter", category: "Metadata")
 
     /// Long side of result thumbnails, matching MediaWriter's.
     private static let thumbnailPixelSize = 400
@@ -570,6 +623,17 @@ final class PhotoCaptureCoordinator: NSObject, AVCapturePhotoCaptureDelegate {
         return wanted.rawValue <= limit.rawValue ? wanted : limit
     }
 
+    /// The level a photo's settings run at, for its file: Bayer RAW and brackets run at speed whatever was asked,
+    /// and the output's limit can lower the rest.
+    static func processingLevel(of prioritization: AVCapturePhotoOutput.QualityPrioritization) -> ProcessingLevel {
+        switch prioritization {
+        case .speed: return .minimal
+        case .balanced: return .balanced
+        case .quality: return .maximum
+        @unknown default: return .balanced
+        }
+    }
+
     private static func flashMode(for setting: FlashSetting) -> AVCaptureDevice.FlashMode? {
         switch setting {
         case .off: return nil
@@ -578,11 +642,14 @@ final class PhotoCaptureCoordinator: NSObject, AVCapturePhotoCaptureDelegate {
         }
     }
 
-    /// Reuses MediaWriter's GPS dictionary so files from every path carry the same tags.
-    private static func gpsMetadata(_ location: LocationStamp) -> Any? {
-        let metadata = CaptureMetadata(exposureSeconds: 0, iso: 0, aperture: 0, focalLength35mm: nil, lensModel: "",
-                                       comment: nil, date: location.timestamp, location: location)
-        return MediaWriter.properties(for: metadata)[kCGImagePropertyGPSDictionary]
+    /// The flash a photo's settings run with, for its file: off on a lens without one.
+    static func flashSetting(of mode: AVCaptureDevice.FlashMode) -> FlashSetting {
+        switch mode {
+        case .on: return .on
+        case .auto: return .auto
+        case .off: return .off
+        @unknown default: return .off
+        }
     }
 
     /// Depth delivery limits zoom on some formats: only listed factors are legal and any other raises.
@@ -633,6 +700,8 @@ private struct CapturedPhoto: Sendable {
     /// 1-based bracket position, 0 for a single shot.
     var sequence: Int
     var facts: ExposureFacts
+    /// What the file adds to the camera's metadata, its XMP among it.
+    var metadata: ImageMetadata
 }
 
 /// Everything a finished capture produced, handed to the background save.
