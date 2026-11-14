@@ -114,8 +114,8 @@ final class AppearanceStore {
         }
     }
 
-    /// The phone's own light or dark. The app is held dark by its Info.plist and its window root, and every window
-    /// and view inherits that, so the style is read from the screen, which sits outside those overrides.
+    /// The phone's own light or dark. The window root holds the app dark and every view inherits that, so the style
+    /// is read from the screen, which sits outside that override. An Info.plist style would cover the screen too.
     private static func phoneScheme() -> ColorScheme? {
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
         guard let scene = scenes.first(where: { $0.activationState == .foregroundActive }) ?? scenes.first else {
