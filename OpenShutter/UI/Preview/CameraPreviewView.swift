@@ -1,27 +1,52 @@
 import SwiftUI
 import UIKit
 import QuartzCore
+import AVFoundation
 import Observation
 import CameraCore
 
-/// The live image (the backend's preview layer) plus the analysis overlay and the viewfinder gestures.
+/// The live picture: the backend's preview layer and the analysis overlay, both laid out at the picture rect of the
+/// full-screen viewfinder, plus the viewfinder's gestures. The host view covers the whole screen, so a pinch or a
+/// swipe works on the bands too. The sun that goes with the focus square is ExposureSliderLayer, drawn above the
+/// bands and the capture blink, and VoiceOver's viewfinder element is ViewfinderAccessibilityTarget.
 struct CameraPreviewView: View {
-    @Bindable var model: CameraModel
-
-    @State private var interaction = ViewfinderInteraction()
+    let model: CameraModel
+    let interaction: ViewfinderInteraction
+    let geometry: ViewfinderGeometry
+    /// The battery saver's black layer covers the screen, so the picture under it stops drawing.
+    let isHidden: Bool
 
     var body: some View {
         ZStack {
-            PreviewSurface(model: model, interaction: interaction)
-            AnalysisOverlay(model: model)
-            ExposureSlider(model: model, interaction: interaction)
+            PreviewSurface(model: model, interaction: interaction, picture: geometry.picture, isHidden: isHidden)
+            AnalysisOverlay(model: model, picture: geometry.picture)
         }
         .background(Theme.background)
-        .clipped()
+        .accessibilityHidden(true)
+        .onChange(of: geometry, initial: true) { _, geometry in
+            interaction.geometry = geometry
+        }
         .onChange(of: model.activePresetID, initial: true) { _, id in
             interaction.noteActivePreset(id, model: model)
         }
-        .modifier(ViewfinderAccessibility(model: model, interaction: interaction))
+    }
+}
+
+/// VoiceOver's viewfinder: one adjustable element over the open part of the frame. The picture's host covers the
+/// whole screen, bands and all, which would put the element first in reading order and outline the whole screen.
+struct ViewfinderAccessibilityTarget: View {
+    let model: CameraModel
+    let interaction: ViewfinderInteraction
+    /// Where the element sits, in the screen space the viewfinder is laid out in.
+    let rect: CGRect
+
+    var body: some View {
+        Color.clear
+            .frame(width: max(rect.width, 1), height: max(rect.height, 1))
+            .modifier(ViewfinderAccessibility(model: model, interaction: interaction))
+            .position(x: rect.midX, y: rect.midY)
+            // Touches go to the picture's gesture recognizers underneath.
+            .allowsHitTesting(false)
     }
 }
 
@@ -64,13 +89,17 @@ private struct ViewfinderAccessibility: ViewModifier {
 
 // MARK: - Gesture logic
 
-/// State shared by the UIKit gesture recognizers and the SwiftUI exposure slider.
+/// State shared by the UIKit gesture recognizers, the SwiftUI exposure slider and the camera screen. Points named
+/// "layer" are in the preview layer's own coordinates, the ones the model and the backends use; every other point is
+/// in the screen space of the full-screen viewfinder.
 @MainActor
 @Observable
-private final class ViewfinderInteraction {
-    /// Where the exposure slider sits during a drag and for a moment after it; nil otherwise.
+final class ViewfinderInteraction {
+    /// Where the exposure slider sits during a drag and for a moment after it, on screen; nil otherwise.
     private(set) var sliderAnchor: CGPoint?
     private(set) var isDraggingExposure = false
+    /// The preview layer shows frames from the camera. Until it does, and after it stops, the bands stay solid.
+    private(set) var isPreviewing = false
 
     // ViewfinderOverlays draws the focus square and keeps the same books from the same model state, so the sun
     // comes and goes with the square.
@@ -87,15 +116,17 @@ private final class ViewfinderInteraction {
     /// Bumped to restart the two-second fade.
     private(set) var freshGeneration = 0
 
-    /// Size of the preview host, for actions aimed at the middle of the frame.
-    @ObservationIgnored var viewSize: CGSize = .zero
+    /// The viewfinder's rectangles, for telling a tap on the photo from one on a band and for actions aimed at the
+    /// middle of the frame.
+    @ObservationIgnored var geometry: ViewfinderGeometry = .zero
 
     @ObservationIgnored private var alternatePresetID: String?
     @ObservationIgnored private var lastTap: (time: CFTimeInterval, point: CGPoint)?
     @ObservationIgnored private var pinchBase = 1.0
     @ObservationIgnored private var pinchLastSent = 1.0
     @ObservationIgnored private var pinchAtLimit = false
-    @ObservationIgnored private var recentZoom: (value: Double, time: CFTimeInterval)?
+    /// The pinch sent the model a zoom, so its end owes the model the final, strict one.
+    @ObservationIgnored private var pinchSentZoom = false
     @ObservationIgnored private var dragStartBias = 0.0
     @ObservationIgnored private var dragLastBias = 0.0
     @ObservationIgnored private var dragAtLimit = false
@@ -106,10 +137,15 @@ private final class ViewfinderInteraction {
     static let pointsPerEV: CGFloat = 36
     private static let doubleTapInterval: CFTimeInterval = 0.3
     private static let doubleTapSlop = 40.0
+    /// A tap this close outside the frame still counts as one on its edge.
+    private static let frameSlop: CGFloat = 8
 
     // MARK: Focus
 
-    func tap(at point: CGPoint, model: CameraModel) {
+    /// - Parameters:
+    ///   - point: Where the finger landed on screen.
+    ///   - layerPoint: The same place in the preview layer's coordinates, for the model.
+    func tap(at point: CGPoint, layerPoint: CGPoint, model: CameraModel) {
         let now = CACurrentMediaTime()
         if let last = lastTap, now - last.time <= Self.doubleTapInterval,
            Self.distance(last.point, point) <= Self.doubleTapSlop {
@@ -119,19 +155,46 @@ private final class ViewfinderInteraction {
             return
         }
         lastTap = (now, point)
-        guard canAdjust(model) else { return }
-        model.tapToFocus(at: point, lock: false)
+        // A band shows what the photo leaves out, so a tap there focuses nothing. It can still start a double tap.
+        guard canAdjust(model), isOnFrame(point) else { return }
+        model.tapToFocus(at: layerPoint, lock: false)
     }
 
-    func longPress(at point: CGPoint, model: CameraModel) {
+    func longPress(at point: CGPoint, layerPoint: CGPoint, model: CameraModel) {
         lastTap = nil
-        guard canAdjust(model) else { return }
-        model.tapToFocus(at: point, lock: true)
+        guard canAdjust(model), isOnFrame(point) else { return }
+        model.tapToFocus(at: layerPoint, lock: true)
     }
 
     func focusCenter(lock: Bool, model: CameraModel) {
-        guard canAdjust(model), viewSize.width > 0, viewSize.height > 0 else { return }
-        model.tapToFocus(at: CGPoint(x: viewSize.width / 2, y: viewSize.height / 2), lock: lock)
+        let frame = geometry.frame
+        guard canAdjust(model), frame.width > 0, frame.height > 0 else { return }
+        let center = CGPoint(x: frame.midX, y: frame.midY)
+        model.tapToFocus(at: layerPoint(fromScreen: center), lock: lock)
+    }
+
+    /// Where a screen point lands in the preview layer, which sits at the picture rect. The host converts with the
+    /// layer itself; this is the same sum for the points the SwiftUI side makes.
+    func layerPoint(fromScreen point: CGPoint) -> CGPoint {
+        CGPoint(x: point.x - geometry.picture.minX, y: point.y - geometry.picture.minY)
+    }
+
+    private func screenPoint(fromLayer point: CGPoint) -> CGPoint {
+        CGPoint(x: point.x + geometry.picture.minX, y: point.y + geometry.picture.minY)
+    }
+
+    private func isOnFrame(_ point: CGPoint) -> Bool {
+        let frame = geometry.frame
+        // Before the first layout there is no frame to tell a band by.
+        guard frame.width > 0, frame.height > 0 else { return true }
+        return frame.insetBy(dx: -Self.frameSlop, dy: -Self.frameSlop).contains(point)
+    }
+
+    /// The host reports when the preview layer starts or stops showing frames.
+    func previewingChanged(_ previewing: Bool) {
+        if isPreviewing != previewing {
+            isPreviewing = previewing
+        }
     }
 
     /// Focus, zoom and exposure stay put while frames are captured or saved, so a stray touch can't move
@@ -186,9 +249,9 @@ private final class ViewfinderInteraction {
     func visibleFocusPoint(_ model: CameraModel) -> CGPoint? {
         guard let point = model.focusPoint else { return nil }
         // A point the handlers haven't seen yet was tapped a moment ago, so its square has just appeared.
-        guard point == trackedFocusPoint else { return point }
+        guard point == trackedFocusPoint else { return screenPoint(fromLayer: point) }
         guard focusPointIsCurrent, reticleIsFresh || holdsLock(model) else { return nil }
-        return point
+        return screenPoint(fromLayer: point)
     }
 
     /// A tap clears the lock and a long press sets it, so a point that arrived locked came from a long press.
@@ -235,9 +298,13 @@ private final class ViewfinderInteraction {
     }
 
     func pinchBegan(model: CameraModel) {
-        pinchBase = currentDisplayZoom(model)
+        // The zoom asked for last, not the 10 Hz reading, which trails a zoom that is still on its way.
+        let requested = model.requestedZoom
+        let live = model.readings.displayZoom
+        pinchBase = requested.isFinite && requested > 0 ? requested : (live.isFinite && live > 0 ? live : 1)
         pinchLastSent = pinchBase
         pinchAtLimit = false
+        pinchSentZoom = false
     }
 
     func pinchChanged(scale: CGFloat, model: CameraModel) {
@@ -263,45 +330,28 @@ private final class ViewfinderInteraction {
             Haptics.tick()
         }
         pinchLastSent = target
-        recentZoom = (target, CACurrentMediaTime())
-        model.setDisplayZoom(target, animated: false)
+        pinchSentZoom = true
+        // While the fingers move, the lens in use keeps a zoom just past the next lens's own value, so a pinch that
+        // rests on a lens boundary doesn't swap cameras back and forth.
+        model.setDisplayZoom(target, animated: false, continuing: true)
     }
 
-    func pinchEnded() {
+    func pinchEnded(model: CameraModel) {
         pinchAtLimit = false
+        guard pinchSentZoom else { return }
+        pinchSentZoom = false
+        // A capture that began under the fingers keeps its zoom.
+        guard canAdjust(model) else { return }
+        // The fingers are off: the last value again, with the strict lens choice, so the zoom ends on the lens that
+        // owns it.
+        model.setDisplayZoom(pinchLastSent, animated: false)
     }
 
-    private func currentDisplayZoom(_ model: CameraModel) -> Double {
-        // Readings arrive ten times a second, so right after a pinch they can trail what was just set.
-        if let recent = recentZoom, CACurrentMediaTime() - recent.time < 0.6 {
-            return recent.value
-        }
-        let live = model.readings.displayZoom
-        return live.isFinite && live > 0 ? live : 1
-    }
-
-    /// Display zoom the pinch may reach: the active lens, or every back lens when auto switching is on.
+    /// Display zoom the pinch may reach: the span the zoom wheel and the zoom dial offer too.
     private static func displayZoomRange(_ model: CameraModel) -> ClosedRange<Double> {
-        let factors = model.capabilities.zoomRange
-        let low = positive(factors.lowerBound, or: 1)
-        let high = max(positive(factors.upperBound, or: low), low)
-        let lenses = model.lenses
-        let activeID = model.backend.activeLensID ?? model.settings.lensID
-        let active = lenses.first(where: { $0.id == activeID })
-        let activeZoom = positive(active?.relativeZoom ?? 1, or: 1)
-        var lower = activeZoom * low
-        var upper = activeZoom * high
-        // The same conditions as the model's switch: it holds the lens while photos are still being saved.
-        if model.settings.controls.autoLensSwitching, active?.isFront == false, !model.activity.isBusy,
-           model.photosInFlight == 0 {
-            let backZooms = lenses
-                .filter { !$0.isFront && $0.kind != .external }
-                .map { positive($0.relativeZoom, or: 1) }
-            if let widest = backZooms.min(), let longest = backZooms.max() {
-                lower = min(lower, widest * low)
-                upper = max(upper, longest * high)
-            }
-        }
+        let span = model.zoomSpan
+        let lower = positive(span.lowerBound, or: 1)
+        let upper = positive(span.upperBound, or: lower)
         return lower...max(upper, lower)
     }
 
@@ -329,7 +379,8 @@ private final class ViewfinderInteraction {
         // along the other axis and throw the value back to where the drag began.
         dragQuarterTurns = model.motion.quarterTurns
         // Beside the focus square when one is up, as in the Camera app; a faded square's old spot means nothing.
-        sliderAnchor = visibleFocusPoint(model) ?? CGPoint(x: viewSize.width / 2, y: viewSize.height / 2)
+        let frame = geometry.frame
+        sliderAnchor = visibleFocusPoint(model) ?? CGPoint(x: frame.midX, y: frame.midY)
         isDraggingExposure = true
     }
 

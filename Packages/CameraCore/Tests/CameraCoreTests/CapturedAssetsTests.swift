@@ -22,7 +22,8 @@ final class CapturedAssetsTests: XCTestCase {
 
     func testKindRawValuesMatchTheCaptureKinds() {
         // The app converts its capture result kinds by raw value, and the file stores these strings.
-        XCTAssertEqual(CapturedAssetKind.allCases.map(\.rawValue), ["photo", "raw", "bracket", "stack", "video", "edit"])
+        XCTAssertEqual(CapturedAssetKind.allCases.map(\.rawValue),
+                       ["photo", "raw", "bracket", "stack", "video", "edit"])
         XCTAssertEqual(CapturedAssetKind(rawValue: "stack"), .stack)
         XCTAssertNil(CapturedAssetKind(rawValue: "timelapse"))
     }

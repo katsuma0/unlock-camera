@@ -7,27 +7,48 @@ import CameraCore
 struct LensRow: View {
     let model: CameraModel
 
+    /// Touch and hold on a lens button opens it in the buttons' place.
+    @State private var wheel = ZoomWheelModel()
+
     var body: some View {
         let mode = model.settings.mode
         // The advanced interface has the EV chip on the manual strip in the other modes. The simple one has no
         // strip, so its brightness chip belongs here in every mode; it only shows while there is something to see.
         let showsExposure = !model.isAdvanced || mode == .photo || mode == .night
+        // Left-handed brings the chip to the left of the lens buttons, where a left thumb reaches it.
+        let chipEdge: Edge.Set = AppearanceStore.shared.leftHanded ? .leading : .trailing
+        let wheelOpen = wheel.isOpen
         ZStack {
-            LensPickerSlot(model: model)
+            LensPickerSlot(model: model, wheel: wheel)
             if showsExposure {
                 ExposureChip(model: model)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-                    .padding(.trailing, 14)
+                    .frame(maxWidth: .infinity, alignment: chipEdge == .leading ? .leading : .trailing)
+                    .padding(chipEdge, 14)
+                    // Out of the way of the wheel, whose touch surface spans the whole row while it is open.
+                    .opacity(wheelOpen ? 0 : 1)
+                    .allowsHitTesting(!wheelOpen)
+                    .accessibilityHidden(wheelOpen)
                     .transition(.opacity)
             }
         }
         .frame(maxWidth: .infinity, minHeight: 44)
+        // Over the row and the picture above it, never in the layout: the controls zone measures its height for
+        // the viewfinder, and an open wheel must not move anything.
+        .overlay(alignment: .bottom) {
+            ZoomWheelOverlay(model: model, wheel: wheel)
+        }
+        // A shot that starts, a flip to the selfie camera or a stopped session ends the zooming.
+        .onChange(of: ZoomWheelModel.canAdjust(model)) { _, canAdjust in
+            if !canAdjust { wheel.close() }
+        }
+        .onDisappear { wheel.close() }
     }
 }
 
 /// Reads readings and motion on its own, so the 10 Hz zoom label redraws only the lens buttons.
 private struct LensPickerSlot: View {
     let model: CameraModel
+    let wheel: ZoomWheelModel
 
     var body: some View {
         let isFront = model.capabilities.lens.isFront
@@ -35,12 +56,15 @@ private struct LensPickerSlot: View {
             presets: model.backLensPresets,
             activeID: model.activePresetID,
             displayZoom: model.readings.displayZoom,
+            zoomTarget: model.zoomTarget,
             rotation: model.motion.iconRotationDegrees,
+            isWheelOpen: wheel.isOpen,
             onSelect: { preset in
-                // Picking a lens says the zooming is done.
+                // Picking a lens says the zooming is done, on the dial or the wheel.
                 if model.activeDial == .zoom {
                     withAnimation(Theme.spring) { model.activeDial = nil }
                 }
+                wheel.close()
                 // The model refuses a lens change while filming, since it would reconfigure the session under the
                 // movie file. Zooming the recording lens to the button's value keeps the button doing something.
                 if model.activity == .recording {
@@ -50,7 +74,17 @@ private struct LensPickerSlot: View {
                 }
                 model.select(preset)
             },
+            onHold: { translation in
+                wheel.touchChanged(.hold, translation: translation, model: model)
+            },
+            onHoldEnded: {
+                wheel.touchEnded(.hold, model: model)
+            },
+            onNudge: { steps in
+                model.nudgeZoom(by: steps)
+            },
             onZoomDial: {
+                wheel.close()
                 withAnimation(Theme.spring) {
                     model.activeDial = model.activeDial == .zoom ? nil : .zoom
                 }

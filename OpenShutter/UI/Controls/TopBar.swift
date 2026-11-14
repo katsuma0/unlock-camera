@@ -827,8 +827,9 @@ private struct RecordingCapsule: View {
 
 // MARK: - Styles and helpers
 
-/// The shared glass circle, with the touch area grown to 44 pt around it.
-private struct BarCircleStyle: ButtonStyle {
+/// The shared glass circle, with the touch area grown to 44 pt around it. Every customizable button uses it, so each
+/// fills one of the bar's slots exactly.
+struct BarCircleStyle: ButtonStyle {
     var isActive = false
     /// A press on the button's touch and hold layer.
     var isPressed = false

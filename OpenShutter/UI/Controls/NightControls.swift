@@ -2,8 +2,9 @@ import SwiftUI
 import CameraCore
 
 /// NIGHT mode: the duration (automatic from the light, or 1 to 30 s) and, in the advanced interface, how steady the
-/// phone is and the frames the shot will take. The simple interface shows one line of advice in their place. The
-/// duration capsule opens its own dial, since night duration has no `DialKind`; touch and hold lists a few durations.
+/// phone is and the frames the shot will take. The simple interface shows one line of advice in their place. Whether
+/// to hold still or use a tripod is the status pill's over the picture (SteadyBanner). The duration capsule opens its
+/// own dial, since night duration has no `DialKind`; touch and hold lists a few durations.
 struct NightControls: View {
     @Bindable var model: CameraModel
     @State private var isDialOpen = false
@@ -382,26 +383,6 @@ private struct SteadyIndicator: View {
     }
 }
 
-/// SF Symbols has no tripod, so a small one is drawn here: a camera head on three legs.
-private struct TripodGlyph: View {
-    var body: some View {
-        Canvas { context, size in
-            let width = size.width
-            let height = size.height
-            let head = CGRect(x: width * 0.2, y: 0, width: width * 0.6, height: height * 0.3)
-            context.fill(Path(roundedRect: head, cornerRadius: height * 0.07), with: .foreground)
-            let top = CGPoint(x: width * 0.5, y: height * 0.34)
-            var legs = Path()
-            for foot in [CGPoint(x: width * 0.1, y: height), CGPoint(x: width * 0.5, y: height), CGPoint(x: width * 0.9, y: height)] {
-                legs.move(to: top)
-                legs.addLine(to: foot)
-            }
-            context.stroke(legs, with: .foreground, style: StrokeStyle(lineWidth: max(1, width * 0.13), lineCap: .round))
-        }
-        .accessibilityHidden(true)
-    }
-}
-
 // MARK: - Plan
 
 private struct NightPlanLine: View {
@@ -414,6 +395,7 @@ private struct NightPlanLine: View {
             .foregroundStyle(Theme.secondaryText)
             .lineLimit(1)
             .minimumScaleFactor(0.8)
+            .overPicture()
             .frame(maxWidth: .infinity)
             // Rolls only inside an explicit animation: the plan follows the 10 Hz light readings.
             .contentTransition(.numericText())
@@ -421,26 +403,27 @@ private struct NightPlanLine: View {
     }
 }
 
-/// The simple interface's one line of advice, where the advanced one has the stability picker and the plan. Reads
-/// motion on its own, so the attitude updates redraw only this line.
+/// The simple interface's tip under the duration, where the advanced one has the stability picker and the plan. The
+/// pill over the picture says whether to hold still or use a tripod, so this line only says what a steady phone
+/// opens up. While the phone moves the line stays empty, keeping the panel's height. Reads motion on its own, so the
+/// attitude updates redraw only this line.
 private struct NightHintLine: View {
     let model: CameraModel
 
     var body: some View {
         let steady = model.motion.isSteady
-        ZStack {
-            Text(steady ? NightText.steadyHint : NightText.handheldHint)
-                .font(.footnote)
-                .foregroundStyle(Theme.secondaryText)
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
-                .id(steady)
-                .transition(.opacity)
-        }
-        .frame(maxWidth: .infinity)
-        // The controls sit in a fixed band above the shutter; the largest text sizes would push them up the picture.
-        .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
-        .animation(Theme.snappy, value: steady)
+        Text(NightText.steadyHint)
+            .font(.footnote)
+            .foregroundStyle(Theme.secondaryText)
+            .lineLimit(1)
+            .minimumScaleFactor(0.8)
+            .overPicture()
+            .opacity(steady ? 1 : 0)
+            .accessibilityHidden(!steady)
+            .frame(maxWidth: .infinity)
+            // The controls sit in a fixed band above the shutter; the largest text sizes would push them up the picture.
+            .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
+            .animation(Theme.snappy, value: steady)
     }
 }
 
@@ -480,11 +463,10 @@ private struct NightChipLook: ViewModifier {
 }
 
 private enum NightText {
-    static let handheldHint = "Hold still until it finishes."
     /// Stability stays on automatic here, which never assumes a tripod, so however still the phone is the
     /// automatic duration stops at the steady limit. The longer times are on the duration button's dial, up to the
     /// end of the planner's range. Named by what it shows: the shutter wears a moon too.
-    static let steadyHint = "Steady. Tap the duration for up to \(Int(NightModePlanner.secondsRange.upperBound)) s."
+    static let steadyHint = "Tap the duration for up to \(Int(NightModePlanner.secondsRange.upperBound)) s."
 
     /// "Auto · 3s" or "10s".
     static func duration(_ seconds: Double, isAuto: Bool) -> String {
@@ -498,5 +480,13 @@ private enum NightText {
         let speed = ShutterSpeed(seconds: plan.frameSeconds)
         let shutter = speed.isFraction ? speed.label + "s" : speed.label
         return "\(frames) \u{00D7} \(shutter) \u{00B7} \(ISOScale.label(plan.iso))"
+    }
+}
+
+private extension View {
+    /// The panel sits on the picture with no scrim behind it, so plain text carries a shadow of its own, like the
+    /// countdown's hint, to read over a bright scene.
+    func overPicture() -> some View {
+        shadow(color: .black.opacity(0.6), radius: 4)
     }
 }

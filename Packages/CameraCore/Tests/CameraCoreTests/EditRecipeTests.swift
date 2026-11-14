@@ -19,7 +19,8 @@ final class EditRecipeTests: XCTestCase {
                    crop: CropRect(x: 0.1, y: 0.2, width: 0.3 + 0.0000001, height: 0.4), cropAspect: .threeTwo)
     }
 
-    private func assertRect(_ rect: CropRect?, _ expected: CropRect, file: StaticString = #filePath, line: UInt = #line) {
+    private func assertRect(_ rect: CropRect?, _ expected: CropRect, file: StaticString = #filePath,
+                            line: UInt = #line) {
         guard let rect else { return XCTFail("no crop", file: file, line: line) }
         XCTAssertEqual(rect.x, expected.x, accuracy: 1e-12, file: file, line: line)
         XCTAssertEqual(rect.y, expected.y, accuracy: 1e-12, file: file, line: line)
@@ -157,7 +158,8 @@ final class EditRecipeTests: XCTestCase {
         recipe.straightenDegrees = 12.5
         XCTAssertEqual(recipe.straightenDegrees, 12.5)
 
-        for (turns, expected) in [(0, 0), (1, 1), (3, 3), (4, 0), (5, 1), (-1, 3), (-4, 0), (-6, 2), (Int.max, 3), (Int.min, 0)] {
+        let cases = [(0, 0), (1, 1), (3, 3), (4, 0), (5, 1), (-1, 3), (-4, 0), (-6, 2), (Int.max, 3), (Int.min, 0)]
+        for (turns, expected) in cases {
             recipe.quarterTurns = turns
             XCTAssertEqual(recipe.quarterTurns, expected, "\(turns)")
             XCTAssertEqual(EditRecipe(quarterTurns: turns).quarterTurns, expected, "\(turns)")
@@ -185,6 +187,23 @@ final class EditRecipeTests: XCTestCase {
         }
         recipe.crop = CropRect(x: 0.2, y: 0.2, width: EditRecipe.minimumCropSide, height: 0.5)
         XCTAssertNotNil(recipe.crop)
+    }
+
+    func testACropInsideThePictureReadsBackExactly() throws {
+        // 0.1 + 0.3 - 0.1 is 0.30000000000000004 in doubles, so recomputing a side would change it.
+        let inside = CropRect(x: 0.1, y: 0.1, width: 0.3, height: 0.3)
+        var recipe = EditRecipe()
+        recipe.crop = inside
+        XCTAssertEqual(recipe.crop, inside)
+        XCTAssertEqual(EditRecipe(crop: inside).crop, inside)
+        XCTAssertEqual(EditRecipe.decoded(from: try EditRecipe(crop: inside).encoded()).crop, inside)
+    }
+
+    func testWarmthAndTintAtZeroKeepTheExactWhite() {
+        for value in [0.0, -0.0] {
+            XCTAssertEqual(EditRecipe(warmth: value, tint: value).parameters.targetNeutral, EditParameters.neutral)
+            XCTAssertFalse(EditRecipe(warmth: value, tint: value).parameters.usesTemperatureAndTint)
+        }
     }
 
     // MARK: - Adjustment data
@@ -270,7 +289,8 @@ final class EditRecipeTests: XCTestCase {
 
     func testParametersAtFullStrength() {
         let up = EditRecipe(exposure: 1, highlights: 1, shadows: 1, contrast: 1, brightness: 1, saturation: 1,
-                            vibrance: 1, warmth: 1, tint: 1, sharpness: 1, vignette: 1, straightenDegrees: 45).parameters
+                            vibrance: 1, warmth: 1, tint: 1, sharpness: 1, vignette: 1,
+                            straightenDegrees: 45).parameters
         XCTAssertEqual(up.ev, 2)
         XCTAssertEqual(up.highlightAmount, 1)
         XCTAssertEqual(up.toneCurve[3].y, 0.85, accuracy: 1e-12)

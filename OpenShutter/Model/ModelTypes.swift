@@ -75,6 +75,9 @@ struct MotionState: Equatable, Sendable {
     /// Held still long enough to trust long handheld frames, or sitting on a tripod.
     var isSteady: Bool = false
     var pitch: Double = 0
+    /// The motion sensor has delivered a sample. Until then (and always in the Simulator) nothing says whether the
+    /// phone moves, so no status claims it is moving or steady.
+    var isAvailable: Bool = false
 
     /// Rotation for icons and labels so they stay upright while the UI stays in portrait.
     var iconRotationDegrees: Double {

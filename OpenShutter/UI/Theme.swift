@@ -1,25 +1,67 @@
 import SwiftUI
 import UIKit
 
-/// The look of the app: Apple's Camera palette (black, white, system yellow), SF Pro, glass controls.
+/// The look of the app: Apple's Camera palette (black, white, the accent), SF Pro, glass controls. What follows a
+/// setting (the accent, Larger labels, Solid buttons, Reduce motion, Increase Contrast) comes from AppearanceStore,
+/// so those members belong to the main actor, as every view that draws with them does, and a body that reads one
+/// redraws when it changes.
 enum Theme {
-    /// iOS Camera's yellow (systemYellow in dark mode).
-    static let accent = Color(red: 1.0, green: 0.839, blue: 0.039)
+    /// The accent the person picked: Apple Camera's yellow unless changed. On the camera it is the bright shade, in
+    /// a light sheet a deeper one.
+    @MainActor static var accent: Color { AppearanceStore.shared.accent }
+    /// Text and glyphs on an accent fill: black on the camera, white in light sheets.
+    @MainActor static var onAccent: Color { AppearanceStore.shared.onAccent }
     static let recording = Color(red: 1.0, green: 0.231, blue: 0.188)
     static let background = Color.black
     static let primaryText = Color.white
-    static let secondaryText = Color.white.opacity(0.6)
-    static let tertiaryText = Color.white.opacity(0.35)
+    @MainActor static var secondaryText: Color {
+        AppearanceStore.shared.increaseContrast ? Palette.strongSecondaryText : Palette.secondaryText
+    }
+    @MainActor static var tertiaryText: Color {
+        AppearanceStore.shared.increaseContrast ? Palette.strongTertiaryText : Palette.tertiaryText
+    }
     /// Darkens the parts of the sensor outside the chosen aspect ratio.
     static let maskDim = Color.black.opacity(0.55)
-    static let hairline = Color.white.opacity(0.18)
+    @MainActor static var hairline: Color {
+        AppearanceStore.shared.increaseContrast ? Palette.strongHairline : Palette.hairline
+    }
 
-    static let modeFont = Font.system(size: 13, weight: .semibold).width(.standard)
-    static let chipFont = Font.system(size: 12, weight: .semibold).monospacedDigit()
-    static let valueFont = Font.system(size: 15, weight: .semibold, design: .default).monospacedDigit()
-    static let bigValueFont = Font.system(size: 20, weight: .semibold).monospacedDigit()
+    @MainActor static var modeFont: Font { larger ? Fonts.largeMode : Fonts.mode }
+    @MainActor static var chipFont: Font { larger ? Fonts.largeChip : Fonts.chip }
+    @MainActor static var valueFont: Font { larger ? Fonts.largeValue : Fonts.value }
+    @MainActor static var bigValueFont: Font { larger ? Fonts.largeBigValue : Fonts.bigValue }
     static let countdownFont = Font.system(size: 120, weight: .thin).monospacedDigit()
-    static let readoutFont = Font.system(size: 11, weight: .medium).monospacedDigit()
+    @MainActor static var readoutFont: Font { larger ? Fonts.largeReadout : Fonts.readout }
+    /// How much bigger Larger labels makes camera text, for text sized outside these fonts.
+    @MainActor static var labelScale: CGFloat { larger ? Fonts.largerScale : 1 }
+
+    @MainActor private static var larger: Bool { AppearanceStore.shared.largerLabels }
+
+    /// Gray text and hairlines on the camera's black and glass. Increase Contrast lifts each one.
+    private enum Palette {
+        static let secondaryText = Color.white.opacity(0.6)
+        static let strongSecondaryText = Color.white.opacity(0.8)
+        static let tertiaryText = Color.white.opacity(0.35)
+        static let strongTertiaryText = Color.white.opacity(0.55)
+        static let hairline = Color.white.opacity(0.18)
+        static let strongHairline = Color.white.opacity(0.35)
+    }
+
+    /// Camera labels have fixed sizes, because the system text size would push them out of their fixed-height rows.
+    /// Larger labels makes each about a fifth bigger, which those rows still hold.
+    private enum Fonts {
+        static let largerScale: CGFloat = 1.2
+        static let mode = Font.system(size: 13, weight: .semibold).width(.standard)
+        static let largeMode = Font.system(size: 15.5, weight: .semibold).width(.standard)
+        static let chip = Font.system(size: 12, weight: .semibold).monospacedDigit()
+        static let largeChip = Font.system(size: 14.5, weight: .semibold).monospacedDigit()
+        static let value = Font.system(size: 15, weight: .semibold, design: .default).monospacedDigit()
+        static let largeValue = Font.system(size: 18, weight: .semibold, design: .default).monospacedDigit()
+        static let bigValue = Font.system(size: 20, weight: .semibold).monospacedDigit()
+        static let largeBigValue = Font.system(size: 24, weight: .semibold).monospacedDigit()
+        static let readout = Font.system(size: 11, weight: .medium).monospacedDigit()
+        static let largeReadout = Font.system(size: 13, weight: .medium).monospacedDigit()
+    }
 
     /// The default spring for controls: quick, no visible bounce.
     static let spring = Animation.spring(response: 0.32, dampingFraction: 0.86)
@@ -40,9 +82,29 @@ extension Image {
 }
 
 extension View {
-    /// Liquid Glass on iOS 26 and later, a material blur before that. Both read as the same control.
+    /// Liquid Glass on iOS 26 and later, a material blur before that. Both read as the same control. With Solid
+    /// buttons, a dark backing instead: over a white sky white text keeps 9.3:1 and the yellow 6.6:1 on it, where
+    /// glass lets the sky through. It is also cheaper to draw.
+    @MainActor
     @ViewBuilder
     func cameraGlass<S: Shape>(in shape: S, tint: Color? = nil, interactive: Bool = false) -> some View {
+        if AppearanceStore.shared.solidControls {
+            self.background {
+                ZStack {
+                    shape.fill(Color.black.opacity(0.72))
+                    if let tint {
+                        shape.fill(tint.opacity(0.3))
+                    }
+                }
+            }
+            .overlay(shape.stroke(Color.white.opacity(0.22), lineWidth: 0.5))
+        } else {
+            liquidGlass(in: shape, tint: tint, interactive: interactive)
+        }
+    }
+
+    @ViewBuilder
+    private func liquidGlass<S: Shape>(in shape: S, tint: Color?, interactive: Bool) -> some View {
         #if compiler(>=6.2)
         if #available(iOS 26.0, *) {
             self.glassEffect(Glass.regular.tint(tint).interactive(interactive), in: shape)
@@ -63,7 +125,8 @@ extension View {
 }
 
 /// Turns to each new angle the short way. Animating the raw angles would spin icons 270 degrees between landscape
-/// right (-90) and upside down (180), where the phone only made a quarter turn.
+/// right (-90) and upside down (180), where the phone only made a quarter turn. With Reduce motion, in the app or in
+/// iOS, icons switch to the new angle instead of turning.
 private struct UprightRotation: ViewModifier {
     let degrees: Double
     /// The angle on screen. It may leave -180...180 after a few turns; only the change between angles matters.
@@ -85,7 +148,14 @@ private struct UprightRotation: ViewModifier {
                 } else if delta <= -180 {
                     delta += 360
                 }
-                withAnimation(Theme.spring) { shown += delta }
+                // Read when the phone turns, not in the body, so the setting adds no redraws of its own.
+                if AppearanceStore.shared.reduceMotion {
+                    var still = Transaction(animation: nil)
+                    still.disablesAnimations = true
+                    withTransaction(still) { shown += delta }
+                } else {
+                    withAnimation(Theme.spring) { shown += delta }
+                }
             }
     }
 }

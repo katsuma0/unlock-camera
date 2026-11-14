@@ -822,29 +822,14 @@ private enum DialScales {
         return DialScale(values: values, spoken: spoken, candidates: candidates, spacing: 10, metric: .logarithmic)
     }
 
-    /// Display zoom the dial covers. With automatic lens switching it spans every back lens like the Camera app
-    /// (up to five times the longest lens), so switching lenses mid-drag never rescales the ruler under the finger.
+    /// Display zoom the dial covers: the model's span, the one pinch and the zoom wheel use too. It spans every back
+    /// lens while the camera may switch lenses, so switching mid-drag never rescales the ruler under the finger, and
+    /// keeps to the active lens while it can't, so the dial never offers a zoom the camera won't go to.
     static func zoomSpan(_ model: CameraModel) -> ZoomSpan {
-        let caps = model.capabilities
-        let lens = caps.lens
-        let relative = lens.relativeZoom.isFinite && lens.relativeZoom > 0 ? lens.relativeZoom : 1
-        let backLenses = model.lenses.filter { !$0.isFront && $0.kind != .external }
-        let backIDs = Set(backLenses.map(\.id))
-        let backPresets = model.lensPresets.filter { backIDs.contains($0.lensID) }
-        let ownLower = max(relative * caps.zoomRange.lowerBound, 0.1)
-        let ownUpper = relative * caps.zoomRange.upperBound
-
-        let zooms = backLenses.map(\.relativeZoom).filter { $0.isFinite && $0 > 0 }
-        // The model switches lenses only while idle with no photo still saving. During a countdown, a recording or a
-        // save the dial keeps to the active lens, so it never offers a zoom the camera won't go to.
-        if model.settings.controls.autoLensSwitching, !lens.isFront, !model.activity.isBusy, model.photosInFlight == 0,
-           zooms.count > 1, let widest = zooms.min(), let longest = zooms.max() {
-            let upper = max(min(longest * 5, 25), widest)
-            return ZoomSpan(lower: widest, upper: upper, marks: backPresets.map(\.displayZoom))
-        }
-        let upper = max(min(ownUpper, relative * 5, 25), ownLower)
-        let marks = lens.isFront ? [] : backPresets.filter { $0.lensID == lens.id }.map(\.displayZoom)
-        return ZoomSpan(lower: ownLower, upper: upper, marks: marks)
+        let span = model.zoomSpan
+        // The selfie camera has no lens buttons to stop on.
+        let marks = model.capabilities.lens.isFront ? [] : model.zoomMarks
+        return ZoomSpan(lower: span.lowerBound, upper: span.upperBound, marks: marks)
     }
 
     /// Tenths up to 2×, then coarser steps so the long end stays a short swipe away, as on the Camera app dial.

@@ -21,6 +21,10 @@ struct ShutterButton: View {
     /// False while the camera would ignore a press, such as during a photo's exposure. A press then gets no scale,
     /// haptic or action, so the shutter is never felt to fire without firing. The look stays: that state is brief.
     var acceptsPress: Bool = true
+    /// The battery saver has the screen dark over the button. The bulb arc holds still and the progress ring steps
+    /// without animating, so nothing keeps drawing under the black. The button stays in place: removing it would end
+    /// a bulb hold.
+    var isDimmed: Bool = false
     var action: () -> Void
     var onHoldBegan: (() -> Void)? = nil
     var onHoldEnded: (() -> Void)? = nil
@@ -171,9 +175,9 @@ struct ShutterButton: View {
                         .trim(from: 0, to: progress)
                         .stroke(Theme.accent, style: StrokeStyle(lineWidth: Self.ringWidth, lineCap: .round))
                         .rotationEffect(.degrees(-90))
-                        .animation(.linear(duration: 0.3), value: progress)
+                        .animation(isDimmed ? nil : .linear(duration: 0.3), value: progress)
                 } else {
-                    PendingArc(lineWidth: Self.ringWidth)
+                    PendingArc(lineWidth: Self.ringWidth, isPaused: isDimmed)
                 }
             }
         }
@@ -289,23 +293,26 @@ struct ShutterButton: View {
     }
 }
 
-/// Bulb exposures have no known length, so the ring shows a slow sweep instead of progress. With Reduce Motion the arc
-/// holds still at the top; the stop square already says the shutter is open.
+/// Bulb exposures have no known length, so the ring shows a slow sweep instead of progress. With Reduce Motion, the
+/// system's or the app's own, the arc holds still at the top; the stop square already says the shutter is open. It
+/// holds still while the battery saver keeps the screen dark too.
 private struct PendingArc: View {
     let lineWidth: CGFloat
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    var isPaused = false
+    @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
     @State private var spinning = false
 
     var body: some View {
+        let holdsStill = systemReduceMotion || AppearanceStore.shared.reduceMotion || isPaused
         Circle()
             .inset(by: lineWidth / 2)
             .trim(from: 0, to: 0.2)
             .stroke(Theme.accent, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
             .rotationEffect(.degrees(spinning ? 270 : -90))
             .animation(spinning ? .linear(duration: 1.4).repeatForever(autoreverses: false) : nil, value: spinning)
-            .onAppear { spinning = !reduceMotion }
-            // A repeating animation keeps running after its value changes back, so a switch of the setting starts a
-            // fresh arc, whose onAppear picks the new state.
-            .id(reduceMotion)
+            .onAppear { spinning = !holdsStill }
+            // A repeating animation keeps running after its value changes back, so a change starts a fresh arc,
+            // whose onAppear picks the new state.
+            .id(holdsStill)
     }
 }

@@ -1,7 +1,7 @@
 import Foundation
 
 // The editor's settings for one photo, saved as Photos adjustment data next to the untouched original, and the
-// numbers the renderer gives Core Image. Pure values, so the rules are tested here and the app only draws them.
+// numbers the renderer gives Core Image. Pure values, so the rules are tested here and the app only applies them.
 
 /// One photo's edit. Every adjustment is 0 when unchanged. Values are clamped on every write, so a recipe read back
 /// from Photos or set by the UI always renders.
@@ -172,7 +172,8 @@ public struct EditRecipe: Codable, Hashable, Sendable {
 
     /// Crops to a centred `aspect`, standing or lying as shown, for a photo `imageWidth` x `imageHeight` upright
     /// (before this recipe's turns, which the crop follows). nil removes the crop.
-    public mutating func setCropAspect(_ aspect: AspectRatio?, portrait: Bool, imageWidth: Double, imageHeight: Double) {
+    public mutating func setCropAspect(_ aspect: AspectRatio?, portrait: Bool, imageWidth: Double,
+                                       imageHeight: Double) {
         guard let aspect else {
             crop = nil
             cropAspect = nil
@@ -264,8 +265,8 @@ public struct EditRecipe: Codable, Hashable, Sendable {
         // Rounding in the crop math can leave a whole-picture crop a hair inside the edges.
         let edge = 1e-9
         if left <= edge, top <= edge, right >= 1 - edge, bottom >= 1 - edge { return nil }
-        // A side that needed no clamping keeps its stored length: (x + width) - x can differ from width in the last
-        // bit, and a recipe has to come back from the file exactly as it was saved.
+        // A side that needed no clamping keeps its length as given: (x + width) - x can differ from width in the last
+        // bit, and the editor compares the crops it sets with the ones it reads back.
         let width = left == rect.x && right == rect.maxX ? rect.width : right - left
         let height = top == rect.y && bottom == rect.maxY ? rect.height : bottom - top
         return CropRect(x: left, y: top, width: width, height: height)
@@ -308,7 +309,7 @@ public struct EditParameters: Hashable, Sendable {
     public static let highlightShadowRadius = 0.0
     /// CISharpenLuminance inputRadius for the full-size photo, in pixels: multiply by the render scale.
     public static let sharpenRadius = 1.69
-    /// CIVignette inputRadius. It scales with the picture, so it needs no render scale.
+    /// CIVignette inputRadius, the same at every render size.
     public static let vignetteRadius = 1.5
 
     // Full-strength steps of each slider, in the filters' units.
@@ -342,9 +343,10 @@ public struct EditParameters: Hashable, Sendable {
     public var saturation: Double
     /// CIVibrance inputAmount.
     public var vibrance: Double
-    /// CITemperatureAndTint inputTargetNeutral, with inputNeutral `EditParameters.neutral`: the picture's white is
-    /// moved to this white, so a lower temperature warms the picture. If warmth +1 turns a gray patch blue instead,
-    /// the filter reads the vectors the other way round: pass this as inputNeutral and `neutral` as the target.
+    /// CITemperatureAndTint inputTargetNeutral, with inputNeutral `EditParameters.neutral`. The header calls them the
+    /// source and the desired white point, so the picture's white moves to this one: a lower temperature warms the
+    /// picture and a lower tint turns it magenta. If warmth +1 turns a gray patch blue instead, the filter reads them
+    /// the other way round: pass this as inputNeutral and `neutral` as the target.
     public var targetNeutral: WhitePoint
     /// The CIPhotoEffect filter, nil for no look.
     public var lookFilterName: String?
@@ -366,12 +368,10 @@ public struct EditParameters: Hashable, Sendable {
         brightness = Self.brightnessPerUnit * recipe.brightness
         saturation = 1 + recipe.saturation
         vibrance = recipe.vibrance
-        // Mired steps look even across the slider, which kelvin steps don't. 0 stays exactly 6500 K.
+        // Mired steps look even across the slider, which kelvin steps don't.
         let neutralMireds = 1_000_000 / Self.neutral.temperature
-        targetNeutral = WhitePoint(
-            temperature: recipe.warmth == 0 ? Self.neutral.temperature
-                : 1_000_000 / (neutralMireds + Self.warmthMireds * recipe.warmth),
-            tint: recipe.tint == 0 ? Self.neutral.tint : Self.neutral.tint - Self.tintPerUnit * recipe.tint)
+        targetNeutral = WhitePoint(temperature: 1_000_000 / (neutralMireds + Self.warmthMireds * recipe.warmth),
+                                   tint: Self.neutral.tint - Self.tintPerUnit * recipe.tint)
         lookFilterName = recipe.look.filterName
         sharpness = Self.sharpnessPerUnit * recipe.sharpness
         vignetteIntensity = recipe.vignette

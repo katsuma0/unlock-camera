@@ -336,14 +336,10 @@ struct DeviceOptions: Equatable, Sendable {
     }
 }
 
-/// GPS position for EXIF and Photos, as a value type so CoreLocation stays out of the camera layer.
-struct LocationStamp: Equatable, Sendable {
-    var latitude: Double
-    var longitude: Double
-    var altitude: Double
-    var horizontalAccuracy: Double
-    var timestamp: Date
-}
+/// GPS position for EXIF and Photos, as a value type so CoreLocation stays out of the camera layer. The metadata
+/// builder's own fix type, so the location in a request reaches the files without a copy. Its first five
+/// initializer arguments are the old struct's, in order.
+typealias LocationStamp = GeoTag
 
 struct PhotoRequest: Sendable {
     var processedFormat: ProcessedFormat
