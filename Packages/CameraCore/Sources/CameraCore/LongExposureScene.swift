@@ -152,8 +152,9 @@ public enum LongExposureScene: String, Codable, Sendable, CaseIterable, Identifi
 
     public var id: String { rawValue }
 
-    /// Every scene with a recipe, in picker order.
-    public static let presets: [LongExposureScene] = [.water, .lightTrails, .stars, .northernLights, .starTrails, .fireworks, .lightPainting]
+    /// The scenes the picker offers, in order. Star trails keeps its recipe so a saved choice still opens, but it is
+    /// no longer offered: a shot that runs for many minutes with the screen on wasn't worth its place in the strip.
+    public static let presets: [LongExposureScene] = [.water, .lightTrails, .stars, .northernLights, .fireworks, .lightPainting]
 
     public var title: String {
         switch self {

@@ -106,7 +106,7 @@ final class SteadinessTests: XCTestCase {
             }
         }
         XCTAssertEqual(needs, [.water: .holdStill, .lightTrails: .tripod, .stars: .tripod, .northernLights: .tripod,
-                               .starTrails: .tripod, .fireworks: .tripod, .lightPainting: .tripod])
+                               .fireworks: .tripod, .lightPainting: .tripod])
     }
 
     // MARK: - NIGHT
@@ -929,7 +929,7 @@ final class SteadinessTests: XCTestCase {
             dimming[scene] = dimsAtSomePoint(total: recipe.bulb ? nil : recipe.seconds)
         }
         XCTAssertEqual(dimming, [.water: false, .lightTrails: true, .stars: true, .northernLights: false,
-                                 .starTrails: true, .fireworks: false, .lightPainting: true])
+                                 .fireworks: false, .lightPainting: true])
         // Northern lights picked at 15 s does.
         XCTAssertTrue(dimsAtSomePoint(total: 15))
         // NIGHT: handheld (3 s) never; steady hands (10 s) and a tripod (30 s) do.

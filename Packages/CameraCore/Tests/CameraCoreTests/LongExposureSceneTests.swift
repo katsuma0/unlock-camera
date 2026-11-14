@@ -64,8 +64,8 @@ final class LongExposureSceneTests: XCTestCase {
 
     func testPresetsAreEverySceneWithARecipeInPickerOrder() {
         XCTAssertEqual(LongExposureScene.presets,
-                       [.water, .lightTrails, .stars, .northernLights, .starTrails, .fireworks, .lightPainting])
-        XCTAssertEqual(LongExposureScene.allCases, LongExposureScene.presets + [.custom])
+                       [.water, .lightTrails, .stars, .northernLights, .fireworks, .lightPainting])
+        XCTAssertEqual(Set(LongExposureScene.allCases), Set(LongExposureScene.presets + [.starTrails, .custom]))
         XCTAssertEqual(presetRecipes().count, LongExposureScene.presets.count)
         XCTAssertNil(LongExposureScene.custom.recipe)
     }
@@ -538,7 +538,7 @@ final class LongExposureSceneTests: XCTestCase {
             // The ISO is held as well, so every frame is exposed alike.
             XCTAssertEqual(stack.iso, recipe.isoLock(in: phone.iso), scene.rawValue)
         }
-        XCTAssertEqual(fixed, [.starTrails, .fireworks, .lightPainting])
+        XCTAssertEqual(fixed, [.fireworks, .lightPainting])
     }
 
     func testLightTrailsFramesRunUpToASecondAtTheLowestISO() {
