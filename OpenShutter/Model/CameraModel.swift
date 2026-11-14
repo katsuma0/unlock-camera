@@ -962,8 +962,8 @@ final class CameraModel {
         select(preset, haptic: haptic, replaying: false)
     }
 
-    /// replaying: a choice that waited for a swap or a shot (applyPendingLensChange). Its button and target are
-    /// already the ones showing, which a new tap on the same button would leave alone.
+    /// replaying: a choice that waited for a swap or a shot (applyPendingLensChange). Its button and target can still
+    /// be the ones showing, which a new tap on the same button would leave alone.
     private func select(_ preset: LensPreset, haptic: Bool, replaying: Bool) {
         guard !activity.isBusy else { return }
         // A second tap on the button a glide is already heading to: planned again from where the picture is midway,
@@ -998,8 +998,8 @@ final class CameraModel {
         if let targetLens, !targetLens.isFront {
             lastBackPresetID = preset.id
         }
-        // A transition still on its way plans from where it was going; the picture itself is somewhere between,
-        // which is what a swap has to match.
+        // A glide on this lens plans from where the last one was going. A change of lens goes by the picture itself,
+        // which is somewhere between while another transition is on its way.
         let from = requestedDisplayZoom
         let framing = zoomTarget == nil ? from : readings.displayZoom
         let to = preset.displayZoom
@@ -1027,8 +1027,8 @@ final class CameraModel {
             switchLens(to: preset, generation: generation)
             return
         }
-        // The direction goes by the picture, which a tap during another glide finds midway: from 1x heading to 8x,
-        // a tap on 4 at 1.7x still zooms in, where the old target would make it a zoom out and cut.
+        // From 1x heading to 8x, a tap on 4 at 1.7x still zooms in; planned from the old target it would zoom out
+        // and cut.
         if to > framing {
             // In: the lens in use zooms the whole way, digitally past its own reach, then the longer lens takes over
             // at the same framing. The swap at the end reads as the camera settling, not as a stutter mid-motion.
@@ -1161,8 +1161,8 @@ final class CameraModel {
 
         let clamped = clampZoomFactor(factor)
         settings.zoom = clamped
-        // The camera stays on this lens, which the settings may not name yet: a lens button's zoom in that is still
-        // on its way, or one whose swap waits for photos to be saved.
+        // A zoom saved for a lens names that lens with it. The camera is on this one, whatever an earlier choice left
+        // in the settings, and a cold start opens the lens they name at this factor.
         if settings.lensID != targetLens.id { settings.lensID = targetLens.id }
         let reached = clamped * base
         requestedDisplayZoom = reached
@@ -1173,8 +1173,8 @@ final class CameraModel {
         } else {
             backend.setZoomFactor(clamped, rampRate: nil)
         }
-        // The destination's button lights at the request, while the zoom still moves, as a tap on it would. On one
-        // lens the settings and the device agree all the way, which is what the target's hold on the button is for.
+        // The destination's button lights at the request, while the zoom still moves, as a tap on it would. The target
+        // holds the button back only during a change of lens, whose lit button names the lens still to come.
         updateActivePreset(factor: clamped, force: true)
         scheduleSave()
     }
