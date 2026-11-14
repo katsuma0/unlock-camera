@@ -101,7 +101,9 @@ struct GalleryViewer: View {
             await loadStackLine()
         }
         .fullScreenCover(item: $editing) { target in
+            // The editor stays dark, like the viewer, even when the grid behind it is light.
             PhotoEditorView(asset: target.asset, library: library)
+                .preferredColorScheme(.dark)
         }
         .sheet(item: $inspecting) { target in
             NavigationStack {
@@ -248,6 +250,9 @@ struct GalleryViewer: View {
     /// and the grid comes back when nothing is left.
     private func keepCurrentPage() {
         guard let assets = library.assets else { return }
+        // A favorite the library now reports needs no stand-in, and a stale one would hide a change made in Photos.
+        let unconfirmed = favorites.filter { id, isOn in assets.asset(id: id).map { $0.isFavorite != isOn } ?? false }
+        if unconfirmed.count != favorites.count { favorites = unconfirmed }
         if let currentID, let index = assets.index(of: currentID) {
             lastIndex = index
             return

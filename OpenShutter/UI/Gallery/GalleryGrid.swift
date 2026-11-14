@@ -163,7 +163,7 @@ private struct CellRequest: Hashable {
 
     init(asset: PHAsset?, pixelSide: CGFloat) {
         version = asset.map(AssetVersion.init)
-        self.pixelSide = pixelSide.isFinite ? Int(pixelSide) : 0
+        self.pixelSide = pixelSide.isFinite ? Int(min(max(pixelSide, 0), 4_096)) : 0
     }
 }
 

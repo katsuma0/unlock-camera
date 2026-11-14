@@ -72,7 +72,7 @@ enum AssetUpdate<Value: Sendable>: Sendable {
 
 /// PhotoKit requests for the gallery, each as a stream that ends when the request does. A request whose reading task
 /// is cancelled (a cell scrolled away, a page closed) is cancelled with it. PhotoKit may then never call its handler,
-/// so a plain continuation could wait forever; a stream simply ends.
+/// so a plain continuation could wait forever; a stream ends with its reader.
 enum AssetRequests {
     /// A square-ish picture for a grid cell or the camera's thumbnail. A quick low-quality one may come first.
     static func thumbnail(for asset: PHAsset, pixelSide: CGFloat,

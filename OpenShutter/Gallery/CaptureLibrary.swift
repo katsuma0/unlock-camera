@@ -36,8 +36,8 @@ final class CaptureLibrary: NSObject, PHPhotoLibraryChangeObserver {
     /// The asset `latestThumbnail` shows.
     private(set) var latestThumbnailID: String?
 
-    /// One cache for the grid, the viewer and the thumbnail.
-    let imageManager = PHCachingImageManager()
+    /// One cache for the grid, the viewer and the thumbnail. Made on first use, which only comes with read access.
+    @ObservationIgnored private(set) lazy var imageManager = PHCachingImageManager()
 
     @ObservationIgnored private var pendingRecords: [CapturedAsset] = []
     /// False when the file exists but couldn't be read: writing then would replace the whole list with this
@@ -131,7 +131,7 @@ final class CaptureLibrary: NSObject, PHPhotoLibraryChangeObserver {
 
     // MARK: - Recording
 
-    /// Keeps what was just saved, so the gallery can list it later. Results that didn't reach Photos are left out.
+    /// Keeps what the camera saved, so the gallery can list it later. Results that didn't reach Photos are left out.
     func record(_ results: [CaptureResult]) {
         add(results.compactMap { result in
             guard result.savedToLibrary, let id = result.assetIdentifier, !id.isEmpty else { return nil }

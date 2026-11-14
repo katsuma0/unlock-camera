@@ -41,11 +41,17 @@ private struct PageRequest: Hashable {
     /// Twice the screen's pixels, so a pinch has detail to show before it goes soft.
     init(_ asset: PHAsset, size: CGSize, scale: CGFloat) {
         version = AssetVersion(asset)
-        width = max(1, Int((size.width * scale * 2).rounded(.up)))
-        height = max(1, Int((size.height * scale * 2).rounded(.up)))
+        width = Self.pixels(size.width * scale * 2)
+        height = Self.pixels(size.height * scale * 2)
     }
 
     var pixelSize: CGSize { CGSize(width: width, height: height) }
+
+    /// A layout pass can hand over a size that isn't finite, which Int(_:) can't take.
+    private static func pixels(_ value: CGFloat) -> Int {
+        guard value.isFinite, value >= 1 else { return 1 }
+        return Int(min(value, 16_384).rounded(.up))
+    }
 }
 
 // MARK: - Photo
@@ -354,7 +360,6 @@ private struct VideoPage: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .accessibilityLabel(GalleryText.spokenDescription(of: asset, detail: nil))
         // Only a new video loads again: a favorite also changes the asset, and the video shouldn't restart.
         .task(id: asset.localIdentifier) {
             guard player == nil else { return }
