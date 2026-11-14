@@ -25,7 +25,9 @@ struct LensPicker: View {
     var onZoomDial: () -> Void = {}
 
     /// The zoom reading at the moment the active button changed. Readings arrive about ten times a second, so right
-    /// after a switch the value still belongs to the previous lens; it is ignored until it moves.
+    /// after a switch the value still belongs to the previous lens; it is ignored until it moves. A switch made while
+    /// a target shows needs no such guard: the target names the zoom until the model's linger ends, and by then the
+    /// readings belong to the camera in use.
     @State private var zoomAtSwitch: Double?
     /// True from the moment a hold goes through until its touch ends, however it ends.
     @GestureState private var isHolding = false
@@ -57,7 +59,7 @@ struct LensPicker: View {
                 .opacity(isWheelOpen ? Self.hiddenOpacity : 1)
                 .animation(Theme.spring, value: activeID)
                 .onChange(of: activeID) { oldValue, newValue in
-                    zoomAtSwitch = displayZoom
+                    zoomAtSwitch = zoomTarget == nil ? displayZoom : nil
                     // VoiceOver stepping past the next button's value would otherwise be left on a button that no
                     // longer zooms.
                     if let newValue, oldValue != nil, focusedID == oldValue {

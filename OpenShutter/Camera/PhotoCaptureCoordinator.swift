@@ -319,6 +319,11 @@ final class PhotoCaptureCoordinator: NSObject, AVCapturePhotoCaptureDelegate {
             }
             shot.record.context.bracket = bracket
         }
+        // Fast capture can lower the processing of a photo taken in quick succession, and the output doesn't say how
+        // far, so the level is left out rather than guessed. Minimal is as low as it goes, so it stays.
+        if photo.resolvedSettings.isFastCapturePrioritizationEnabled, shot.record.context.processing != .minimal {
+            shot.record.context.processing = nil
+        }
         return shot.additions
     }
 

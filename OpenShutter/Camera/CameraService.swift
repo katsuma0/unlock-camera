@@ -2014,6 +2014,11 @@ extension CameraService {
                 video.colorMode = recorded.colorMode
             }
             video.audio = audioInput != nil
+            // From the microphone rather than the switch: setAudioInput turns removal on only for an input that
+            // supports it on multichannel audio, and a movie without sound has none.
+            video.windNoiseReduction = audioInput.map {
+                $0.isWindNoiseRemovalSupported && $0.multichannelAudioMode != .none && $0.isWindNoiseRemovalEnabled
+            } ?? false
             described.context.video = video
         }
         let exposure = device.flatMap { Self.currentExposure(of: $0) } ?? ExposureValues(seconds: 0, iso: 0, aperture: 0)

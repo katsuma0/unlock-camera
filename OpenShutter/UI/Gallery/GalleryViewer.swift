@@ -53,9 +53,8 @@ struct GalleryViewer: View {
             }
         }
         .overlay(alignment: .topLeading) {
-            // The same test as the page's (GalleryPage): only a Live Photo that plays as one gets the badge.
-            if showsChrome, let current, current.playbackStyle == .livePhoto {
-                LivePhotoBadge()
+            if showsChrome, let current, let badge = LivePhotoBadge(for: current) {
+                badge
                     .padding(.top, 10)
                     .padding(.leading, 14)
                     .allowsHitTesting(false)

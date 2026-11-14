@@ -345,8 +345,12 @@ final class SimulatedCamera: CameraBackend {
         }
         let date = Date()
         var described = RecordedShot.context(of: request, displayZoom: zoomFactor * lens.info.relativeZoom)
-        // The simulated camera records no movie beside its stills.
+        // The simulated camera records no movie beside its stills, and a lens without a flash takes the photo with
+        // it off, as the real output does.
         described.context.livePhoto = false
+        if !lens.hasFlash {
+            described.context.flash = .off
+        }
         let job = SimulatedPhotoJob(
             shots: shots,
             exposures: exposures,
@@ -571,6 +575,7 @@ final class SimulatedCamera: CameraBackend {
             video.frameRate = SimulatedSpec.movieFrameRate
             video.colorMode = .sdr
             video.audio = false
+            video.windNoiseReduction = false
             described.context.video = video
         }
         let shot = recordedShot(described, exposure: exposureRanges.clamp(exposure), date: start)

@@ -213,7 +213,8 @@ final class CameraModel {
     /// The zoom request whose glide holds zoomTarget (holdZoomTarget, releaseZoomTarget).
     @ObservationIgnored private var zoomTargetGeneration = 0
     /// The countdown has just run out and its shot starts in this same turn, so a lens change parked behind the
-    /// countdown waits for the shot (activityDidChange).
+    /// countdown waits for the shot (activityDidChange), and the gallery's pause leaves the camera running for it
+    /// (galleryWantsCameraOff).
     @ObservationIgnored private var countdownRanOut = false
     /// What the shot being counted down or taken needs, fixed when it started: the plan keeps moving with the light,
     /// and the pill shouldn't change its mind halfway.
@@ -350,6 +351,11 @@ final class CameraModel {
     /// target with nothing on its way there. Called after a transition's last step, or for a step called off.
     private func releaseZoomTarget(after seconds: Double, generation: Int) {
         guard zoomTarget != nil, generation == zoomTargetGeneration else { return }
+        // The button follows the camera in use from here, lit while the target still names the zoom. Lit only as
+        // the target clears, LensPicker would wait for a reading that moves before trusting the zoom, and a camera
+        // at rest never sends one: a parked swap's 2x button would read "2×" at 4x. After a transition that ran to
+        // its end, this is the button already lit.
+        updateActivePreset(force: true)
         zoomTargetTask?.cancel()
         let wait = max(seconds.isFinite ? seconds : 0, 0) + Self.zoomTargetLinger
         zoomTargetTask = Task { [weak self] in
@@ -547,9 +553,12 @@ final class CameraModel {
 
     /// The gallery and the editor cover the camera, so the session stops under them as it does in the background:
     /// the camera indicator goes off, the battery rests, and a video in the gallery can play its sound. An
-    /// intervalometer or a bracket keeps it running, and a shot still being taken or saved finishes first.
+    /// intervalometer or a bracket keeps it running, and a shot still being taken or saved finishes first. So does
+    /// the shot a self timer or a settle counts down to: countdown() passes through .idle as it runs out
+    /// (countdownRanOut), and a pause in that step would stop the camera under the shot about to start.
     private var galleryWantsCameraOff: Bool {
-        isReviewPresented && intervalometer == nil && !bracketInProgress && !activity.isBusy && photosInFlight == 0
+        isReviewPresented && intervalometer == nil && !bracketInProgress && !activity.isBusy && !countdownRanOut
+            && photosInFlight == 0
     }
 
     private func updateGalleryPause() {
@@ -1051,7 +1060,8 @@ final class CameraModel {
                     return
                 }
                 // A shot started meanwhile keeps its lens; the swap waits for it like any lens change
-                // (replayParkedLensChange). The glide has landed, so the button follows the camera meanwhile.
+                // (replayParkedLensChange). The glide has landed, so the button follows the camera from here, lit by
+                // the release while the target still shows: lit at rest, it would read its own value, not the zoom.
                 guard !self.activity.isBusy, self.photosInFlight == 0, !self.lensSwitchInFlight else {
                     self.pendingPreset = preset
                     self.releaseZoomTarget(after: 0, generation: generation)
@@ -1955,8 +1965,11 @@ final class CameraModel {
 
     private func performStack(request: StackRequest) async {
         isFinishingStack = false
-        // The pill keeps the need of the plan that runs, whatever the light does to the plan in view.
-        captureNeed = settings.mode == .long ? longSteadyNeed(plan: request.plan) : liveSteadyNeed
+        // The pill keeps the need of the plan that runs, whatever the light does to the plan in view. It leans as the
+        // framing pill did, toward the need the press took (an intervalometer's later shots: the one on show), or a
+        // frame near the hand limit would change the message as the shot starts.
+        captureNeed = settings.mode == .long
+            ? longSteadyNeed(plan: request.plan, leaning: captureNeed ?? shownSteadyNeed) : liveSteadyNeed
         dimmer.resetWake()
         // Set before the activity, so everything that follows .stacking already sees the shot's length.
         stackProgress = StackProgress(
@@ -2705,7 +2718,7 @@ final class CameraModel {
     private func updateActivePreset(factor: Double? = nil, force: Bool = false) {
         // A lens button's transition owns the active button until it lands: a zoom in reaches the next lens's value
         // on the lens it leaves, and a zoom out names the wider lens while the device is still on the longer one.
-        // clearZoomTarget brings this back in step.
+        // releaseZoomTarget brings this back in step, while the target still shows.
         guard force || zoomTarget == nil else { return }
         guard let lensID = backend.activeLensID ?? settings.lensID else {
             setActivePreset(lensPresets.first?.id)
@@ -3152,6 +3165,14 @@ extension CameraModel: CameraBackendDelegate {
             showToast(reason, symbol: "pause.circle")
         } else if case .failed(let reason) = state {
             showToast(reason, symbol: "exclamationmark.triangle")
+        } else {
+            return
+        }
+        // A session that stops ends a running stack with the frames it has (CameraService), and the screen shows it
+        // as after a stop: lit for Processing, with no pill asking to keep still and no crosses to follow.
+        if activity == .stacking {
+            motionMonitor.endDrift()
+            noteStackFinishing()
         }
     }
 

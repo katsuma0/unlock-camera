@@ -333,9 +333,27 @@ private struct LivePhotoCanvas: UIViewRepresentable {
 
 /// Apple's own Live badge, drawn to sit over a picture.
 struct LivePhotoBadge: View {
+    /// Photos' slashed badge, for a Live Photo with Live turned off.
+    let isOff: Bool
+
+    /// The badge Photos shows, or nil. A Live Photo that plays as one (the page's own test, GalleryPage) gets the
+    /// plain badge. One with Live turned off shows as a still, yet stays a Live Photo to PhotoKit and the editor, so
+    /// it gets the slashed badge rather than none. Loop and Bounce show as stills here and get none.
+    init?(for asset: PHAsset) {
+        switch asset.playbackStyle {
+        case .livePhoto:
+            isOff = false
+        case .image where asset.mediaSubtypes.contains(.photoLive):
+            isOff = true
+        default:
+            return nil
+        }
+    }
+
     var body: some View {
-        Image(uiImage: PHLivePhotoView.livePhotoBadgeImage(options: .overContent))
-            .accessibilityLabel("Live Photo")
+        let options: PHLivePhotoBadgeOptions = isOff ? [.overContent, .liveOff] : .overContent
+        Image(uiImage: PHLivePhotoView.livePhotoBadgeImage(options: options))
+            .accessibilityLabel(isOff ? "Live Photo, Live off" : "Live Photo")
     }
 }
 
@@ -419,11 +437,12 @@ enum GalleryText {
         return relativeDate.string(from: date)
     }
 
-    /// Photo, Live Photo or Video: what Photos calls them, in both interfaces. A Live Photo set to Loop, Bounce or
-    /// Live off shows as a still here (GalleryPage), so it is a Photo.
+    /// Photo, Live Photo or Video: what Photos calls them, in both interfaces. The name follows the Live badge, so
+    /// a Live Photo with Live off is still one, as the editor treats it; Loop and Bounce show as stills here
+    /// (GalleryPage) with no badge, so they are Photos.
     static func kindTitle(of asset: PHAsset) -> String {
         if asset.mediaType == .video { return "Video" }
-        return asset.playbackStyle == .livePhoto ? "Live Photo" : "Photo"
+        return LivePhotoBadge(for: asset) != nil ? "Live Photo" : "Photo"
     }
 
     /// The advanced interface also names what the camera made: a RAW photo, a stack, a bracket frame, a copy.

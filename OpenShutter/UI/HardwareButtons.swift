@@ -240,12 +240,12 @@ private final class HardwarePresses {
     /// Ends what is running. A stack ended early still saves what it has, so an AirPods click hears the shutter for
     /// it. A cancelled countdown or a stopped sequence takes no picture, and the shutter would say it did.
     private func stop(_ event: AVCaptureEvent, model: CameraModel) {
-        // Worked out before the press changes the state it depends on. A stack with no frames yet saves nothing, and
-        // one already finishing had its sound.
-        let savesPicture = model.activity == .stacking && !model.isFinishingStack
-            && (model.stackProgress?.framesCaptured ?? 0) > 0
+        // The model marks every finish that keeps a picture, one before the first frame included (the backends wait
+        // for that frame), and never a cancel, such as a press just as a countdown ran out. One already finishing
+        // had its sound.
+        let wasFinishing = model.isFinishingStack
         pressShutter(model)
-        if savesPicture {
+        if !wasFinishing, model.isFinishingStack {
             play(.shutter, for: event)
         }
     }
