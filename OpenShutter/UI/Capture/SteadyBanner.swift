@@ -44,7 +44,7 @@ private struct SteadyBannerSlot: View {
         .frame(maxWidth: .infinity, alignment: Self.alignment(turns))
         .animation(.easeInOut(duration: 0.2), value: message)
         .animation(.easeInOut(duration: 0.2), value: turns)
-        .modifier(SteadyAnnouncements(message: message))
+        .modifier(SteadyAnnouncements(message: message, isHidden: model.dimmer.isDimmed || model.controlsFullscreen))
         .allowsHitTesting(false)
     }
 
@@ -205,15 +205,21 @@ struct TripodGlyph: View {
 
 /// VoiceOver hears the pill change between moving and steady before the shot, a bump or a drift during it, and "Keep
 /// the phone still" once as it starts. At most once every 3 s: a change inside that wait is said when the wait is
-/// over, and only if it still holds and differs from what was said last.
+/// over, and only if it still holds and differs from what was said last. A pill that comes back after the dark
+/// screen or the Camera Control's overlay hid it belongs to the same shot, so its start isn't said again.
 private struct SteadyAnnouncements: ViewModifier {
     let message: SteadyMessage?
+    /// The model takes the pill away under the battery saver's dark screen and the Camera Control's overlay.
+    let isHidden: Bool
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
     @State private var latest: SteadyMessage?
     @State private var lastSaid: String?
     @State private var lastSaidAt = Date.distantPast
     /// Counts changes that came too soon after the last announcement; the newest state is said when the wait ends.
     @State private var deferred = 0
+    /// The pill was hidden while frames came in. The shot goes on under the dark screen and the overlay, so the
+    /// pill that comes back is still that shot's.
+    @State private var hiddenInShot = false
 
     private static let interval: TimeInterval = 3
 
@@ -222,8 +228,13 @@ private struct SteadyAnnouncements: ViewModifier {
             .onChange(of: message) { old, new in
                 guard voiceOver else { return }
                 latest = new
+                // Only a pill hidden mid-shot comes back to the same shot. No pill can also come before a new one:
+                // the overlay was up at the press, or an intervalometer starts the next shot as soon as the last
+                // one's frames are all in, with no steady reading shown in between.
+                let returning = old == nil && hiddenInShot
+                hiddenInShot = new == nil && isHidden && old?.isDuringShot == true
                 guard let new else { return }
-                if new.isDuringShot, old?.isDuringShot != true {
+                if new.isDuringShot, old?.isDuringShot != true, !returning {
                     // Speak status says "Keep the phone still" itself when a long shot starts.
                     if !AppearanceStore.shared.speakStatus { say(new.spoken) }
                     return
@@ -234,6 +245,11 @@ private struct SteadyAnnouncements: ViewModifier {
                 } else {
                     deferred &+= 1
                 }
+            }
+            .onChange(of: isHidden) { _, hidden in
+                // Shown again with no pill: that shot has all its frames or was stopped, so the next pill is a new
+                // shot's.
+                if !hidden, message == nil { hiddenInShot = false }
             }
             .task(id: deferred) {
                 guard deferred > 0 else { return }

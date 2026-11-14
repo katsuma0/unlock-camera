@@ -23,7 +23,7 @@ struct ViewfinderOverlays: View {
         let square = focusSquare
         ZStack(alignment: .topLeading) {
             GridLines(style: model.settings.display.grid, rect: frame)
-                .animation(Theme.spring, value: frame)
+                .frameMotion(value: frame)
             LevelIndicator(model: model, center: CGPoint(x: frame.midX, y: frame.midY))
             FocusReticleLayer(model: model, size: geometry.screen.size, origin: geometry.picture.origin,
                               bounds: geometry.visibleFrame, square: square)
@@ -208,8 +208,9 @@ private struct LevelIndicator: View {
         let isEnabled = model.settings.display.showLevel
         // A level that is turned off doesn't read the attitude at all, so its many small updates skip this view.
         let motion = isEnabled ? model.motion : MotionState()
-        // Pointing at the floor or the sky there is no horizon to show.
-        let isVisible = isEnabled && abs(motion.pitch) <= 70
+        // Pointing at the floor or the sky there is no horizon to show. During a stack the drift crosses take the
+        // frame's middle, and a level line through them would hide the very cross the status asks to line up.
+        let isVisible = isEnabled && abs(motion.pitch) <= 70 && !model.drift.isTracking
         // A line looks the same turned half way round, so landscape left and right share one base angle. The
         // deviation is measured from the nearest quarter turn of the roll, so the base angle must come from the
         // roll too: the icons' quarter turn is held a little past the diagonal.
@@ -218,6 +219,8 @@ private struct LevelIndicator: View {
             .rotationEffect(.degrees(sideways ? 90 : 0))
             .animation(Theme.spring, value: sideways)
             .position(center)
+            // A new shape moves the frame's middle; the level glides there with the grid.
+            .frameMotion(value: center)
             .opacity(isVisible ? 1 : 0)
             .animation(.easeInOut(duration: 0.2), value: isVisible)
             .accessibilityHidden(true)
@@ -475,6 +478,7 @@ private struct StatusBadges: View {
         .padding(.trailing, 10)
         .frame(width: max(rect.width, 0), height: max(rect.height, 0), alignment: .topTrailing)
         .position(x: rect.midX, y: rect.midY)
+        .frameMotion(value: rect)
         .animation(Theme.snappy, value: stacked)
         .animation(Theme.snappy, value: showsLock)
         .animation(Theme.spring, value: topShift)

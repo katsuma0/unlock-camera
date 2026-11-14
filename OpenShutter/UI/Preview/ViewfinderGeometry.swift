@@ -65,3 +65,22 @@ struct ViewfinderGeometry: Equatable {
         return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
     }
 }
+
+extension View {
+    /// Moves a viewfinder layer to where a new frame puts it on the spring the picture uses (Theme.spring), so the
+    /// picture, the bands and everything placed by the frame arrive together. With Reduce motion on, in the app or in
+    /// iOS, the picture cuts to its new size instead of zooming there, and the layers cut with it.
+    func frameMotion<Value: Equatable>(value: Value) -> some View {
+        modifier(FrameMotion(value: value))
+    }
+}
+
+private struct FrameMotion<Value: Equatable>: ViewModifier {
+    let value: Value
+    @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
+
+    func body(content: Content) -> some View {
+        let reduceMotion = systemReduceMotion || AppearanceStore.shared.reduceMotion
+        content.animation(reduceMotion ? nil : Theme.spring, value: value)
+    }
+}

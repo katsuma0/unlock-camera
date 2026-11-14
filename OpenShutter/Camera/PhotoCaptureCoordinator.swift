@@ -333,11 +333,9 @@ final class PhotoCaptureCoordinator: NSObject, AVCapturePhotoCaptureDelegate {
         var results: [CaptureResult] = []
 
         for (processed, raw) in pairedAssets(batch.photos) {
-            var primary: EncodedImage
+            let primary: EncodedImage
             if let processed {
                 primary = prepare(processed.data, request: request)
-                // After the crop, which encodes from the property dictionary and would drop an XMP packet.
-                primary.data = ImageIOMetadata.addingXMP(to: primary.data, processed.metadata)
             } else if let raw {
                 // A DNG is never cropped: it is the sensor record, and editors apply their own crop.
                 primary = unchanged(raw.data, fallbackType: rawTypeIdentifier)
@@ -346,7 +344,8 @@ final class PhotoCaptureCoordinator: NSObject, AVCapturePhotoCaptureDelegate {
             }
             let pairedRaw = processed == nil ? nil : raw?.data
             let movie = !isBracket && processed != nil ? batch.movie : nil
-            let outcome = await save(primary, raw: pairedRaw, movie: movie, location: shot.assetLocation, date: batch.date)
+            let outcome = await save(primary, additions: processed?.metadata, raw: pairedRaw, movie: movie,
+                                     location: shot.assetLocation, date: batch.date)
 
             let facts = (processed?.facts ?? ExposureFacts()).filled(from: raw?.facts)
             let kind: CaptureResult.Kind = isBracket ? .bracket : (raw != nil ? .raw : .photo)
@@ -366,10 +365,21 @@ final class PhotoCaptureCoordinator: NSObject, AVCapturePhotoCaptureDelegate {
         return .success(results)
     }
 
-    private static func save(_ primary: EncodedImage, raw: Data?, movie: URL?, location: GeoTag?,
-                             date: Date) async -> (saved: Bool, identifier: String?) {
+    /// - Parameter additions: a processed photo's, whose XMP is merged in here because only the save knows whether
+    ///   the still keeps its movie.
+    private static func save(_ primary: EncodedImage, additions: ImageMetadata?, raw: Data?, movie: URL?,
+                             location: GeoTag?, date: Date) async -> (saved: Bool, identifier: String?) {
+        var data = primary.data
+        if var additions {
+            // A still saved without its movie (none was recorded, or Photos refused the pair) is no Live Photo.
+            if movie == nil {
+                additions.xmp.removeAll { $0.field == .livePhoto }
+            }
+            // After the crop, which encodes from the property dictionary and would drop an XMP packet.
+            data = ImageIOMetadata.addingXMP(to: data, additions)
+        }
         do {
-            let identifier = try await PhotoLibrary.savePhoto(primary: primary.data, primaryType: primary.typeIdentifier,
+            let identifier = try await PhotoLibrary.savePhoto(primary: data, primaryType: primary.typeIdentifier,
                                                               raw: raw, livePhotoMovie: movie, location: location,
                                                               creationDate: date, isCapture: true)
             return (true, identifier)
@@ -377,7 +387,7 @@ final class PhotoCaptureCoordinator: NSObject, AVCapturePhotoCaptureDelegate {
             // Photos refuses the whole asset when the still and movie don't pair up; the still alone is
             // still worth keeping. Without add access a retry would only fail again.
             guard movie != nil, await PhotoLibrary.ensureAddAccess() else { return (false, nil) }
-            return await save(primary, raw: raw, movie: nil, location: location, date: date)
+            return await save(primary, additions: additions, raw: raw, movie: nil, location: location, date: date)
         }
     }
 
@@ -608,11 +618,32 @@ final class PhotoCaptureCoordinator: NSObject, AVCapturePhotoCaptureDelegate {
         return wanted.rawValue <= limit.rawValue ? wanted : limit
     }
 
+    /// The level a photo's settings run at, for its file: Bayer RAW and brackets run at speed whatever was asked,
+    /// and the output's limit can lower the rest.
+    static func processingLevel(of prioritization: AVCapturePhotoOutput.QualityPrioritization) -> ProcessingLevel {
+        switch prioritization {
+        case .speed: return .minimal
+        case .balanced: return .balanced
+        case .quality: return .maximum
+        @unknown default: return .balanced
+        }
+    }
+
     private static func flashMode(for setting: FlashSetting) -> AVCaptureDevice.FlashMode? {
         switch setting {
         case .off: return nil
         case .auto: return .auto
         case .on: return .on
+        }
+    }
+
+    /// The flash a photo's settings run with, for its file: off on a lens without one.
+    static func flashSetting(of mode: AVCaptureDevice.FlashMode) -> FlashSetting {
+        switch mode {
+        case .on: return .on
+        case .auto: return .auto
+        case .off: return .off
+        @unknown default: return .off
         }
     }
 

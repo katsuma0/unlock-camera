@@ -327,7 +327,8 @@ final class SimulatedCamera: CameraBackend {
         defer { photosInFlight -= 1 }
 
         let exposures = photoExposures(for: request)
-        let light = flashFires(request.flash) ? 1 : torchLight
+        let flashFired = flashFires(request.flash)
+        let light = flashFired ? 1 : torchLight
         let mirrored = lens.info.isFront && mirrorFrontPhotos
         // As on the real photo output, Bayer RAW is left out at any zoom but 1, during a zoom ramp, and on a lens
         // without it. Read now: the zoom can move while the photo renders.
@@ -343,6 +344,9 @@ final class SimulatedCamera: CameraBackend {
             clock += SimulatedSpec.frameInterval
         }
         let date = Date()
+        var described = RecordedShot.context(of: request, displayZoom: zoomFactor * lens.info.relativeZoom)
+        // The simulated camera records no movie beside its stills.
+        described.context.livePhoto = false
         let job = SimulatedPhotoJob(
             shots: shots,
             exposures: exposures,
@@ -350,8 +354,8 @@ final class SimulatedCamera: CameraBackend {
             format: request.processedFormat == .none ? .heif : request.processedFormat,
             quality: request.quality,
             aspect: request.aspect,
-            shot: recordedShot(RecordedShot.context(of: request, displayZoom: zoomFactor * lens.info.relativeZoom),
-                               exposure: current(exposures), date: date),
+            shot: recordedShot(described, exposure: current(exposures), date: date),
+            flash: flashTag(request.flash, fired: flashFired),
             focalLength: lens.info.equivalentFocalLength * zoomFactor,
             date: date
         )
@@ -435,6 +439,19 @@ final class SimulatedCamera: CameraBackend {
             let offset = meterOffset(for: exposure) ?? 0
             return ExposureMath.lightProduct(exposure) * pow(2, -offset) > SimulatedSpec.flashThresholdProduct
         }
+    }
+
+    /// EXIF Flash: the mode in bits 3 and 4 (on, off, auto) and whether it fired in bit 0, so 9 is "fired, on" and
+    /// 24 "auto, did not fire". nil on a lens without a flash, which keeps the builder's "no flash function".
+    private func flashTag(_ setting: FlashSetting, fired: Bool) -> Int? {
+        guard lens.hasFlash else { return nil }
+        let mode: Int
+        switch setting {
+        case .on: mode = 0x08
+        case .off: mode = 0x10
+        case .auto: mode = 0x18
+        }
+        return mode | (fired ? 1 : 0)
     }
 
     // MARK: - Stacks
@@ -1415,6 +1432,9 @@ private struct SimulatedPhotoJob: Sendable {
     var aspect: AspectRatio
     /// What every file of the job says about the shot.
     var shot: RecordedShot
+    /// EXIF Flash as the simulated flash ran. The builder says no flash fired in any picture the app renders, since
+    /// no stack fires one; nil keeps its value, as on a lens without a flash.
+    var flash: Int?
     var focalLength: Double
     var date: Date
 
@@ -1441,7 +1461,11 @@ private struct SimulatedPhotoJob: Sendable {
                 bracket.value = index < offsets.count ? offsets[index] : nil
                 record.record.context.bracket = bracket
             }
-            let encoded = try MediaWriter.encode(image, as: format, quality: quality, metadata: record.rendered)
+            var metadata = record.rendered
+            if let flash {
+                metadata.exif[.flash] = .integer(flash)
+            }
+            let encoded = try MediaWriter.encode(image, as: format, quality: quality, metadata: metadata)
             photos.append(SimulatedPhoto(encoded: encoded,
                                          thumbnail: encoded.thumbnail ?? MediaWriter.thumbnail(of: image, maxPixelSize: 400),
                                          summary: SimulatedText.photoSummary(values, focalLength: focalLength)))

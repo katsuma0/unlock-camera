@@ -93,6 +93,7 @@ private struct CameraLayout: View {
     @State private var bandsSolid = true
 
     @Environment(\.displayScale) private var displayScale
+    @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
 
     static let topBarHeight: CGFloat = 48
     /// The thumbnail and the flip button are 48 pt, the carousel 44.
@@ -109,7 +110,9 @@ private struct CameraLayout: View {
         let isVeiled = veilVisible || lensVeilVisible
         let aspectKey = AspectKey(mode: mode, video: settings.video, lensID: settings.lensID,
                                   isRunning: model.sessionState == .running,
-                                  formatCount: model.capabilities.formats.count)
+                                  formatCount: model.capabilities.formats.count,
+                                  activeVideo: model.capabilities.activeVideo,
+                                  formatSummary: model.capabilities.formatSummary)
 
         GeometryReader { proxy in
             let size = proxy.size
@@ -189,6 +192,13 @@ private struct CameraLayout: View {
         }
         .onChange(of: selectedIsFront) { _, _ in
             showVeil(holdNanoseconds: 450_000_000)
+        }
+        .onChange(of: shape) { _, _ in
+            // With Reduce motion, the app's or the system's, the picture cuts to a new shape instead of zooming to
+            // it, and the veil softens the cut as it does a lens change's. A switch to or from VIDEO keeps the mode's
+            // longer veil.
+            guard systemReduceMotion || AppearanceStore.shared.reduceMotion else { return }
+            showVeil(holdNanoseconds: 350_000_000)
         }
         // Only a lens button's swap of cameras gets the veil: a pinch or the zoom wheel swaps while the finger is
         // still framing, and the picture holding still for a moment is less in the way than a blur.
@@ -274,13 +284,17 @@ private struct CameraLayout: View {
     // MARK: Image shape
 
     /// What the picture rect is built from. A new format can change the image's shape: a mode, lens or video format
-    /// change, or the camera starting with formats it hadn't listed yet.
+    /// change, or the camera starting with formats it hadn't listed yet. The active format's own description comes in
+    /// once a reconfiguration lands, which can be long after the settings changed: VIDEO's first one waits for the
+    /// microphone prompt.
     private struct AspectKey: Equatable {
         var mode: CaptureMode
         var video: VideoSettings
         var lensID: String?
         var isRunning: Bool
         var formatCount: Int
+        var activeVideo: ActiveVideoFormat?
+        var formatSummary: String
     }
 
     /// The bands go solid while any of these changes.
@@ -293,7 +307,10 @@ private struct CameraLayout: View {
     /// Measured in a task rather than in the body, which runs on every settings write while a dial turns.
     private func updateImageAspect() {
         let settings = model.settings
-        let measured = model.sessionState == .running ? Self.measuredAspect(of: model.backend) : nil
+        // Until VIDEO has a video format, the layer still shows the photo format the switch left behind. The way back
+        // needs no such test: the measured video shape crops a photo frame correctly until the photo format lands.
+        let stale = settings.mode == .video && model.capabilities.activeVideo == nil
+        let measured = model.sessionState == .running && !stale ? Self.measuredAspect(of: model.backend) : nil
         let value = Double(measured ?? Self.expectedAspect(mode: settings.mode, video: settings.video,
                                                             capabilities: model.capabilities,
                                                             simulated: model.isSimulated))
@@ -388,10 +405,10 @@ private struct ViewfinderStack: View {
                 .position(x: frame.midX, y: frame.midY)
                 .allowsHitTesting(false)
             // Countdown, status and Stop sit in the part of the frame the top bar and the controls leave open.
-            CaptureOverlay(model: model)
+            CaptureOverlay(model: model, crossCenter: CGPoint(x: frame.midX - open.minX, y: frame.midY - open.minY))
                 .frame(width: max(open.width, 1), height: max(open.height, 1))
                 .position(x: open.midX, y: open.midY)
-                .animation(Theme.spring, value: open)
+                .frameMotion(value: open)
             ViewfinderOverlays(model: model, geometry: geometry, topShift: bannerShift)
             ExposureSliderLayer(model: model, interaction: interaction, geometry: geometry)
             HistogramSlot(model: model, open: open, topShift: bannerShift)
@@ -430,7 +447,8 @@ private struct HistogramSlot: View {
     var body: some View {
         let style = model.settings.display.histogram
         ZStack(alignment: .topLeading) {
-            if style != .off, let histogram = model.analysis?.histogram {
+            // Under the battery saver's black layer the analysis isn't read, so nothing here redraws.
+            if style != .off, !model.dimmer.isDimmed, let histogram = model.analysis?.histogram {
                 HistogramView(histogram: histogram, style: style)
                     .frame(width: 120, height: 60)
                     .padding(.leading, 12)
@@ -440,6 +458,7 @@ private struct HistogramSlot: View {
         }
         .frame(width: max(open.width, 0), height: max(open.height, 0), alignment: .topLeading)
         .position(x: open.midX, y: open.midY)
+        .frameMotion(value: open)
         .animation(Theme.spring, value: topShift)
         .allowsHitTesting(false)
     }
@@ -450,13 +469,20 @@ private struct ReadoutSlot: View {
     let open: CGRect
 
     var body: some View {
-        // ReadoutHUD keeps its own margin; this keeps it clear of the controls under the frame.
-        if model.settings.display.showReadout {
-            ReadoutHUD(model: model)
-                .frame(width: max(open.width, 0), height: max(open.height, 0), alignment: .bottom)
-                .position(x: open.midX, y: open.midY)
-                .animation(Theme.spring, value: open)
+        // A stack's status block moves down to clear the drift crosses, and no phone has room for the readout under
+        // it as well: it would cover Stop.
+        let shows = model.settings.display.showReadout && model.activity != .stacking
+        ZStack {
+            if shows {
+                // ReadoutHUD keeps its own margin; this keeps it clear of the controls under the frame.
+                ReadoutHUD(model: model)
+                    .transition(.opacity)
+            }
         }
+        .frame(width: max(open.width, 0), height: max(open.height, 0), alignment: .bottom)
+        .position(x: open.midX, y: open.midY)
+        .frameMotion(value: open)
+        .animation(.easeInOut(duration: 0.25), value: shows)
     }
 }
 
@@ -483,6 +509,7 @@ private struct SteadyStatusPlacement: View {
             .padding(.top, Self.margin)
             .frame(width: max(open.width, 0), height: max(open.height, 0), alignment: .top)
             .position(x: open.midX, y: open.midY)
+            .frameMotion(value: open)
             .allowsHitTesting(false)
     }
 }
@@ -525,6 +552,7 @@ private struct ToastLayer: View {
         .padding(.horizontal, 16)
         .frame(width: max(open.width, 0), height: max(open.height, 0), alignment: sideways ? .center : .top)
         .position(x: open.midX, y: open.midY)
+        .frameMotion(value: open)
         .animation(Theme.spring, value: toast?.id)
         .animation(Theme.spring, value: sideways)
         .animation(Theme.spring, value: topShift)
@@ -809,7 +837,9 @@ private struct CarouselSlot: View {
 
     var body: some View {
         let activity = model.activity
-        let isRecording = activity == .recording
+        // A stack hides it like filming does. In the band the thumbnail and the flip button hide then too, and the
+        // titles would be left there on their own, offering modes nothing can switch to.
+        let isHidden = activity == .recording || activity == .stacking
         // The model is idle between intervalometer shots, but each shot is taken in the current mode: a switch to
         // VIDEO there would leave the rest of the sequence taking nothing. A bracket runs as long, so it dims too.
         let sequenceRunning = model.intervalometer != nil || model.bracketInProgress
@@ -821,11 +851,13 @@ private struct CarouselSlot: View {
             // The simple interface leaves MANUAL out.
             modes: model.availableModes
         )
-        // Hidden but still laid out while filming, so the controls around it don't jump when recording starts.
-        .opacity(isRecording ? 0 : (activity.isCountdown || sequenceRunning ? 0.35 : 1))
+        // Hidden but still laid out, so the controls around it don't jump when recording starts.
+        .opacity(isHidden ? 0 : (activity.isCountdown || sequenceRunning ? 0.35 : 1))
         // Photos still being saved keep the session as it is. Not dimmed for them, which would blink after each shot.
         .disabled(activity.isBusy || sequenceRunning || model.photosInFlight > 0)
-        .accessibilityHidden(isRecording)
+        .accessibilityHidden(isHidden)
+        // Fades with the thumbnail and the flip button beside it.
+        .animation(.easeInOut(duration: 0.2), value: isHidden)
     }
 }
 

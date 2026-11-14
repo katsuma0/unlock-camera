@@ -1317,6 +1317,14 @@ extension CameraService {
             position.count = bracket.bracketedSettings.count
             shot.record.context.bracket = position
         }
+        // The settings leave out what the camera can't do with this shot right now (a Live movie beside RAW, constant
+        // color or a bracket, a flash on a lens without one, the processing asked for under Bayer RAW and brackets),
+        // and the files say what it took. A bracket takes no flash mode at all, so its files name none.
+        shot.record.context.livePhoto = settings.livePhotoMovieFileURL != nil
+        shot.record.context.processing = PhotoCaptureCoordinator.processingLevel(of: settings.photoQualityPrioritization)
+        shot.record.context.flash = settings is AVCapturePhotoBracketSettings
+            ? nil
+            : PhotoCaptureCoordinator.flashSetting(of: settings.flashMode)
         let id = settings.uniqueID
         let coordinator = PhotoCaptureCoordinator(
             request: request,

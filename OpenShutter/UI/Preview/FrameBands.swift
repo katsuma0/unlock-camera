@@ -27,7 +27,7 @@ struct FrameBands: View {
             FrameEdges(frame: frame)
                 .stroke(Color.white.opacity(0.3), lineWidth: 1 / max(displayScale, 1))
         }
-        .animation(Theme.spring, value: frame)
+        .frameMotion(value: frame)
         .allowsHitTesting(false)
         .accessibilityHidden(true)
     }

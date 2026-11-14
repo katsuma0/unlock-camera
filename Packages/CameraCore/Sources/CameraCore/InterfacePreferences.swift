@@ -352,21 +352,27 @@ public struct TopBarOptions: Codable, Hashable, Sendable {
         return (sides[0], sides[1])
     }
 
-    /// The bar in `mode` with its furniture in place. In VIDEO the format chip takes the right side. When a timer,
-    /// intervalometer or bracket is set, its badge takes the last left slot, unless a Timer button on the bar
-    /// already shows it: the button then stands in for the badge.
+    /// The bar in `mode` with its furniture in place. In VIDEO the format chip takes the right side, and a Flash
+    /// placed there moves to the front of the left side: in VIDEO it is the flashlight, which the chip must not hide.
+    /// When a timer, intervalometer or bracket is set, its badge takes the last left slot, unless a Timer button on
+    /// the bar already shows it: the button then stands in for the badge.
     /// - Parameters:
     ///   - wantsBadge: A timer, intervalometer or bracket is set and the badge belongs in this mode.
     ///   - isAvailable: As for `shown`.
     public func layout(advanced: Bool, mode: CaptureMode, wantsBadge: Bool,
                        isAvailable: (TopBarItem) -> Bool) -> TopBarLayout {
+        var bar = self
+        if mode == .video, !leading.contains(.flash), trailing.contains(.flash) {
+            // Not through init(leading:trailing:): its cleaning would cut the last button of a left side stored full.
+            bar.leading.insert(.flash, at: 0)
+        }
         let trailingRoom = mode == .video ? 0 : Self.trailingRoom
-        let full = shown(advanced: advanced, mode: mode, trailingRoom: trailingRoom, isAvailable: isAvailable)
+        let full = bar.shown(advanced: advanced, mode: mode, trailingRoom: trailingRoom, isAvailable: isAvailable)
         guard wantsBadge, !full.leading.contains(.timer), !full.trailing.contains(.timer) else {
             return TopBarLayout(leading: full.leading, trailing: full.trailing, showsBadge: false)
         }
-        let rest = shown(advanced: advanced, mode: mode, leadingRoom: Self.leadingRoom - 1, trailingRoom: trailingRoom,
-                         isAvailable: isAvailable)
+        let rest = bar.shown(advanced: advanced, mode: mode, leadingRoom: Self.leadingRoom - 1,
+                             trailingRoom: trailingRoom, isAvailable: isAvailable)
         return TopBarLayout(leading: rest.leading, trailing: rest.trailing, showsBadge: true)
     }
 }

@@ -6,12 +6,15 @@ import CameraCore
 /// the picture itself, the running stack and the capture blink, are StackPreviewLayer and ShutterBlink below.
 struct CaptureOverlay: View {
     @Bindable var model: CameraModel
+    /// The middle of the photo frame, where the drift crosses are drawn, in this overlay's coordinates. A stack's
+    /// status keeps clear of it.
+    var crossCenter: CGPoint? = nil
 
     // Each layer reads only the state it shows, so a stack's progress never redraws the others.
     var body: some View {
         ZStack {
             CountdownLayer(model: model)
-            StatusLayer(model: model)
+            StatusLayer(model: model, crossCenter: crossCenter)
             SavingLayer(model: model)
         }
     }
@@ -167,13 +170,14 @@ private struct CountdownHint: View {
 /// Intervalometer, bracket and stack status with the buttons that end them. Only exists while something runs.
 private struct StatusLayer: View {
     let model: CameraModel
+    let crossCenter: CGPoint?
 
     var body: some View {
         let isStacking = model.activity == .stacking
         let hasSequence = model.intervalometer != nil || model.bracketInProgress
         ZStack {
             if isStacking || hasSequence {
-                StatusBlock(model: model)
+                StatusBlock(model: model, crossCenter: crossCenter)
                     .transition(.opacity)
             }
         }
@@ -184,12 +188,23 @@ private struct StatusLayer: View {
 
 private struct StatusBlock: View {
     let model: CameraModel
+    /// The drift crosses' centre in this view's coordinates.
+    let crossCenter: CGPoint?
     /// Stop was tapped and the backend is merging what it has; the capsule says so instead of counting on.
     @State private var isFinishing = false
+    /// The block as laid out, before it turns with the phone. A typical size stands in until it is measured.
+    @State private var blockSize = CGSize(width: 190, height: 88)
+
+    /// How far the block stays from the crosses' centre: the moving cross's farthest reach (DriftMath.radius and its
+    /// 15 pt arm) and a margin.
+    private static let crossClearance = CGFloat(DriftMath.radius) + 28
 
     var body: some View {
         let degrees = model.motion.iconRotationDegrees
         let isStacking = model.activity == .stacking
+        // The shutter, a hardware button and the end of a bulb hold finish a stack too, and look the same as a tap on
+        // Stop. The model's flag lands an update after a tap, and the local one covers that moment.
+        let finishing = isFinishing || model.isFinishingStack
         GeometryReader { proxy in
             VStack(spacing: 10) {
                 if let status = model.intervalometer {
@@ -199,11 +214,11 @@ private struct StatusBlock: View {
                     BracketStatusLine(model: model)
                 }
                 if isStacking {
-                    StackStatusLine(progress: model.stackProgress, isFinishing: isFinishing,
+                    StackStatusLine(progress: model.stackProgress, isFinishing: finishing,
                                     countsFrames: model.isAdvanced, isQuiet: model.dimmer.isDimmed)
                 }
                 StatusButtons(
-                    canDiscard: isStacking && !isFinishing,
+                    canDiscard: isStacking && !finishing,
                     onStop: {
                         if model.activity == .stacking { isFinishing = true }
                         Haptics.tap()
@@ -214,16 +229,41 @@ private struct StatusBlock: View {
                         model.cancelCapture()
                     }
                 )
-                .disabled(isFinishing)
+                .disabled(finishing)
+            }
+            .onGeometryChange(for: CGSize.self) { $0.size } action: { size in
+                blockSize = size
             }
             .uprightRotation(degrees)
-            // Below the middle in portrait, clear of the subject; centred when turned, where a sideways block fits.
-            .position(x: proxy.size.width / 2, y: degrees == 0 ? proxy.size.height * 0.72 : proxy.size.height / 2)
+            .position(Self.place(in: proxy.size, block: blockSize, degrees: degrees,
+                                 crossCenter: isStacking ? crossCenter : nil))
             .animation(Theme.spring, value: degrees)
+            // Turned, the block's place depends on its length, which changes as Cancel leaves; it moves with Cancel.
+            .animation(Theme.snappy, value: blockSize)
         }
         .onChange(of: model.activity) { _, activity in
             if activity != .stacking { isFinishing = false }
         }
+    }
+
+    /// Below the middle in portrait, clear of the subject; centred when turned, where a sideways block fits. A stack
+    /// keeps it off the drift crosses too, since lining them up is what the steady status asks for: lower down in
+    /// portrait, and toward the open area's top end when the phone is turned or upside down. Turned, the status, the
+    /// histogram and the badges keep to the sides of that end, so its middle is free.
+    private static func place(in size: CGSize, block: CGSize, degrees: Double, crossCenter: CGPoint?) -> CGPoint {
+        let usual = CGPoint(x: size.width / 2, y: degrees == 0 ? size.height * 0.72 : size.height / 2)
+        guard let cross = crossCenter, cross.y.isFinite else { return usual }
+        let margin: CGFloat = 8
+        let y: CGFloat
+        if degrees == 0 {
+            y = min(max(usual.y, cross.y + crossClearance + block.height / 2), size.height - block.height / 2 - margin)
+        } else if degrees == 180 {
+            y = max(min(usual.y, cross.y - crossClearance - block.height / 2), block.height / 2 + margin)
+        } else {
+            // On its side the block runs along the open area's height.
+            y = max(min(usual.y, cross.y - crossClearance - block.width / 2), block.width / 2 + margin)
+        }
+        return CGPoint(x: usual.x, y: y)
     }
 }
 

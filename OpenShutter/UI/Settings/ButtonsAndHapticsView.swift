@@ -43,7 +43,7 @@ struct ButtonsAndHapticsView: View {
 
             Section {
                 SettingsPicker("Haptics", selection: hapticsBinding, options: HapticsChoice.allCases, label: \.title)
-                Toggle("Ticks while turning dials", isOn: model.settingBinding(\.controls.dialTicks))
+                Toggle("Selection ticks", isOn: model.settingBinding(\.controls.dialTicks))
                     .disabled(!controls.haptics)
                 SettingsPicker("Zoom ticks", selection: model.settingBinding(\.controls.zoomTicks),
                                options: ZoomTickStyle.allCases, label: \.title)
@@ -53,6 +53,7 @@ struct ButtonsAndHapticsView: View {
             } footer: {
                 SettingsFooter([
                     "Haptics are the small taps you feel when you use the controls. They pause during night and long exposure shots so they don't shake the phone, and iOS mutes them while a video records sound.",
+                    "Selection ticks are the clicks you feel as a dial turns, the mode changes or you step through choices, and when the phone comes level. With them off, you still feel taps, the shutter and zoom ticks.",
                     "Touch and hold a zoom button and drag to zoom. Zoom ticks sets whether it ticks at every step or only at the zoom buttons' values.",
                 ])
             }

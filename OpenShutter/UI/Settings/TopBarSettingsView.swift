@@ -19,8 +19,10 @@ struct TopBarSettingsView: View {
         let trailing = rules.shown(options.trailing)
         let placed = Set(options.leading + options.trailing)
         let more = TopBarItem.allCases.filter { !placed.contains($0) && (advanced || !$0.isAdvancedOnly) }
-        let layout = options.layout(advanced: advanced, mode: mode, wantsBadge: rules.wantsBadge,
-                                    isAvailable: rules.isAvailable)
+        // The bar's own rules, so the preview shows what the camera shows.
+        let layout = options.layout(advanced: advanced, mode: mode,
+                                    wantsBadge: TopBarScheduleBadge.isWanted(model: model, mode: mode),
+                                    isAvailable: { TopBarItemButton.isAvailable($0, model: model, mode: mode) })
 
         List {
             Section {
@@ -44,13 +46,19 @@ struct TopBarSettingsView: View {
             }
 
             Section {
-                Button("Use the default buttons") {
+                Button {
                     Haptics.tap()
                     model.updateSettings { $0.topBar = TopBarOptions() }
+                } label: {
+                    Text("Use the default buttons")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
                 }
+                // Borderless keeps the button tappable while the list is in edit mode.
+                .buttonStyle(.borderless)
                 .disabled(options == TopBarOptions())
             } footer: {
-                Text("Every button stays in the quick settings too.")
+                Text("Without the Flash button the flash stays off. Other buttons keep their settings when you remove them, and the ones from quick settings stay there.")
             }
         }
         .environment(\.editMode, $editMode)
@@ -155,7 +163,16 @@ struct TopBarSettingsView: View {
             case .trailing: trailing = Self.merged(trailing, shown: newShown, advanced: advanced)
             }
             settings.topBar = TopBarOptions(leading: leading, trailing: trailing)
+            // The bar's Flash button is the flash's only control, so without it the flash goes off instead of firing
+            // unseen.
+            if !Self.hasFlash(settings.topBar) { settings.capture.flash = .off }
         }
+        // The same for the flashlight, which would stay lit in VIDEO with nothing to turn it off.
+        if model.torchOn, !Self.hasFlash(model.settings.topBar) { model.setTorch(false) }
+    }
+
+    private static func hasFlash(_ options: TopBarOptions) -> Bool {
+        options.leading.contains(.flash) || options.trailing.contains(.flash)
     }
 
     private func shown(_ side: TopBarSide) -> [TopBarItem] {
@@ -260,19 +277,18 @@ private enum TopBarSide {
         case .leading:
             return "Up to 3 buttons. A button that doesn't work in the current mode steps aside and the next one moves up."
         case .trailing:
-            return "Up to 2 buttons. Settings stays at the far right. In video, the format takes this side."
+            return "Up to 2 buttons. Settings stays at the far right. In video, the format takes this side and Flash moves to the left."
         }
     }
 }
 
-/// What the editor needs to know about the camera right now: which buttons work on it and in which modes. Plain
-/// values read once per body, so its checks can go to CameraCore's layout rule as they are.
+/// What the editor's rows need to know about the camera right now: which buttons work on it and in which modes.
+/// Plain values read once per body. The preview asks the bar's own rules instead, so it never differs from the bar.
 private struct TopBarRules {
     let advanced: Bool
     let mode: CaptureMode
     let capabilities: CameraCapabilities
     let isBulb: Bool
-    let wantsBadge: Bool
     let videoLabel: String
 
     @MainActor
@@ -282,12 +298,6 @@ private struct TopBarRules {
         mode = settings.mode
         capabilities = model.capabilities
         isBulb = settings.mode == .long && settings.longExposure.bulb
-        // The badge's rule on the bar: a timer outside VIDEO and bulb, a bracket in PHOTO and in MANUAL with a
-        // shutter the camera takes in one exposure.
-        let schedule = !settings.capture.schedule.isOff && mode != .video && !isBulb
-        let bracket = advanced && !settings.capture.bracket.isOff
-            && (mode == .photo || (mode == .manual && !model.shutterIsStacked))
-        wantsBadge = schedule || bracket
         let video = model.recordedVideo
         let rate = video.frameRate
         videoLabel = rate.isFinite && rate > 0 && rate < 10_000
@@ -304,8 +314,8 @@ private struct TopBarRules {
         items.filter { advanced || !$0.isAdvancedOnly }
     }
 
-    /// Whether the button works on this camera now, as the bar decides it. VIDEO takes the photo output out of the
-    /// session and reports no photo features, so they count as there.
+    /// Whether this camera has what the button needs, for the rows' notes. VIDEO takes the photo output out of the
+    /// session and reports no photo features, so they count as there rather than read "Not on this camera".
     func isAvailable(_ item: TopBarItem) -> Bool {
         let caps = capabilities
         let photoReported = mode != .video
@@ -420,8 +430,10 @@ private struct TopBarPreview: View {
                 }
             } else {
                 ForEach(0..<TopBarOptions.trailingRoom, id: \.self) { slot in
-                    if slot < layout.trailing.count {
-                        glyph(layout.trailing[slot].symbolNames)
+                    // Packed against the gear, as on the bar.
+                    let start = TopBarOptions.trailingRoom - layout.trailing.count
+                    if slot >= start {
+                        glyph(layout.trailing[slot - start].symbolNames)
                     } else {
                         empty
                     }
@@ -443,8 +455,8 @@ private struct TopBarPreview: View {
     private func leadingSlot(_ slot: Int) -> some View {
         if slot < layout.leading.count {
             glyph(layout.leading[slot].symbolNames)
-        } else if layout.showsBadge, slot == TopBarOptions.leadingRoom - 1 {
-            // The timer badge takes the last left slot.
+        } else if layout.showsBadge, slot == layout.leading.count {
+            // The timer badge, right after the left buttons, as on the bar.
             glyph(["timer"], tint: Theme.accent)
         } else {
             empty

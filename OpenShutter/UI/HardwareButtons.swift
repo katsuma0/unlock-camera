@@ -180,7 +180,11 @@ private final class HardwarePresses {
         let role = roles.removeValue(forKey: button)
         switch role {
         case .stop:
-            pressShutter(model)
+            // The one role checked again: the shot can end on its own while the button is down, and the release
+            // must not start another, least of all from a button set to zoom.
+            if Self.isRunningShot(model) {
+                stop(event, model: model)
+            }
         case .shutter:
             shutter(event, model: model)
         case .bulb(let started):
@@ -198,7 +202,7 @@ private final class HardwarePresses {
         case nil:
             // A release whose press came before the buttons were the camera's: a quick press of the mapping.
             if Self.isRunningShot(model) {
-                pressShutter(model)
+                stop(event, model: model)
                 return
             }
             switch Self.action(for: button, model: model) {
@@ -230,6 +234,19 @@ private final class HardwarePresses {
         pressShutter(model)
         if let sound {
             play(sound, for: event)
+        }
+    }
+
+    /// Ends what is running. A stack ended early still saves what it has, so an AirPods click hears the shutter for
+    /// it. A cancelled countdown or a stopped sequence takes no picture, and the shutter would say it did.
+    private func stop(_ event: AVCaptureEvent, model: CameraModel) {
+        // Worked out before the press changes the state it depends on. A stack with no frames yet saves nothing, and
+        // one already finishing had its sound.
+        let savesPicture = model.activity == .stacking && !model.isFinishingStack
+            && (model.stackProgress?.framesCaptured ?? 0) > 0
+        pressShutter(model)
+        if savesPicture {
+            play(.shutter, for: event)
         }
     }
 
@@ -325,7 +342,7 @@ private final class HardwarePresses {
     }
 
     /// What the shutter press is about to do, as the AirPods sound for it: a photo or the start of a shot, the start
-    /// or end of a recording, and nothing for a press that stops a shot.
+    /// or end of a recording, and nothing for a press that stops a shot (a stop press has its own, in stop(_:model:)).
     private static func sound(_ model: CameraModel) -> PressSound? {
         switch model.activity {
         case .recording:

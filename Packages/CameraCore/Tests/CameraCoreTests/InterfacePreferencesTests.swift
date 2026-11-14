@@ -554,6 +554,34 @@ final class InterfacePreferencesTests: XCTestCase {
                        TopBarLayout(leading: [], trailing: [], showsBadge: true))
     }
 
+    func testAFlashOnTheRightStaysTheFlashlightInVideo() {
+        // The format chip takes the right side in VIDEO, so a Flash placed there moves to the front of the left.
+        let bar = TopBarOptions(leading: [.timer, .aspect, .grid], trailing: [.flash, .livePhoto])
+        XCTAssertEqual(bar.layout(advanced: false, mode: .photo, wantsBadge: false, isAvailable: anything),
+                       TopBarLayout(leading: [.timer, .aspect, .grid], trailing: [.flash, .livePhoto],
+                                    showsBadge: false))
+        XCTAssertEqual(bar.layout(advanced: false, mode: .video, wantsBadge: false, isAvailable: anything),
+                       TopBarLayout(leading: [.flash, .grid], trailing: [], showsBadge: false))
+
+        // It takes the first slot of a full left side, and steps aside on a camera without a light.
+        let fullLeft = TopBarOptions(leading: [.grid, .level, .location], trailing: [.flash])
+        XCTAssertEqual(fullLeft.layout(advanced: true, mode: .video, wantsBadge: false, isAvailable: anything),
+                       TopBarLayout(leading: [.flash, .grid, .level], trailing: [], showsBadge: false))
+        XCTAssertEqual(fullLeft.layout(advanced: true, mode: .video, wantsBadge: false) { $0 != .flash },
+                       TopBarLayout(leading: [.grid, .level, .location], trailing: [], showsBadge: false))
+        // Outside VIDEO it stays where it was placed.
+        XCTAssertEqual(fullLeft.layout(advanced: true, mode: .manual, wantsBadge: false, isAvailable: anything),
+                       TopBarLayout(leading: [.grid, .level, .location], trailing: [.flash], showsBadge: false))
+
+        // A left side stored full loses none of its buttons to the light.
+        let stored = TopBarOptions(leading: [.timer, .aspect, .format, .livePhoto, .quietShutter, .raw, .resolution,
+                                             .grid],
+                                   trailing: [.flash])
+        XCTAssertEqual(stored.leading.count, TopBarOptions.storedLimit)
+        XCTAssertEqual(stored.layout(advanced: true, mode: .video, wantsBadge: false, isAvailable: anything).leading,
+                       [.flash, .grid])
+    }
+
     // MARK: - Words
 
     /// Camera jargon the simple interface doesn't show.

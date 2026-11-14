@@ -50,12 +50,15 @@ final class MovieRecorder: NSObject, AVCaptureFileOutputRecordingDelegate, @unch
         let colorMode = Self.recordedColorMode(of: connection)
         let codec = lock.withLock { configuredCodec }
         var shot = shot
-        // What the file holds, which can differ from the settings: the codec and the color the camera fell back to.
+        // What the file holds, which can differ from the settings: the codec, stabilization and noise reduction the
+        // connection fell back to, and the color the camera fell back to.
         if var video = shot.record.context.video {
             if let codec {
                 video.codec = codec
             }
             video.colorMode = colorMode
+            video.stabilization = Self.recordedStabilization(of: connection)
+            video.lowLightNoiseReduction = Self.recordedNoiseReduction(of: connection)
             shot.record.context.video = video
         }
         // Set for every file, also without a location, so each one names its camera, its time and how it was shot,
@@ -292,6 +295,35 @@ final class MovieRecorder: NSObject, AVCaptureFileOutputRecordingDelegate, @unch
         if #available(iOS 26.0, *), space == .appleLog2 { return .appleLog2 }
         #endif
         return .sdr
+    }
+
+    /// Read from the connection rather than the settings: configureConnection falls back to a milder mode the
+    /// committed format supports, and preview optimized becomes standard. Auto stays Auto, since the system picks.
+    private static func recordedStabilization(of connection: AVCaptureConnection) -> StabilizationChoice {
+        guard connection.isVideoStabilizationSupported else { return .off }
+        let mode = connection.preferredVideoStabilizationMode
+        #if compiler(>=6.2)
+        if #available(iOS 26.0, *), mode == .lowLatency { return .lowLatency }
+        #endif
+        switch mode {
+        case .standard: return .standard
+        case .cinematic: return .cinematic
+        case .cinematicExtended: return .cinematicExtended
+        case .cinematicExtendedEnhanced: return .cinematicExtendedEnhanced
+        case .previewOptimized: return .previewOptimized
+        case .auto: return .automatic
+        default: return .off
+        }
+    }
+
+    /// Off where the connection can't run it. Only iOS 27 has it, and a build with an older SDK can't read it.
+    private static func recordedNoiseReduction(of connection: AVCaptureConnection) -> Bool {
+        #if compiler(>=6.4)
+        if #available(iOS 27.0, *) {
+            return connection.isLowLightVideoNoiseReductionEnabled
+        }
+        #endif
+        return false
     }
 
     /// The connection only takes 0, 90, 180 or 270.

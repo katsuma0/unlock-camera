@@ -19,7 +19,7 @@ struct CameraPreviewView: View {
     var body: some View {
         ZStack {
             PreviewSurface(model: model, interaction: interaction, picture: geometry.picture, isHidden: isHidden)
-            AnalysisOverlay(model: model, picture: geometry.picture)
+            AnalysisOverlay(model: model, picture: geometry.picture, isHidden: isHidden)
         }
         .background(Theme.background)
         .accessibilityHidden(true)
@@ -327,7 +327,8 @@ final class ViewfinderInteraction {
         let reachesLimit = pinchAtLimit && target != previous
         guard reachesLimit || abs(target - previous) > previous * 0.002 else { return }
         if Self.crossesPreset(from: previous, to: target, model: model) {
-            Haptics.tick()
+            // The zoom wheel's tap at a lens value. The dial ticks switch is about dials and leaves zoom stops alone.
+            Haptics.zoomTick(atLensValue: true)
         }
         pinchLastSent = target
         pinchSentZoom = true
@@ -534,7 +535,7 @@ private struct PreviewSurface: UIViewRepresentable {
     func updateUIView(_ uiView: PreviewHostView, context: Context) {
         context.coordinator.model = model
         uiView.reattachIfNeeded()
-        uiView.setPictureRect(picture, animated: true)
+        uiView.setPictureRect(picture, animated: PictureLayerMotion.animates(in: context.environment))
         // Under the battery saver's black layer the picture would still be drawn 30 times a second. The session and
         // the shot keep running: frames reach the stack through the video output, not this layer.
         if uiView.isHidden != isHidden {
@@ -617,6 +618,12 @@ private final class PreviewHostView: UIView {
 @MainActor
 private enum PictureLayerMotion {
     private static let animationKey = "pictureRect"
+
+    /// A spring up to 4/3 times the size is a zoom, which Reduce motion, in the app or in iOS, asks to leave out. The
+    /// picture then cuts to its new size, and the camera screen covers the cut with its veil.
+    static func animates(in environment: EnvironmentValues) -> Bool {
+        !(environment.accessibilityReduceMotion || AppearanceStore.shared.reduceMotion)
+    }
 
     static func isUsable(_ rect: CGRect) -> Bool {
         !rect.isNull && rect.minX.isFinite && rect.minY.isFinite && rect.width.isFinite && rect.height.isFinite
@@ -732,9 +739,12 @@ private struct AnalysisOverlay: View {
     let model: CameraModel
     /// The analyzer draws the whole camera image, so its layer sits where the preview's does.
     let picture: CGRect
+    /// Under the battery saver's black layer. The analysis isn't read then, so its updates don't upload overlays
+    /// nobody sees.
+    let isHidden: Bool
 
     var body: some View {
-        OverlaySurface(image: showsOverlay ? model.analysis?.overlay : nil, picture: picture)
+        OverlaySurface(image: showsOverlay && !isHidden ? model.analysis?.overlay : nil, picture: picture)
             .allowsHitTesting(false)
             .accessibilityHidden(true)
     }
@@ -765,7 +775,7 @@ private struct OverlaySurface: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: OverlayHostView, context: Context) {
-        uiView.setPictureRect(picture, animated: true)
+        uiView.setPictureRect(picture, animated: PictureLayerMotion.animates(in: context.environment))
         uiView.show(image)
     }
 }
