@@ -368,8 +368,9 @@ private struct VideoPage: View {
             if let item = await AssetRequests.playerItem(for: asset, manager: manager) {
                 // The app never sets its audio session, so a video would play under whatever the camera left:
                 // the default category, which the Ring/Silent switch mutes, or after filming the capture session's
-                // PlayAndRecord, whose default output is the earpiece. Playback sounds as in Photos; the capture
-                // session sets PlayAndRecord again when it needs the microphone.
+                // PlayAndRecord, whose default output is the earpiece. Playback uses the speaker and plays with the
+                // switch on silent, as Photos does; the capture session sets PlayAndRecord again when it needs the
+                // microphone.
                 try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
                 player = AVPlayer(playerItem: item)
             } else if !Task.isCancelled {
@@ -418,10 +419,11 @@ enum GalleryText {
         return relativeDate.string(from: date)
     }
 
-    /// Photo, Live Photo or Video: what Photos calls them, in both interfaces.
+    /// Photo, Live Photo or Video: what Photos calls them, in both interfaces. A Live Photo set to Loop, Bounce or
+    /// Live off shows as a still here (GalleryPage), so it is a Photo.
     static func kindTitle(of asset: PHAsset) -> String {
         if asset.mediaType == .video { return "Video" }
-        return asset.mediaSubtypes.contains(.photoLive) ? "Live Photo" : "Photo"
+        return asset.playbackStyle == .livePhoto ? "Live Photo" : "Photo"
     }
 
     /// The advanced interface also names what the camera made: a RAW photo, a stack, a bracket frame, a copy.

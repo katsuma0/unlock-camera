@@ -50,7 +50,13 @@ struct GalleryView: View {
             library.imageManager.stopCachingImagesForAllAssets()
         }
         .onChange(of: library.access.canRead) { _, canRead in
-            if !canRead {
+            if canRead {
+                // Access was just given: the thumbnail that opened the gallery stood for the newest photo. The
+                // first fetch may already have landed, so it is tried now as well.
+                guard path.isEmpty else { return }
+                opensNewestWhenFetched = true
+                openNewestIfWaiting()
+            } else {
                 path = []
                 opensNewestWhenFetched = false
             }
@@ -67,7 +73,8 @@ struct GalleryView: View {
 
     private func openNewestIfWaiting() {
         let library = model.library
-        guard opensNewestWhenFetched, !library.isFetching else { return }
+        // No list yet means the fetch hasn't started (the stored list is still loading), so it keeps waiting.
+        guard opensNewestWhenFetched, !library.isFetching, library.assets != nil else { return }
         opensNewestWhenFetched = false
         guard path.isEmpty, let newest = library.assets?.identifiers.first else { return }
         gridScrollID = newest

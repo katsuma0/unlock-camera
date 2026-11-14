@@ -53,7 +53,14 @@ struct GalleryGrid: View {
         }
         .overlay {
             if let assets {
-                if assets.isEmpty {
+                if assets.isEmpty, library.access == .limited, library.missingCount > 0 {
+                    // Under the banner that says some aren't shared, "No photos yet" would say none were taken.
+                    ContentUnavailableView(
+                        "Your photos aren't shared yet",
+                        systemImage: "photo.badge.plus",
+                        description: Text("Tap Change to let Open Shutter see the photos you took here.")
+                    )
+                } else if assets.isEmpty {
                     ContentUnavailableView(
                         "No photos yet",
                         systemImage: "photo.on.rectangle",

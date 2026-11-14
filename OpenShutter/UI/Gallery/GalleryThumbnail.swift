@@ -80,8 +80,9 @@ struct ThumbnailButton: View {
     }
 }
 
-/// What the square shows: this session's last capture while it still exists, else the newest photo the library
-/// shows, which brings the last photo back after a relaunch and steps past one deleted in the gallery.
+/// What the square shows: this session's last capture while it still exists (as edited, once it is), else the
+/// newest photo the library shows, which brings the last photo back after a relaunch and steps past one deleted in
+/// the gallery.
 private struct ThumbnailPicture {
     /// Changes when a different picture shows, for the swap animation.
     var key: String?
@@ -96,8 +97,16 @@ private struct ThumbnailPicture {
     init(capture: CaptureResult?, library: CaptureLibrary) {
         // A capture that never reached Photos has no identifier and still shows: it is the newest there is.
         if let capture, !(capture.assetIdentifier.map(library.isGone) ?? false) {
-            key = capture.id.uuidString
-            image = capture.thumbnail.map { Image(decorative: $0, scale: 1) }
+            if let id = capture.assetIdentifier, let image = library.latestThumbnail, library.latestThumbnailID == id,
+               library.assets?.asset(id: id)?.hasAdjustments ?? false {
+                // Edited in the gallery or in Photos, so the library's picture shows the edit. An unedited capture
+                // keeps its own picture: the fetch after each shot would otherwise swap the square for the same one.
+                key = id
+                self.image = Image(uiImage: image)
+            } else {
+                key = capture.id.uuidString
+                image = capture.thumbnail.map { Image(decorative: $0, scale: 1) }
+            }
             isVideo = capture.kind == .video
             self.capture = capture
         } else if let image = library.latestThumbnail, let id = library.latestThumbnailID {
