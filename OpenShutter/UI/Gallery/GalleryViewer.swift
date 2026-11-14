@@ -119,9 +119,16 @@ struct GalleryViewer: View {
             }
             .sheetAppearance()
         }
-        .alert(failure ?? "", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
+        .alert(failureTitle, isPresented: failureShown) {
             Button("OK", role: .cancel) {}
         }
+    }
+
+    // Kept out of the modifier chain: inline, the alert's title and binding take Swift 6.2 about 20 s to type-check.
+    private var failureTitle: String { failure ?? "" }
+
+    private var failureShown: Binding<Bool> {
+        Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })
     }
 
     private func pager(_ assets: AssetList) -> some View {
