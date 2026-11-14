@@ -86,8 +86,11 @@ enum EditRenderer {
             filter.radius = Float(EditParameters.highlightShadowRadius)
             output = (filter.outputImage ?? output).cropped(to: frame)
         }
-        if p.usesToneCurve || p.usesColorControls {
-            output = perceptualAdjustments(p, on: output)
+        if p.usesToneCurve, p.toneCurve.count == 5 {
+            output = toneCurve(p.toneCurve, on: output)
+        }
+        if p.usesColorControls {
+            output = colorControls(p, on: output)
         }
         if p.usesVibrance {
             let filter = CIFilter.vibrance()
@@ -391,33 +394,36 @@ enum EditRenderer {
 
     private static let log = Logger(subsystem: "ca.katsuma.openshutter", category: "Editor")
 
-    /// The tone curve and the color controls are shaped for values as the eye sees them, so they run between the sRGB
-    /// tone curve and its inverse. In Core Image's linear light, contrast pivots too dark and darkens the picture.
-    private static func perceptualAdjustments(_ p: EditParameters, on image: CIImage) -> CIImage {
+    /// CIToneCurve already applies its points to values as the eye sees them (its header: "a perceptual (gamma 2)
+    /// version of the working space"), so it takes linear light as it is. Its `extrapolate` switch is iOS 26 only and
+    /// stays off, so an edit renders alike on every iOS; a value exposure pushed past white clips at the curve.
+    private static func toneCurve(_ points: [EditParameters.CurvePoint], on image: CIImage) -> CIImage {
+        let point = points.map { CGPoint(x: CGFloat($0.x), y: CGFloat($0.y)) }
+        let curve = CIFilter.toneCurve()
+        curve.inputImage = image
+        curve.point0 = point[0]
+        curve.point1 = point[1]
+        curve.point2 = point[2]
+        curve.point3 = point[3]
+        curve.point4 = point[4]
+        return curve.outputImage ?? image
+    }
+
+    /// CIColorControls pivots contrast at 0.5 and adds brightness as a bias, both meant for values as the eye sees
+    /// them, so it runs between the sRGB tone curve and its inverse. In Core Image's linear light, contrast would
+    /// pivot too dark and darken the whole picture.
+    private static func colorControls(_ p: EditParameters, on image: CIImage) -> CIImage {
         let toPerceptual = CIFilter.linearToSRGBToneCurve()
         toPerceptual.inputImage = image
-        guard var output = toPerceptual.outputImage else { return image }
-        if p.usesToneCurve, p.toneCurve.count == 5 {
-            let points = p.toneCurve.map { CGPoint(x: CGFloat($0.x), y: CGFloat($0.y)) }
-            let curve = CIFilter.toneCurve()
-            curve.inputImage = output
-            curve.point0 = points[0]
-            curve.point1 = points[1]
-            curve.point2 = points[2]
-            curve.point3 = points[3]
-            curve.point4 = points[4]
-            output = curve.outputImage ?? output
-        }
-        if p.usesColorControls {
-            let controls = CIFilter.colorControls()
-            controls.inputImage = output
-            controls.contrast = Float(p.contrast)
-            controls.brightness = Float(p.brightness)
-            controls.saturation = Float(p.saturation)
-            output = controls.outputImage ?? output
-        }
+        guard let perceptual = toPerceptual.outputImage else { return image }
+        let controls = CIFilter.colorControls()
+        controls.inputImage = perceptual
+        controls.contrast = Float(p.contrast)
+        controls.brightness = Float(p.brightness)
+        controls.saturation = Float(p.saturation)
+        guard let adjusted = controls.outputImage else { return image }
         let toLinear = CIFilter.sRGBToneCurveToLinear()
-        toLinear.inputImage = output
+        toLinear.inputImage = adjusted
         return toLinear.outputImage ?? image
     }
 

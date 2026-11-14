@@ -88,6 +88,7 @@ struct PhotoEditorView: View {
     }
 
     private func done() {
+        guard session.activity == nil else { return }
         guard session.hasChanges else {
             dismiss()
             return
@@ -102,6 +103,7 @@ struct PhotoEditorView: View {
     }
 
     private func saveCopy() {
+        guard session.activity == nil else { return }
         Task {
             if await session.saveCopy() {
                 dismiss()
@@ -112,6 +114,7 @@ struct PhotoEditorView: View {
     }
 
     private func revert() {
+        guard session.activity == nil else { return }
         Task {
             if await session.revert() {
                 dismiss()
@@ -202,8 +205,8 @@ private struct EditorCanvas: View {
         let isComparing = (isPressing || isComparingForVoiceOver) && session.original != nil
         ZStack {
             switch session.status {
-            case .loading(let progress):
-                EditorLoading(progress: progress)
+            case .loading:
+                EditorLoading(progress: session.downloadProgress)
             case .unavailable(let text):
                 EditorNotice(text: text, close: close)
             case .ready:
@@ -233,7 +236,8 @@ private struct EditorCanvas: View {
         .padding(.vertical, 8)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .contentShape(Rectangle())
-        .gesture(compare)
+        // Off until there is a picture to compare, so it can't stand in front of the notice's Close button.
+        .gesture(compare, including: session.status == .ready ? .all : .subviews)
         .overlay(alignment: .top) {
             if isComparing {
                 Text("Original")

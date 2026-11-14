@@ -375,7 +375,7 @@ private struct EditorValueHeader: View {
             .opacity(isChanged ? 1 : 0)
             .disabled(!isChanged)
             .accessibilityHidden(!isChanged)
-            .accessibilityHint(Text("Sets \(title.lowercased()) back to where the photo started."))
+            .accessibilityHint(Text("Sets \(title.lowercased()) back to 0."))
             .frame(width: Self.sideWidth, alignment: .trailing)
         }
         .padding(.horizontal, 12)
@@ -584,14 +584,18 @@ private struct CropShapes: View {
                                      imageHeight: Double(photo.height))
     }
 
-    /// Whether the crop stands, measured on the picture as shown, after the turns. Without a crop it is the
-    /// picture's own shape, so a first pick stands in a standing photo.
+    /// Whether the crop stands, measured on the picture as shown, after the turns. Without a crop, or with a square
+    /// one, it is the picture's own shape, so a first pick stands in a standing photo.
     private static func isPortrait(_ recipe: EditRecipe, photo: CGSize) -> Bool {
         let turned = recipe.quarterTurns % 2 == 1
         let width = Double(turned ? photo.height : photo.width)
         let height = Double(turned ? photo.width : photo.height)
         if let crop = recipe.crop {
-            return crop.height * height > crop.width * width
+            let cropWidth = crop.width * width
+            let cropHeight = crop.height * height
+            if abs(cropWidth - cropHeight) > 0.01 * max(cropWidth, cropHeight) {
+                return cropHeight > cropWidth
+            }
         }
         return height > width
     }

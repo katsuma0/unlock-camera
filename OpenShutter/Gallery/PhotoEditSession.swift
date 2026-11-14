@@ -16,8 +16,8 @@ import CameraCore
 @Observable
 final class PhotoEditSession {
     enum Status: Equatable {
-        /// Waiting for Photos. `progress` runs 0...1 while the original comes down from iCloud.
-        case loading(progress: Double?)
+        /// Waiting for Photos.
+        case loading
         case ready
         /// Nothing to edit; the text says why.
         case unavailable(String)
@@ -32,7 +32,10 @@ final class PhotoEditSession {
     let asset: PHAsset
     /// The photo carries an edit, from here or from Photos, so "Revert to original" applies.
     let canRevert: Bool
-    private(set) var status = Status.loading(progress: nil)
+    private(set) var status = Status.loading
+    /// 0...1 while the original comes down from iCloud, in whole percent steps. Apart from the status, so the
+    /// editor around the loading view doesn't redraw at every step.
+    private(set) var downloadProgress: Double?
     private(set) var activity: Activity?
     /// The edit. The controls write it at dial speed, and each write asks for a new preview.
     var recipe = EditRecipe.identity {
@@ -161,8 +164,11 @@ final class PhotoEditSession {
     }
 
     private func downloaded(_ progress: Double) {
-        guard case .loading = status, progress.isFinite else { return }
-        status = .loading(progress: min(max(progress, 0), 1))
+        guard status == .loading, progress.isFinite else { return }
+        let percent = (min(max(progress, 0), 1) * 100).rounded(.down) / 100
+        if downloadProgress != percent {
+            downloadProgress = percent
+        }
     }
 
     private func loadLookPreviews(_ base: EditRenderer.Preview, context: CIContext) {
