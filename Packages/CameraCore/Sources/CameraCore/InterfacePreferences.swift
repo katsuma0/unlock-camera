@@ -355,7 +355,8 @@ public struct TopBarOptions: Codable, Hashable, Sendable {
     /// The bar in `mode` with its furniture in place. In VIDEO the format chip takes the right side, and a Flash
     /// placed there moves to the front of the left side: in VIDEO it is the flashlight, which the chip must not hide.
     /// When a timer, intervalometer or bracket is set, its badge takes the last left slot, unless a Timer button on
-    /// the bar already shows it: the button then stands in for the badge.
+    /// the bar already shows it: the button then stands in for the badge. A Flash in that slot moves to the front of
+    /// the left side and the button before it gives way instead: the flash still fires while the badge shows.
     /// - Parameters:
     ///   - wantsBadge: A timer, intervalometer or bracket is set and the badge belongs in this mode.
     ///   - isAvailable: As for `shown`.
@@ -371,8 +372,16 @@ public struct TopBarOptions: Codable, Hashable, Sendable {
         guard wantsBadge, !full.leading.contains(.timer), !full.trailing.contains(.timer) else {
             return TopBarLayout(leading: full.leading, trailing: full.trailing, showsBadge: false)
         }
-        let rest = bar.shown(advanced: advanced, mode: mode, leadingRoom: Self.leadingRoom - 1,
+        var rest = bar.shown(advanced: advanced, mode: mode, leadingRoom: Self.leadingRoom - 1,
                              trailingRoom: trailingRoom, isAvailable: isAvailable)
+        if full.leading.contains(.flash), !rest.leading.contains(.flash) {
+            // The flash would still fire, with nothing on screen to show it or turn it off. Only a Flash the bar
+            // shows moves: one past the side's room was never on the bar, and Settings marks it "No room".
+            bar.leading.removeAll { $0 == .flash }
+            bar.leading.insert(.flash, at: 0)
+            rest = bar.shown(advanced: advanced, mode: mode, leadingRoom: Self.leadingRoom - 1,
+                             trailingRoom: trailingRoom, isAvailable: isAvailable)
+        }
         return TopBarLayout(leading: rest.leading, trailing: rest.trailing, showsBadge: true)
     }
 }

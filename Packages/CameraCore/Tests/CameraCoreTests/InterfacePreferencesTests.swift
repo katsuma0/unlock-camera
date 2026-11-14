@@ -582,6 +582,25 @@ final class InterfacePreferencesTests: XCTestCase {
                        [.flash, .grid])
     }
 
+    func testATimerBadgeLeavesTheFlashOnTheBar() {
+        // The flash still fires while the badge shows, so a Flash in the badge's slot moves to the front of the left
+        // and the button before it gives way.
+        let bar = TopBarOptions(leading: [.grid, .level, .flash], trailing: [.livePhoto])
+        XCTAssertEqual(bar.layout(advanced: false, mode: .photo, wantsBadge: false, isAvailable: anything),
+                       TopBarLayout(leading: [.grid, .level, .flash], trailing: [.livePhoto], showsBadge: false))
+        XCTAssertEqual(bar.layout(advanced: false, mode: .photo, wantsBadge: true, isAvailable: anything),
+                       TopBarLayout(leading: [.flash, .grid], trailing: [.livePhoto], showsBadge: true))
+        XCTAssertEqual(bar.layout(advanced: true, mode: .manual, wantsBadge: true, isAvailable: anything),
+                       TopBarLayout(leading: [.flash, .grid], trailing: [], showsBadge: true))
+
+        // A Flash the badge leaves on the bar keeps its place, and on a camera without a flash nothing moves.
+        let flashSecond = TopBarOptions(leading: [.grid, .flash, .level], trailing: [.livePhoto])
+        XCTAssertEqual(flashSecond.layout(advanced: false, mode: .photo, wantsBadge: true, isAvailable: anything),
+                       TopBarLayout(leading: [.grid, .flash], trailing: [.livePhoto], showsBadge: true))
+        XCTAssertEqual(bar.layout(advanced: false, mode: .photo, wantsBadge: true) { $0 != .flash },
+                       TopBarLayout(leading: [.grid, .level], trailing: [.livePhoto], showsBadge: true))
+    }
+
     // MARK: - Words
 
     /// Camera jargon the simple interface doesn't show.
