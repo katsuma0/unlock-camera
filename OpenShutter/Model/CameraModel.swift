@@ -540,6 +540,7 @@ final class CameraModel {
     private func dimmingDidChange() {
         motionMonitor.pausesDriftAngles = dimmer.isDimmed
         refreshSteadyStatus()
+        applyAnalysis()
     }
 
     // MARK: Gallery
@@ -2420,13 +2421,17 @@ final class CameraModel {
         let display = settings.display
         let manualFocus = effectiveFocus.lensPosition != nil || activeDial == .focus
         let peaking = display.peaking == .always || (display.peaking == .manualFocus && manualFocus)
+        // Nobody sees the overlays or the histogram under the battery saver's black screen, so the analyzer stops
+        // drawing them until a touch lights it again.
+        let shown = !dimmer.isDimmed
         return AnalysisOptions(
-            histogram: display.histogram != .off,
-            rgbHistogram: display.histogram == .rgb,
-            zebraThreshold: display.zebras ? display.zebraThreshold : nil,
-            peakingThreshold: peaking ? OverlayOptions.peakingThreshold(sensitivity: display.peakingSensitivity) : nil,
+            histogram: shown && display.histogram != .off,
+            rgbHistogram: shown && display.histogram == .rgb,
+            zebraThreshold: shown && display.zebras ? display.zebraThreshold : nil,
+            peakingThreshold: shown && peaking
+                ? OverlayOptions.peakingThreshold(sensitivity: display.peakingSensitivity) : nil,
             peakingColor: display.peakingColor,
-            falseColor: display.falseColor,
+            falseColor: shown && display.falseColor,
             clipping: display.clippingWarnings
         )
     }
