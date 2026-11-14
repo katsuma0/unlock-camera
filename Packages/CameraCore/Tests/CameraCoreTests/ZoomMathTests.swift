@@ -19,6 +19,13 @@ final class ZoomMathTests: XCTestCase {
         zoom.isFinite && zoom > 0
     }
 
+    /// A range with ends out of order or NaN. `init(uncheckedBounds:)` traps on those in a debug build but not in a
+    /// release one, so the app could hand one over. ClosedRange is frozen as its two bounds in order, which is
+    /// what lets two Doubles stand in for it here.
+    private func unchecked(_ lower: Double, _ upper: Double) -> ClosedRange<Double> {
+        unsafeBitCast((lower, upper), to: ClosedRange<Double>.self)
+    }
+
     // MARK: - Constants
 
     func testConstantsMatchTheDesign() {
@@ -441,8 +448,7 @@ final class ZoomMathTests: XCTestCase {
     func testSpanStaysFiniteAndOrderedForAnyInput() {
         let ranges: [ClosedRange<Double>] = [
             1...15, 1...1, -Double.infinity...Double.infinity, 0...0, -5...(-1), 1...Double.infinity,
-            ClosedRange(uncheckedBounds: (lower: Double.nan, upper: Double.nan)),
-            ClosedRange(uncheckedBounds: (lower: 1, upper: Double.nan)),
+            unchecked(.nan, .nan), unchecked(1, .nan), unchecked(.nan, 15), unchecked(15, 1),
         ]
         let actives: [Double] = [1, 0.5, 4, .nan, 0, -2, .infinity, 1e300, 1e-300]
         for range in ranges {
@@ -460,9 +466,12 @@ final class ZoomMathTests: XCTestCase {
         XCTAssertEqual(ZoomMath.span(lensZooms: [0.5, 1, 4], buttonZooms: [0.5, 1, 2, 4, 8], activeZoom: .nan,
                                      activeFactorRange: 1...15, switchesLenses: false), 1...10)
         XCTAssertEqual(ZoomMath.span(lensZooms: [0.5, 1, 4], buttonZooms: [0.5, 1, 2, 4, 8], activeZoom: 1,
-                                     activeFactorRange: ClosedRange(uncheckedBounds: (lower: Double.nan,
-                                                                                      upper: Double.nan)),
-                                     switchesLenses: false), 1...1)
+                                     activeFactorRange: unchecked(.nan, .nan), switchesLenses: false), 1...1)
+        // A largest factor that isn't a number is no zoom too, so only the lenses' own values.
+        XCTAssertEqual(ZoomMath.span(lensZooms: [0.5, 1, 4], buttonZooms: [0.5, 1, 2, 4, 8], activeZoom: 1,
+                                     activeFactorRange: unchecked(1, .nan), switchesLenses: true), 0.5...4)
+        XCTAssertEqual(ZoomMath.span(lensZooms: [0.5, 1, 4], buttonZooms: [0.5, 1, 2, 4, 8], activeZoom: 1,
+                                     activeFactorRange: unchecked(.nan, .nan), switchesLenses: true), 0.5...4)
         // An infinite largest factor leaves the button rule to set the end.
         XCTAssertEqual(ZoomMath.span(lensZooms: [0.5, 1, 4], buttonZooms: [0.5, 1, 2, 4, 8], activeZoom: 1,
                                      activeFactorRange: 1...Double.infinity, switchesLenses: false), 1...10)
@@ -614,7 +623,11 @@ final class ZoomMathTests: XCTestCase {
     func testTicksOfTinyAndUnusableSpans() {
         XCTAssertEqual(ZoomMath.ticks(in: 1...1), [1])
         XCTAssertEqual(ZoomMath.ticks(in: 1.03...1.07), [])
-        XCTAssertEqual(ZoomMath.ticks(in: ClosedRange(uncheckedBounds: (lower: Double.nan, upper: Double.nan))), [1])
+        XCTAssertEqual(ZoomMath.ticks(in: unchecked(.nan, .nan)), [1])
+        XCTAssertEqual(ZoomMath.ticks(in: unchecked(.nan, 1.2)), [1, 1.1, 1.2])
+        XCTAssertEqual(ZoomMath.ticks(in: unchecked(2, .nan)), [2])
+        // Ends out of order read as the lower one.
+        XCTAssertEqual(ZoomMath.ticks(in: unchecked(3, 1)), [3])
         XCTAssertEqual(ZoomMath.ticks(in: 0...0), [0.1])
         XCTAssertEqual(ZoomMath.ticks(in: 5...5.04), [5])
         let wide = ZoomMath.ticks(in: -Double.infinity...Double.infinity)
@@ -712,6 +725,29 @@ final class ZoomMathTests: XCTestCase {
         XCTAssertEqual(zoom, 0.5)
     }
 
+    func testEveryNudgeChangesWhatVoiceOverReadsUntilAnEnd() {
+        // Off-grid spans and starting points included: a swipe that reads the same value back would seem broken.
+        for span in [phoneSpan, 0.55...37, 1.03...1.07, 0.52...4.97] {
+            for start in [span.lowerBound, 1.05, 1.46, span.upperBound] {
+                for direction in [1, -1] {
+                    var zoom = start
+                    for _ in 0..<120 {
+                        let next = ZoomMath.nudged(zoom, by: direction, in: span)
+                        let atEnd = next == (direction > 0 ? span.upperBound : span.lowerBound)
+                        if !atEnd {
+                            XCTAssertNotEqual(LensMath.zoomLabel(next, selected: true),
+                                              LensMath.zoomLabel(zoom, selected: true),
+                                              "\(span) \(zoom) by \(direction)")
+                        }
+                        if next == zoom { break }
+                        zoom = next
+                    }
+                    XCTAssertEqual(zoom, direction > 0 ? span.upperBound : span.lowerBound, "\(span) from \(start)")
+                }
+            }
+        }
+    }
+
     func testNudgesStayFiniteForAnyInput() {
         for bad in unusable {
             // An unusable zoom steps from 1.
@@ -719,7 +755,7 @@ final class ZoomMathTests: XCTestCase {
             XCTAssertEqual(ZoomMath.nudged(bad, by: -1, in: phoneSpan), 0.9, "\(bad)")
         }
         let odd: [ClosedRange<Double>] = [
-            ClosedRange(uncheckedBounds: (lower: Double.nan, upper: Double.nan)), 0...0,
+            unchecked(.nan, .nan), unchecked(.nan, 2), unchecked(4, 1), 0...0,
             -Double.infinity...Double.infinity, 3...3, 1.03...1.07,
         ]
         for span in odd {

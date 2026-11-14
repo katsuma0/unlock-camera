@@ -1,8 +1,8 @@
 import Foundation
 
 /// Zoom for the lens buttons, the zoom wheel, pinch and VoiceOver, in display zoom: 1 is the back wide camera, 0.5 the
-/// ultra wide, 4 a 4x telephoto. A value that isn't a finite positive number counts as 1, so every answer is a finite,
-/// positive zoom whatever the readings were.
+/// ultra wide, 4 a 4x telephoto. A zoom that isn't a finite positive number counts as 1, so whatever the readings
+/// were, every zoom that comes back is finite and positive, and every offset, time and rate finite.
 public enum ZoomMath {
     /// Wheel travel for one doubling. Lens to lens (0.5, 1, 2, 4, 8) is then one short stroke, and 1x to 2x matches
     /// the ruler dial's ten 10 pt ticks.
@@ -143,7 +143,8 @@ public enum ZoomMath {
     /// Strict: the longest lens at or below the zoom, or the widest below every lens. `continuing` (a finger is
     /// still down) lets the `current` lens keep a zoom up to `lensHysteresis` past the next longer lens's own value,
     /// as long as its `currentMaxFactor` reaches it. Going down there is no choice: a lens can't zoom out past its
-    /// own value. Entries that aren't finite and positive are never picked.
+    /// own value. Entries that aren't finite and positive are never picked; an infinite `currentMaxFactor` is no
+    /// limit, and one that is NaN, zero or negative can't zoom past the lens's own value.
     public static func lensIndex(for zoom: Double, lensZooms: [Double], current: Int?, currentMaxFactor: Double,
                                  continuing: Bool) -> Int? {
         let target = usable(zoom) ? zoom : 1
@@ -160,7 +161,8 @@ public enum ZoomMath {
         let own = lensZooms[current]
         // pick is longer than the current lens, so a next longer lens exists.
         guard let next = lensZooms.filter({ usable($0) && $0 > own }).min() else { return pick }
-        let maxFactor = usable(currentMaxFactor) ? currentMaxFactor : 1
+        // As in `span`, an infinite largest factor sets no limit; NaN, zero or less is no zoom at all.
+        let maxFactor = currentMaxFactor > 0 ? currentMaxFactor : 1
         return target < next * (1 + lensHysteresis) && target <= own * maxFactor ? current : pick
     }
 
@@ -168,7 +170,8 @@ public enum ZoomMath {
 
     /// Wheel ticks and VoiceOver steps inside `span`, ascending: every 0.1 to 2, 0.2 to 5, 0.5 to 10, 1 to 25 and 5 to
     /// 100, then 10, 20 and 50 a step up to 1000, so neighbours stay at least 5.8 pt apart at 100 pt per doubling.
-    /// The span is read inside 0.1...1000, a NaN end as 1.
+    /// The span is read inside 0.1...1000: a NaN lower end as 1, and an upper end that is NaN or below the lower
+    /// end as the lower end.
     public static func ticks(in span: ClosedRange<Double>) -> [Double] {
         let (low, high) = bounds(of: span)
         // Counting in whole tenths keeps long runs of steps exact: 14 tenths reads back as exactly 1.4.
@@ -186,7 +189,8 @@ public enum ZoomMath {
 
     /// `zoom` moved `steps` ticks (up for positive), with the span's ends as stops too, so VoiceOver reaches both.
     /// Stops at the ends. Steps count from the zoom as read out to a tenth: 1.46 is read as 1.5x, so one step up is
-    /// 1.6 and one down is 1.4. Zero steps returns the zoom inside the span.
+    /// 1.6 and one down is 1.4. Each step lands on a value that reads differently, unless it stops at an end. Zero
+    /// steps returns the zoom inside the span.
     public static func nudged(_ zoom: Double, by steps: Int, in span: ClosedRange<Double>) -> Double {
         let (low, high) = bounds(of: span)
         let value = usable(zoom) ? zoom : 1
@@ -194,14 +198,14 @@ public enum ZoomMath {
         var stops = ticks(in: low...high)
         if stops.first.map({ $0 > low * (1 + 1e-9) }) ?? true { stops.insert(low, at: 0) }
         if stops.last.map({ $0 < high * (1 - 1e-9) }) ?? true { stops.append(high) }
-        let shown = (value * 10).rounded() / 10
+        let shown = readOut(value)
         // magnitude handles Int.min, whose negation would overflow.
         let count = Int(Swift.min(steps.magnitude, UInt(stops.count)))
         if steps > 0 {
-            guard let first = stops.firstIndex(where: { $0 > shown * (1 + 1e-9) }) else { return high }
+            guard let first = stops.firstIndex(where: { readOut($0) > shown }) else { return high }
             return stops[Swift.min(first + count - 1, stops.count - 1)]
         }
-        guard let first = stops.lastIndex(where: { $0 < shown * (1 - 1e-9) }) else { return low }
+        guard let first = stops.lastIndex(where: { readOut($0) < shown }) else { return low }
         return stops[Swift.max(first - (count - 1), 0)]
     }
 
@@ -241,6 +245,11 @@ public enum ZoomMath {
         let limit = tenthsLimit * 10
         // A whole number over ten is the Double nearest the decimal, so 14 reads back as exactly 1.4.
         return p < limit ? p / 10 : tenthsLimit + (p - limit)
+    }
+
+    /// A zoom to the tenth, as `LensMath.zoomLabel` reads it out. Grid values come back exactly.
+    private static func readOut(_ zoom: Double) -> Double {
+        (zoom * 10).rounded() / 10
     }
 
     /// Tick spacing in tenths at a position in tenths.

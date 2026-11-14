@@ -163,8 +163,10 @@ public enum MetadataFormat {
                      5: "Color sequential area", 7: "Trilinear", 8: "Color sequential linear"])
     }
 
+    /// 0 and 1 are the standard's; iPhones also mark their HDR, panorama and portrait pictures here.
     public static func customRendered(_ value: Int) -> String {
-        name(value, [0: "Normal", 1: "Custom"])
+        name(value, [0: "Normal", 1: "Custom", 2: "HDR, original not saved", 3: "HDR, original saved",
+                     4: "Original for HDR", 6: "Panorama", 7: "Portrait HDR", 8: "Portrait"])
     }
 
     public static func compositeImage(_ value: Int) -> String {
@@ -231,7 +233,8 @@ public enum MetadataFormat {
         return words.enumerated().map { index, word in
             // Acronyms and single capitals stay as they are ("ISO", "GPS", "X"); other words are lower case after
             // the first, which takes a capital.
-            let isAcronym = word.count > 1 && word.allSatisfy { $0.isUppercase || $0.isNumber } && word.contains(where: \.isLetter)
+            let isAcronym = word.count > 1 && word.allSatisfy { $0.isUppercase || $0.isNumber }
+                && word.contains(where: \.isLetter)
             if isAcronym || (word.count == 1 && word.first?.isUppercase == true) { return word }
             let lower = word.lowercased()
             return index == 0 ? lower.prefix(1).uppercased() + lower.dropFirst() : lower

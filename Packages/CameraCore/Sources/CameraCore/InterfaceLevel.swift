@@ -30,7 +30,7 @@ extension CameraSettings {
     /// Copies every setting that only the advanced interface shows from `source`. The one list both directions
     /// share, so a setting can't be reset on the way out and forgotten on the way back. What it leaves out, both
     /// interfaces share, and that includes how the app looks and handles (appearance, accessibility, the top bar,
-    /// buttons and haptics, startup): a switch of interface never moves a button or changes a color.
+    /// buttons and haptics, startup), so a switch of interface leaves all of that as it was.
     private mutating func copyAdvancedFields(from source: CameraSettings) {
         manual.shutter = source.manual.shutter
         manual.iso = source.manual.iso

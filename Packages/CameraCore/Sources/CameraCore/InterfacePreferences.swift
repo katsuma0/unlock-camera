@@ -2,8 +2,8 @@ import Foundation
 
 // How the app looks and handles, as opposed to how it takes pictures: the look of Settings, accessibility, the top
 // bar's buttons, what the hardware buttons do, how haptics feel and what the camera opens on. Both interfaces share
-// all of it (none of it is in copyAdvancedFields), so switching between simple and advanced never moves a button or
-// changes a color.
+// all of it (none of it is in copyAdvancedFields), so switching between simple and advanced changes none of it. The
+// simple interface only leaves out the top bar buttons it doesn't offer, and they are back with the advanced one.
 
 // MARK: - Appearance
 

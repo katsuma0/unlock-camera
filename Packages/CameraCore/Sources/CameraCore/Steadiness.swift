@@ -283,15 +283,24 @@ public struct DriftTracker: Sendable, Hashable {
     /// Twist about the lens axis, counterclockwise as the person sees the screen.
     public private(set) var angleZ = 0.0
     /// The shown offset has been past `DriftMath.offTargetDistance` for `offTargetDelay`, and not yet back under
-    /// `onTargetDistance`.
+    /// `onTargetDistance`. Never past `DriftMath.trackingLimit`.
     public private(set) var isOffTarget = false
     /// A sample turned faster than `DriftMath.bumpSpeed` within the last `bumpHold` seconds. Speed, not the
     /// integrated angle, because integrated tripod noise over 30 s is about the size of a small bump.
     public private(set) var wasBumped = false
+    /// Seconds from the first sample to the latest. A stall counts in full here, though it adds at most
+    /// `DriftMath.longestStep` to the angles.
+    public private(set) var elapsed = 0.0
 
     private var lastTime: TimeInterval?
     private var farSince: TimeInterval?
     private var bumpedAt: TimeInterval?
+
+    /// Past `DriftMath.trackingLimit` the angles have drifted too far to trust: the crosshair hides and the shot is
+    /// never off target, while bumps still count.
+    public var isPastTrackingLimit: Bool {
+        elapsed >= DriftMath.trackingLimit
+    }
 
     public init(pointsPerRadian: Double = 0) {
         self.pointsPerRadian = pointsPerRadian
@@ -311,7 +320,9 @@ public struct DriftTracker: Sendable, Hashable {
                 farSince = nil
                 bumpedAt = nil
             }
-            let step = Swift.min(Swift.max(time - last, 0), DriftMath.longestStep)
+            let gap = Swift.max(time - last, 0)
+            elapsed += gap
+            let step = Swift.min(gap, DriftMath.longestStep)
             angleX += Self.live(rateX) * step
             angleY += Self.live(rateY) * step
             angleZ += Self.live(rateZ) * step
@@ -321,6 +332,11 @@ public struct DriftTracker: Sendable, Hashable {
         if hypot(hypot(rateX, rateY), rateZ) > DriftMath.bumpSpeed { bumpedAt = time }
         wasBumped = bumpedAt.map { time - $0 < DriftMath.bumpHold } ?? false
 
+        guard !isPastTrackingLimit else {
+            isOffTarget = false
+            farSince = nil
+            return
+        }
         let distance = displayOffset.length
         if isOffTarget {
             if distance < DriftMath.onTargetDistance {
@@ -380,8 +396,9 @@ public enum DriftMath {
     public static let bumpHold = 3.0
     /// Degrees the moving cross's arms turn at most for a twist.
     public static let twistLimit = 45.0
-    /// Seconds of capture after which the crosshair hides: integrated gyro drift grows with time, and Star trails
-    /// or a long bulb would end with the cross somewhere the phone never went.
+    /// Seconds of capture after which the crosshair hides and a shot is no longer off target
+    /// (`DriftTracker.isPastTrackingLimit`): integrated gyro drift grows with time, and Star trails or a long bulb
+    /// would end with the cross somewhere the phone never went.
     public static let trackingLimit = 60.0
 
     /// Points per radian of turn at true scale: a lens of `equivalentFocalLength` (35 mm terms) moves the picture by

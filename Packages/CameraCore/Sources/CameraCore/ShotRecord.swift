@@ -102,7 +102,8 @@ public enum ExposureControl: String, Sendable, CaseIterable {
     /// manual when the aperture is fixed too or the lens has no iris; otherwise a fixed shutter is shutter priority,
     /// a fixed aperture aperture priority and a fixed ISO alone ISO priority. A lens without an iris has no aperture
     /// to choose, whatever `apertureAuto` says.
-    public static func from(shutterAuto: Bool, isoAuto: Bool, apertureAuto: Bool, variableAperture: Bool) -> ExposureControl {
+    public static func from(shutterAuto: Bool, isoAuto: Bool, apertureAuto: Bool,
+                            variableAperture: Bool) -> ExposureControl {
         let apertureFixed = variableAperture && !apertureAuto
         if !shutterAuto && !isoAuto && (apertureFixed || !variableAperture) { return .manual }
         if !shutterAuto { return .shutterPriority }
@@ -138,7 +139,8 @@ public struct BracketPosition: Equatable, Sendable {
     /// 1-based. nil until known: an exposure bracket learns it per photo from the camera.
     public var index: Int?
     public var count: Int
-    /// The bracket's step: EV, lens position or mireds, as BracketPlan has it.
+    /// The bracket's step: EV, lens position or mireds, as BracketPlan has it. 0 when the caller doesn't have it, and
+    /// the file then leaves the step out.
     public var step: Double
     /// This frame's EV offset, lens position or Kelvin; nil until known.
     public var value: Double?
@@ -304,7 +306,8 @@ public struct ShotContext: Equatable, Sendable {
     /// Intervalometer shot n of m.
     public var interval: SequencePosition?
     public var bracket: BracketPosition?
-    /// NIGHT and LONG: how steady the plan took the phone to be.
+    /// NIGHT and LONG: how steady the plan took the phone to be. Files carry it, and `steadyAtStart`, only for NIGHT,
+    /// LONG and stacks.
     public var stability: NightStability?
     /// Whether the motion sensor called the phone steady at the press.
     public var steadyAtStart: Bool?
@@ -402,8 +405,8 @@ public struct ShotRecord: Equatable, Sendable {
     public var isSRGB: Bool
 
     /// `writtenDate` defaults to `date`.
-    public init(source: Source, context: ShotContext, device: DeviceIdentity, lens: LensRecord, exposure: ExposureValues,
-                brightness: Double? = nil, stack: StackRecord? = nil, date: Date, endDate: Date? = nil,
+    public init(source: Source, context: ShotContext, device: DeviceIdentity, lens: LensRecord,
+                exposure: ExposureValues, brightness: Double? = nil, stack: StackRecord? = nil, date: Date, endDate: Date? = nil,
                 writtenDate: Date? = nil, timeZone: TimeZone = .current, pixelWidth: Int? = nil,
                 pixelHeight: Int? = nil, isSRGB: Bool = false) {
         self.source = source

@@ -132,8 +132,10 @@ final class InterfacePreferencesTests: XCTestCase {
             XCTAssertEqual(accent.lightSheet.a, 255, name)
             // Small labels on the camera.
             XCTAssertGreaterThanOrEqual(contrast(accent.camera, darkGlass), 4.5, name)
-            // Black text on an accent fill.
+            // Black text on an accent fill. White would be unreadable on every shade, so on the camera the text on
+            // a fill stays black whatever the choice.
             XCTAssertGreaterThanOrEqual(contrast(accent.camera, .black), 4.5, name)
+            XCTAssertLessThan(contrast(accent.camera, .white), 3, name)
             // An active drawer item: the accent glyph on its own 20 percent tint over black.
             let tint = composite(accent.camera, opacity: 0.2, over: .black)
             XCTAssertGreaterThanOrEqual(contrast(accent.camera, tint), 3, name)

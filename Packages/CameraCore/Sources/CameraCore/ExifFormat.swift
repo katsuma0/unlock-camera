@@ -147,7 +147,10 @@ public enum ExifFormat {
     }
 
     static func clockFields(_ date: Date, timeZone: TimeZone) -> ClockFields {
-        let c = calendar(in: timeZone).dateComponents([.year, .month, .day, .hour, .minute, .second], from: date)
+        // The whole second the moment falls in, so the time never rounds up past the subseconds written beside it.
+        let seconds = date.timeIntervalSinceReferenceDate
+        let whole = seconds.isFinite ? Date(timeIntervalSinceReferenceDate: seconds.rounded(.down)) : date
+        let c = calendar(in: timeZone).dateComponents([.year, .month, .day, .hour, .minute, .second], from: whole)
         return ClockFields(year: c.year ?? 1970, month: c.month ?? 1, day: c.day ?? 1, hour: c.hour ?? 0,
                            minute: c.minute ?? 0, second: c.second ?? 0)
     }
@@ -167,7 +170,8 @@ public enum ExifFormat {
     /// Reads "2026:11:13 10:41:12" as EXIF writes it, and the variants files carry: "-" between the date's parts,
     /// "T" before the time, a fraction of a second, trailing spaces or NULs. nil for an empty or zeroed date.
     static func parseClock(_ text: String) -> ClockFields? {
-        let trimmed = text.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "\0")))
+        let padding = CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "\0"))
+        let trimmed = text.trimmingCharacters(in: padding)
         let parts = trimmed.split(maxSplits: 1, whereSeparator: { $0 == " " || $0 == "T" })
         guard parts.count == 2 else { return nil }
         let day = parts[0].split(whereSeparator: { $0 == ":" || $0 == "-" })
@@ -212,7 +216,7 @@ public enum ExifFormat {
         return value
     }
 
-    /// "+05:30" or "+0530" from seconds east of UTC; seconds past the minute are dropped, as EXIF has no place for them.
+    /// "+05:30" or "+0530" from seconds east of UTC. Seconds past the minute are dropped: EXIF has no place for them.
     static func offsetText(seconds: Int, separator: String) -> String {
         let minutes = abs(seconds) / 60
         return (seconds < 0 ? "-" : "+") + padded(minutes / 60, width: 2) + separator + padded(minutes % 60, width: 2)
@@ -225,7 +229,8 @@ public enum ExifFormat {
     // MARK: - Helpers
 
     private static func datePart(_ clock: ClockFields, separator: String) -> String {
-        padded(clock.year, width: 4) + separator + padded(clock.month, width: 2) + separator + padded(clock.day, width: 2)
+        padded(clock.year, width: 4) + separator + padded(clock.month, width: 2) + separator
+            + padded(clock.day, width: 2)
     }
 
     private static func timePart(_ clock: ClockFields) -> String {

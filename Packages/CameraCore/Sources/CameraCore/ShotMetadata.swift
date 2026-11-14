@@ -267,10 +267,14 @@ public enum ShotMetadataBuilder {
         var tiff: [TIFFKey: MetadataValue] = [:]
 
         // Who made the file. The simulated camera names no host phone: its model is not a phone's.
-        tiff[.make] = .text(device.make)
-        tiff[.model] = .text(device.model)
-        if !device.isSimulated {
-            tiff[.hostComputer] = .text(device.model)
+        if let make = nonEmpty(device.make) {
+            tiff[.make] = .text(make)
+        }
+        if let model = nonEmpty(device.model) {
+            tiff[.model] = .text(model)
+            if !device.isSimulated {
+                tiff[.hostComputer] = .text(model)
+            }
         }
         // The app made these pixels, so Software names it; the system version goes into the XMP instead.
         tiff[.software] = .text(device.appSignature)
@@ -430,7 +434,8 @@ public enum ShotMetadataBuilder {
             if control.fixesISO, ExifFormat.isPositive(record.exposure.iso) {
                 add(.cameraISOSensitivity, .text(ISOScale.compactLabel(record.exposure.iso)))
             }
-            if !context.whiteBalance.isAuto, let kelvin = context.whiteBalance.kelvinValue, ExifFormat.isPositive(kelvin) {
+            if !context.whiteBalance.isAuto, let kelvin = context.whiteBalance.kelvinValue,
+               ExifFormat.isPositive(kelvin) {
                 add(.cameraWhiteBalance, .text(ExifFormat.decimal(kelvin.rounded(), maxDecimals: 0) + "K"))
             }
             if control.fixesShutter, ExifFormat.isPositive(record.exposure.seconds) {
@@ -468,7 +473,7 @@ public enum ShotMetadataBuilder {
         if let interval = context.interval, interval.index > 0, interval.count > 0 {
             sentences.append("Shot \(interval.index) of \(interval.count).")
         }
-        if let stability = context.stability {
+        if holdsStill(record), let stability = context.stability {
             switch stability {
             case .handheld: sentences.append("Handheld.")
             case .steady: sentences.append("Steady.")
@@ -606,8 +611,11 @@ public enum ShotMetadataBuilder {
             if let index = bracket.index, index > 0 {
                 values[.bracketIndex] = String(index)
             }
-            values[.bracketCount] = String(bracket.count)
-            if bracket.step.isFinite {
+            if bracket.count > 0 {
+                values[.bracketCount] = String(bracket.count)
+            }
+            // Every bracket steps by something; 0 is a step nobody passed.
+            if ExifFormat.isPositive(bracket.step) {
                 values[.bracketStep] = ExifFormat.decimal(bracket.step)
             }
             if let value = bracket.value, value.isFinite {
@@ -644,11 +652,13 @@ public enum ShotMetadataBuilder {
                 values[.bulb] = "True"
             }
         }
-        if let stability = context.stability {
-            values[.stability] = stability.rawValue
-        }
-        if let steady = context.steadyAtStart {
-            values[.steadyAtStart] = steady ? "True" : "False"
+        if holdsStill(record) {
+            if let stability = context.stability {
+                values[.stability] = stability.rawValue
+            }
+            if let steady = context.steadyAtStart {
+                values[.steadyAtStart] = steady ? "True" : "False"
+            }
         }
         if movie, let video = context.video {
             values[.stabilization] = video.stabilization.rawValue
@@ -672,6 +682,12 @@ public enum ShotMetadataBuilder {
         return ShotXMP.Field.allCases.compactMap { field in
             values[field].map { ShotXMP.Entry(field: field, value: $0) }
         }
+    }
+
+    /// NIGHT, LONG and any stack: the shots that ask the phone to hold still, so how steady it was belongs in the
+    /// file. A photo or a movie carries none of it, whatever the context says.
+    static func holdsStill(_ record: ShotRecord) -> Bool {
+        record.context.mode == .night || record.context.mode == .long || record.stack != nil
     }
 
     static func whiteBalanceName(_ whiteBalance: WhiteBalanceSetting) -> String {
