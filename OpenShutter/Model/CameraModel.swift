@@ -353,8 +353,8 @@ final class CameraModel {
         guard zoomTarget != nil, generation == zoomTargetGeneration else { return }
         // The button follows the camera in use from here, lit while the target still names the zoom. Lit only as
         // the target clears, LensPicker would wait for a reading that moves before trusting the zoom, and a camera
-        // at rest never sends one: a parked swap's 2x button would read "2×" at 4x. After a transition that ran to
-        // its end, this is the button already lit.
+        // at rest never sends one: a parked swap's 2x button would read "2×" at 4x. A release that comes with a
+        // transition's last step finds that button already lit.
         updateActivePreset(force: true)
         zoomTargetTask?.cancel()
         let wait = max(seconds.isFinite ? seconds : 0, 0) + Self.zoomTargetLinger
