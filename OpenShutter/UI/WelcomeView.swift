@@ -36,7 +36,8 @@ struct WelcomeView: View {
                         LevelCard(
                             symbol: "camera",
                             title: "Simple",
-                            detail: "Point and shoot. Night mode and long exposures set themselves up."
+                            detail: "Point and shoot. Night mode and long exposures set themselves up.",
+                            badge: "Recommended"
                         ) {
                             choose(advanced: false)
                         }
@@ -79,6 +80,7 @@ private struct LevelCard: View {
     let symbol: String
     let title: String
     let detail: String
+    var badge: String? = nil
     let action: () -> Void
 
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
@@ -98,9 +100,19 @@ private struct LevelCard: View {
                     .background(Theme.accent.opacity(0.16), in: Circle())
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(title)
-                        .font(.title3.weight(.semibold))
-                        .foregroundStyle(Theme.primaryText)
+                    HStack(spacing: 8) {
+                        Text(title)
+                            .font(.title3.weight(.semibold))
+                            .foregroundStyle(Theme.primaryText)
+                        if let badge {
+                            Text(badge)
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(Theme.onAccent)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3)
+                                .background(Theme.accent, in: Capsule())
+                        }
+                    }
                     Text(detail)
                         .font(.subheadline)
                         .foregroundStyle(Theme.secondaryText)
@@ -127,6 +139,7 @@ private struct LevelCard: View {
         .buttonStyle(CardPressStyle())
         // Voice Control hears the title alone.
         .accessibilityInputLabels([title])
+        .accessibilityHint(Text(badge ?? ""))
     }
 }
 
