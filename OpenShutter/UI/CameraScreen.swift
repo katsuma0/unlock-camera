@@ -79,7 +79,8 @@ private struct CameraLayout: View {
     @State private var veilToken = 0
     @State private var veilHoldNanoseconds: UInt64 = 350_000_000
     /// A lens button is swapping cameras. Both cameras frame the same picture at the swap, so this veil is short.
-    @State private var lensVeilVisible = false
+    /// A lens button's swap of cameras holds the last frame on screen until the new camera's first frames settle.
+    @State private var lensFrozen = false
     /// The drawer's timer sheet is up. It belongs to the drawer, so the drawer reports it as a preference.
     @State private var drawerSheetShown = false
     /// The top bar's timer badge asked for that sheet. The badge opens the drawer, and the drawer presents it.
@@ -112,7 +113,7 @@ private struct CameraLayout: View {
         let fullscreen = model.controlsFullscreen
         let selectedIsFront = model.lenses.first(where: { $0.id == settings.lensID })?.isFront ?? false
         let isLive = model.sessionState == .running && interaction.isPreviewing
-        let isVeiled = veilVisible || lensVeilVisible
+        let isVeiled = veilVisible
         let aspectKey = AspectKey(mode: mode, video: settings.video, lensID: settings.lensID,
                                   isRunning: model.sessionState == .running,
                                   formatCount: model.capabilities.formats.count,
@@ -146,7 +147,7 @@ private struct CameraLayout: View {
                 screenHeight: size.height, safeBottom: insets.bottom)
 
             ZStack(alignment: .topLeading) {
-                ViewfinderStack(model: model, interaction: interaction, geometry: geometry, veilVisible: isVeiled,
+                ViewfinderStack(model: model, interaction: interaction, geometry: geometry, veilVisible: isVeiled, lensFrozen: lensFrozen,
                                 bandsSolid: bandsSolid)
 
                 DrawerLayer(model: model, catcherHeight: max(0, (controlsTop ?? size.height) - topBarBottom),
@@ -220,18 +221,17 @@ private struct CameraLayout: View {
             guard systemReduceMotion || AppearanceStore.shared.reduceMotion else { return }
             showVeil(holdNanoseconds: 350_000_000)
         }
-        // Only a lens button's swap of cameras gets the veil: a pinch or the zoom wheel swaps while the finger is
-        // still framing, and the picture holding still for a moment is less in the way than a blur.
+        // A swap of cameras holds the last frame instead of going dark: the old picture stays, then fades into the new
+        // camera once its first frames have settled their exposure and colour.
         .task(id: model.isSwitchingLensVisibly) {
             if model.isSwitchingLensVisibly {
-                withAnimation(.easeIn(duration: 0.08)) { lensVeilVisible = true }
+                lensFrozen = true
                 return
             }
-            guard lensVeilVisible else { return }
-            // A moment past the swap, while the new camera's first frames settle their exposure and colour.
-            try? await Task.sleep(nanoseconds: 150_000_000)
+            guard lensFrozen else { return }
+            try? await Task.sleep(nanoseconds: 120_000_000)
             guard !Task.isCancelled else { return }
-            withAnimation(.easeOut(duration: 0.25)) { lensVeilVisible = false }
+            lensFrozen = false
         }
         .task(id: aspectKey) {
             // The preview can take a moment to report a new format's shape, so it is asked again a few times.
@@ -405,6 +405,7 @@ private struct ViewfinderStack: View {
     let interaction: ViewfinderInteraction
     let geometry: ViewfinderGeometry
     let veilVisible: Bool
+    let lensFrozen: Bool
     let bandsSolid: Bool
 
     /// How far the furniture at the top of the frame moves down to clear the steady status while it shows there.
@@ -416,7 +417,7 @@ private struct ViewfinderStack: View {
         ZStack(alignment: .topLeading) {
             Theme.background
             CameraPreviewView(model: model, interaction: interaction, geometry: geometry,
-                              isHidden: model.dimmer.isDimmed)
+                              isHidden: model.dimmer.isDimmed, isFrozen: lensFrozen)
             StackPreviewLayer(model: model, picture: geometry.picture)
             ModeSwitchVeil(isVisible: veilVisible)
             ShutterBlink(model: model)
@@ -916,14 +917,63 @@ private struct ModeRow: View {
     }
 }
 
-/// The shutter alone, when the thumbnail and the flip button have the mode row.
+/// The shutter, with macro on its left and quick settings on its right, as in Apple's Camera, when the thumbnail and
+/// the flip button have the mode row.
 private struct ShutterRow: View {
     let model: CameraModel
 
     var body: some View {
-        ShutterSlot(model: model)
-            .frame(maxWidth: .infinity)
-            .frame(height: Theme.shutterSize + 8)
+        let busy = model.activity.isBusy
+        ZStack {
+            HStack(spacing: 0) {
+                if model.macroAvailable, model.settings.mode == .photo {
+                    ShutterSideButton(symbol: "camera.macro", isActive: model.isMacro,
+                                      label: model.isMacro ? "Macro, on" : "Macro") {
+                        model.toggleMacro()
+                    }
+                    .disabled(busy)
+                } else {
+                    Color.clear.frame(width: ShutterSideButton.size)
+                }
+                Spacer(minLength: 0)
+                ShutterSideButton(symbol: "circle.grid.3x3.fill", isActive: model.isDrawerOpen,
+                                  label: model.isDrawerOpen ? "Hide quick settings" : "Show quick settings") {
+                    withAnimation(Theme.spring) { model.isDrawerOpen.toggle() }
+                }
+            }
+            .padding(.horizontal, 36)
+            .opacity(busy ? 0.4 : 1)
+            ShutterSlot(model: model)
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: Theme.shutterSize + 8)
+    }
+}
+
+/// A round button beside the shutter. Lit with an accent ring while its feature is on.
+private struct ShutterSideButton: View {
+    static let size: CGFloat = 50
+
+    let symbol: String
+    let isActive: Bool
+    let label: String
+    let action: () -> Void
+
+    var body: some View {
+        Button {
+            Haptics.tap()
+            action()
+        } label: {
+            Image(systemName: symbol)
+                .font(.system(size: 19, weight: .semibold))
+                .foregroundStyle(isActive ? Theme.accent : Theme.primaryText)
+                .frame(width: Self.size, height: Self.size)
+                .cameraGlass(in: Circle())
+                .overlay(Circle().strokeBorder(isActive ? Theme.accent : Color.clear, lineWidth: 2))
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(Text(label))
     }
 }
 
