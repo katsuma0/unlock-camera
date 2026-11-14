@@ -115,6 +115,10 @@ final class CameraModel {
     @ObservationIgnored private var lastBackPresetID: String?
     @ObservationIgnored private var adoptNextWhiteBalanceReading = false
     @ObservationIgnored private var bulbHoldActive = false
+    /// A running stack was told to finish (Stop, the shutter, a hardware button or the end of a bulb hold) and is
+    /// putting the picture together. The screen shows Processing, and the battery saver and the steady pill treat
+    /// every frame as in.
+    private(set) var isFinishingStack = false
     @ObservationIgnored private var lensSwitchInFlight = false
     /// The newest zoom asked for while a lens switch was reconfiguring the session, or one that needs another lens
     /// while photos were still being saved. continuing: a finger was still down, so the lens choice keeps its slack.
