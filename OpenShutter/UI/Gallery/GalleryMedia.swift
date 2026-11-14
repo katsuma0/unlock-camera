@@ -338,12 +338,18 @@ struct LivePhotoBadge: View {
 
     /// The badge Photos shows, or nil. A Live Photo that plays as one (the page's own test, GalleryPage) gets the
     /// plain badge. One with Live turned off shows as a still, yet stays a Live Photo to PhotoKit and the editor, so
-    /// it gets the slashed badge rather than none. Loop and Bounce show as stills here and get none.
+    /// it gets the slashed badge rather than none. Loop and Bounce show as stills here and get none, and so does a
+    /// Long Exposure, which Photos names as an effect rather than as Live off.
     init?(for asset: PHAsset) {
         switch asset.playbackStyle {
         case .livePhoto:
             isOff = false
         case .image where asset.mediaSubtypes.contains(.photoLive):
+            #if compiler(>=6.4)
+            // Only the iOS 27 SDK tells a Long Exposure from Live off; builds with the iOS 26 SDK give it the
+            // slashed badge.
+            if asset.playbackVariation == .longExposure { return nil }
+            #endif
             isOff = true
         default:
             return nil
@@ -437,12 +443,14 @@ enum GalleryText {
         return relativeDate.string(from: date)
     }
 
-    /// Photo, Live Photo or Video: what Photos calls them, in both interfaces. The name follows the Live badge, so
-    /// a Live Photo with Live off is still one, as the editor treats it; Loop and Bounce show as stills here
-    /// (GalleryPage) with no badge, so they are Photos.
+    /// Photo, Live Photo or Video: what Photos calls them, in both interfaces. A Live Photo with Live off or as a
+    /// Long Exposure is still one, as the editor treats it; Loop and Bounce show as stills here (GalleryPage), so
+    /// they are Photos.
     static func kindTitle(of asset: PHAsset) -> String {
         if asset.mediaType == .video { return "Video" }
-        return LivePhotoBadge(for: asset) != nil ? "Live Photo" : "Photo"
+        let live = asset.playbackStyle == .livePhoto
+            || (asset.mediaSubtypes.contains(.photoLive) && asset.playbackStyle != .videoLooping)
+        return live ? "Live Photo" : "Photo"
     }
 
     /// The advanced interface also names what the camera made: a RAW photo, a stack, a bracket frame, a copy.
