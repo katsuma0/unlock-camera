@@ -51,7 +51,7 @@ struct SettingsView: View {
 private struct InterfaceSection: View {
     let model: CameraModel
 
-    private static let explanation = "Adds manual mode, RAW, the histogram and the detailed settings. Turning it off puts everything they changed back on automatic; turning it on again brings your settings back."
+    private static let explanation = "Off is recommended for most photos. On adds manual mode, RAW, the histogram and the detailed settings. Turning it off puts everything they changed back on automatic; turning it on again brings your settings back."
     private static let busyNote = "This can't change while a shot is in progress."
 
     var body: some View {

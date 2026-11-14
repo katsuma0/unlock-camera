@@ -87,12 +87,9 @@ final class MotionMonitor {
         if !isFlat {
             next.roll = roll
             next.levelDeviation = LevelMath.deviationFromLevel(roll)
-            // Held near 45 degrees, hand sway would spin every icon back and forth. Like UIDeviceOrientation, the
-            // orientation only changes once the phone is about 10 degrees past the diagonal.
-            let away = abs((roll - Double(state.quarterTurns) * 90).remainder(dividingBy: 360))
-            if away > 55 {
-                next.quarterTurns = LevelMath.quarterTurns(roll)
-            }
+            // The camera stays in portrait with its buttons upright whichever way the phone is held: icons that
+            // turned with the phone moved things around mid-shot. quarterTurns stays 0, so nothing on screen
+            // rotates. Photos still come out the right way up; the camera's rotation coordinator sets that.
             next.isLevel = LevelMath.isLevel(roll, tolerance: 1)
         }
         next.pitch = pitch

@@ -15,10 +15,13 @@ struct CameraPreviewView: View {
     let geometry: ViewfinderGeometry
     /// The battery saver's black layer covers the screen, so the picture under it stops drawing.
     let isHidden: Bool
+    /// A lens swap is running: the last frame stays up until the new camera's frames arrive.
+    var isFrozen = false
 
     var body: some View {
         ZStack {
-            PreviewSurface(model: model, interaction: interaction, picture: geometry.picture, isHidden: isHidden)
+            PreviewSurface(model: model, interaction: interaction, picture: geometry.picture, isHidden: isHidden,
+                           isFrozen: isFrozen)
             AnalysisOverlay(model: model, picture: geometry.picture, isHidden: isHidden)
         }
         .background(Theme.background)
@@ -509,6 +512,7 @@ private struct PreviewSurface: UIViewRepresentable {
     /// Where the whole camera image goes, in the host's coordinates.
     let picture: CGRect
     let isHidden: Bool
+    let isFrozen: Bool
 
     func makeCoordinator() -> GestureCoordinator {
         GestureCoordinator(model: model, interaction: interaction)
@@ -541,6 +545,7 @@ private struct PreviewSurface: UIViewRepresentable {
         if uiView.isHidden != isHidden {
             uiView.isHidden = isHidden
         }
+        uiView.setFrozen(isFrozen)
     }
 }
 
@@ -551,6 +556,27 @@ private final class PreviewHostView: UIView {
     private var previewing: NSKeyValueObservation?
     /// Where the layer goes, in this view's coordinates; null until the camera screen has laid out.
     private var pictureRect = CGRect.null
+    /// The last frame before a lens swap. Changing the camera input blanks the preview layer until the new camera
+    /// delivers, which showed as a black flash; Apple's Camera holds the old picture and fades to the new one.
+    private var frozenFrame: UIView?
+
+    func setFrozen(_ frozen: Bool) {
+        if frozen {
+            guard frozenFrame == nil, window != nil,
+                  let snapshot = snapshotView(afterScreenUpdates: false) else { return }
+            snapshot.frame = bounds
+            snapshot.isUserInteractionEnabled = false
+            addSubview(snapshot)
+            frozenFrame = snapshot
+        } else if let snapshot = frozenFrame {
+            frozenFrame = nil
+            UIView.animate(withDuration: 0.2, delay: 0, options: [.curveEaseOut, .beginFromCurrentState]) {
+                snapshot.alpha = 0
+            } completion: { _ in
+                snapshot.removeFromSuperview()
+            }
+        }
+    }
 
     func attach(_ layer: CALayer) {
         previewLayer = layer

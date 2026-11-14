@@ -270,15 +270,15 @@ final class ZoomMathTests: XCTestCase {
     }
 
     func testTransitionDurationMatchesTheDesignTable() {
-        XCTAssertEqual(ZoomMath.transitionDuration(stops: 0), 0.24, accuracy: 1e-12)
-        XCTAssertEqual(ZoomMath.transitionDuration(stops: 1), 0.28, accuracy: 1e-12)
-        XCTAssertEqual(ZoomMath.transitionDuration(stops: 2), 0.32, accuracy: 1e-12)
-        XCTAssertEqual(ZoomMath.transitionDuration(stops: 3), 0.36, accuracy: 1e-12)
-        XCTAssertEqual(ZoomMath.transitionDuration(stops: 4), 0.40, accuracy: 1e-12)
+        XCTAssertEqual(ZoomMath.transitionDuration(stops: 0), 0.18, accuracy: 1e-12)
+        XCTAssertEqual(ZoomMath.transitionDuration(stops: 1), 0.21, accuracy: 1e-12)
+        XCTAssertEqual(ZoomMath.transitionDuration(stops: 2), 0.24, accuracy: 1e-12)
+        XCTAssertEqual(ZoomMath.transitionDuration(stops: 3), 0.27, accuracy: 1e-12)
+        XCTAssertEqual(ZoomMath.transitionDuration(stops: 4), 0.30, accuracy: 1e-12)
         // Long zooms are clamped.
-        XCTAssertEqual(ZoomMath.transitionDuration(stops: 5.25), 0.45, accuracy: 1e-12)
-        XCTAssertEqual(ZoomMath.transitionDuration(stops: 5.64), 0.45)
-        XCTAssertEqual(ZoomMath.transitionDuration(stops: 100), 0.45)
+        XCTAssertEqual(ZoomMath.transitionDuration(stops: 5), 0.33, accuracy: 1e-12)
+        XCTAssertEqual(ZoomMath.transitionDuration(stops: 6), 0.35)
+        XCTAssertEqual(ZoomMath.transitionDuration(stops: 100), 0.35)
     }
 
     func testTransitionDurationIsMonotonicAndClamped() {
@@ -291,15 +291,15 @@ final class ZoomMathTests: XCTestCase {
         }
         // Direction doesn't matter, and nothing unusable escapes the range.
         XCTAssertEqual(ZoomMath.transitionDuration(stops: -2), ZoomMath.transitionDuration(stops: 2))
-        XCTAssertEqual(ZoomMath.transitionDuration(stops: .nan), 0.24, accuracy: 1e-12)
-        XCTAssertEqual(ZoomMath.transitionDuration(stops: .infinity), 0.45)
-        XCTAssertEqual(ZoomMath.transitionDuration(stops: -.infinity), 0.45)
+        XCTAssertEqual(ZoomMath.transitionDuration(stops: .nan), 0.18, accuracy: 1e-12)
+        XCTAssertEqual(ZoomMath.transitionDuration(stops: .infinity), 0.35)
+        XCTAssertEqual(ZoomMath.transitionDuration(stops: -.infinity), 0.35)
     }
 
     func testRampRatesMatchTheDesignTable() {
         let table: [(from: Double, to: Double, rate: Double)] = [
-            (1, 2, 3.57), (4, 8, 3.57), (1.4, 2, 1.97), (0.5, 1, 3.57), (1, 4, 6.25), (0.5, 2, 6.25), (4, 1, 6.25),
-            (1, 8, 8.33), (0.5, 8, 10), (8, 0.5, 10), (25, 0.5, 12.54),
+            (1, 2, 4.76), (4, 8, 4.76), (1.4, 2, 2.63), (0.5, 1, 4.76), (1, 4, 8.33), (0.5, 2, 8.33), (4, 1, 8.33),
+            (1, 8, 11.11), (0.5, 8, 13.33), (8, 0.5, 13.33), (25, 0.5, 16.16),
         ]
         for row in table {
             XCTAssertEqual(ZoomMath.rampRate(from: row.from, to: row.to), row.rate, accuracy: 0.01,
@@ -308,7 +308,7 @@ final class ZoomMathTests: XCTestCase {
         // A short step sits at the floor, and the longest zooms at the ceiling.
         XCTAssertEqual(ZoomMath.rampRate(from: 3.7, to: 4), 1.5)
         XCTAssertEqual(ZoomMath.rampRate(from: 1.4, to: 1.4), 1.5)
-        XCTAssertEqual(ZoomMath.rampRate(from: 0.5, to: 40), 14)
+        XCTAssertEqual(ZoomMath.rampRate(from: 0.5, to: 40), 18)
     }
 
     func testRampRateIsMonotonicSymmetricAndCoversTheDistanceInTheDuration() {
@@ -328,14 +328,14 @@ final class ZoomMathTests: XCTestCase {
     }
 
     func testRampDurationIsTheDistanceOverTheRate() {
-        XCTAssertEqual(ZoomMath.rampDuration(from: 1, to: 2), 0.28, accuracy: 1e-12)
-        XCTAssertEqual(ZoomMath.rampDuration(from: 1, to: 4), 0.32, accuracy: 1e-12)
-        // At the floor the ramp is quicker than the transition: 3.7 to 4 takes 0.07 s, not 0.24.
+        XCTAssertEqual(ZoomMath.rampDuration(from: 1, to: 2), 0.21, accuracy: 1e-12)
+        XCTAssertEqual(ZoomMath.rampDuration(from: 1, to: 4), 0.24, accuracy: 1e-12)
+        // At the floor the ramp is quicker than the transition: 3.7 to 4 takes 0.07 s, not 0.18.
         XCTAssertEqual(ZoomMath.rampDuration(from: 3.7, to: 4), log2(4 / 3.7) / 1.5, accuracy: 1e-12)
         XCTAssertLessThan(ZoomMath.rampDuration(from: 3.7, to: 4), 0.08)
         XCTAssertEqual(ZoomMath.rampDuration(from: 2, to: 2), 0)
         // At the ceiling it is a little longer.
-        XCTAssertEqual(ZoomMath.rampDuration(from: 0.5, to: 40), log2(80) / 14, accuracy: 1e-12)
+        XCTAssertEqual(ZoomMath.rampDuration(from: 0.5, to: 40), log2(80) / 18, accuracy: 1e-12)
     }
 
     func testRampsStayFiniteForAnyInput() {
@@ -346,7 +346,7 @@ final class ZoomMathTests: XCTestCase {
             XCTAssertEqual(ZoomMath.rampDuration(from: bad, to: bad), 0, "\(bad)")
         }
         let extreme = ZoomMath.rampRate(from: .leastNonzeroMagnitude, to: .greatestFiniteMagnitude)
-        XCTAssertEqual(extreme, 14)
+        XCTAssertEqual(extreme, 18)
         XCTAssertTrue(ZoomMath.rampDuration(from: .leastNonzeroMagnitude, to: .greatestFiniteMagnitude).isFinite)
     }
 
