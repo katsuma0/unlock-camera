@@ -428,8 +428,9 @@ public enum ShotMetadataBuilder {
             if video.frameRate.isFinite, video.frameRate >= 100 {
                 add(.fullFrameRatePlaybackIntent, .integer(1))
             }
-            // Only a value that stayed fixed for the whole recording: an auto value would be one moment of a
-            // changing exposure.
+            // Only a value set by hand: an auto value would be one moment of a changing exposure. These are the
+            // values at the start, because the movie's metadata is written before recording begins; a value
+            // changed while filming isn't reflected.
             let control = context.exposureControl
             if control.fixesISO, ExifFormat.isPositive(record.exposure.iso) {
                 add(.cameraISOSensitivity, .text(ISOScale.compactLabel(record.exposure.iso)))
