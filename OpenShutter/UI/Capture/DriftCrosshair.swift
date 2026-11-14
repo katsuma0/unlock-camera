@@ -6,19 +6,17 @@ import CameraCore
 /// Bringing the yellow one back onto the white one lines the shot up again. Drawing only: the pill above says in words
 /// what they show, so VoiceOver skips them.
 ///
-/// A 40 pt square to center on the photo frame. The moving cross draws up to 80 pt outside it.
+/// A 40 pt square to center on the photo frame. The moving cross draws up to 80 pt outside it. It shows while the
+/// model tracks the turn (a stack on a back camera, a motion sensor that reports, the first minute of the shot) and
+/// the screen isn't dark.
 struct DriftCrosshair: View {
     let model: CameraModel
     /// The diagonal of the whole camera image as laid out on screen, which sets how far the cross moves per degree.
     let imageDiagonal: CGFloat
-    /// The turn added up from the gyro drifts with time, so a long shot stops showing it.
-    @State private var isPastLimit = false
 
     var body: some View {
         let drift = model.drift
-        let tracking = drift.isTracking
-        // A front camera shot is held at arm's length over a mirrored picture, where the crosses would mislead.
-        let shows = tracking && !isPastLimit && !model.dimmer.isDimmed && !model.capabilities.lens.isFront
+        let shows = drift.isTracking && !model.dimmer.isDimmed
         ZStack {
             if shows {
                 DriftCrosses(drift: drift, imageDiagonal: imageDiagonal)
@@ -29,12 +27,11 @@ struct DriftCrosshair: View {
         .animation(.easeOut(duration: 0.25), value: shows)
         .allowsHitTesting(false)
         .accessibilityHidden(true)
-        .task(id: tracking) {
-            if isPastLimit { isPastLimit = false }
-            guard tracking else { return }
-            try? await Task.sleep(for: .seconds(DriftMath.trackingLimit))
-            guard !Task.isCancelled else { return }
-            isPastLimit = true
+        // The model decides "off target" on the same scale the crosses are drawn at, so the pill's "Line up the
+        // crosses" and the yellow cross leaving the white one agree.
+        .onChange(of: imageDiagonal, initial: true) { _, diagonal in
+            let value = Double(diagonal)
+            if drift.imageDiagonal != value { drift.imageDiagonal = value }
         }
     }
 }

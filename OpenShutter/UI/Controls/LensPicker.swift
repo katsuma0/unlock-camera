@@ -37,8 +37,8 @@ struct LensPicker: View {
     private static let holdDuration = 0.30
     /// A finger that slides this far before the hold goes through meant something else.
     private static let holdSlop: CGFloat = 10
-    /// Not zero: SwiftUI leaves fully transparent views out of hit testing, and the finger that opened the wheel is
-    /// still on one of these buttons.
+    /// Not zero: SwiftUI can leave fully transparent views out of hit testing, and the finger that opened the wheel
+    /// is still on one of these buttons.
     private static let hiddenOpacity = 0.001
 
     var body: some View {
@@ -113,17 +113,15 @@ struct LensPicker: View {
     /// The zoom the active button names when it differs visibly from the button's own value: a glide's target
     /// while one runs, else the live zoom once it can be trusted.
     private func shownZoom(for preset: LensPreset) -> Double? {
-        let zoom: Double
-        if let target = zoomTarget {
-            zoom = target
-        } else {
-            guard zoomAtSwitch == nil else { return nil }
-            zoom = displayZoom
+        // The target wins even below the button's value: a step down from 2x glides to 1.9x before the 1x button
+        // takes over, and the button (and VoiceOver) should say where it is going.
+        if let target = zoomTarget, target.isFinite, target > 0 {
+            return abs(target - preset.displayZoom) >= 0.05 ? target : nil
         }
-        guard zoom.isFinite, zoom > 0,
-              zoom >= preset.displayZoom - 0.05,
-              abs(zoom - preset.displayZoom) >= 0.05 else { return nil }
-        return zoom
+        guard zoomAtSwitch == nil, displayZoom.isFinite, displayZoom > 0,
+              displayZoom >= preset.displayZoom - 0.05,
+              abs(displayZoom - preset.displayZoom) >= 0.05 else { return nil }
+        return displayZoom
     }
 
     // MARK: - Buttons

@@ -358,12 +358,14 @@ private struct StabilityPicker: View {
     }
 }
 
-/// What automatic stability sees right now: a tripod when the phone has been still, a hand otherwise.
+/// What automatic stability sees right now: a tripod when the phone has been still, a hand otherwise. Without a
+/// motion reading (the Simulator, or the first moment) Auto plans for a hand, and the label says only that.
 private struct SteadyIndicator: View {
     let model: CameraModel
 
     var body: some View {
         let steady = model.motion.isSteady
+        let label = steady ? "Phone is steady" : (model.motion.isAvailable ? "Phone is moving" : "Plans for a handheld phone")
         ZStack {
             if steady {
                 TripodGlyph()
@@ -379,7 +381,7 @@ private struct SteadyIndicator: View {
         .frame(width: 12, height: 12)
         .uprightRotation(model.motion.iconRotationDegrees)
         .animation(Theme.snappy, value: steady)
-        .accessibilityLabel(Text(steady ? "Phone is steady" : "Phone is moving"))
+        .accessibilityLabel(Text(label))
     }
 }
 

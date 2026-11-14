@@ -111,7 +111,9 @@ final class SimulatedCamera: CameraBackend {
     /// Stops that came in while startRecording was still opening the file; resumed once it is done.
     private var recordingStartWaiters: [CheckedContinuation<Void, Never>] = []
     private var recordingStart: CFTimeInterval = 0
-    private var recordingLocation: LocationStamp?
+    /// Where and when the recording started, for the Photos asset.
+    private var recordingLocation: GeoTag?
+    private var recordingDate = Date()
     private var lastDurationTick: CFTimeInterval = 0
     /// A recording being closed and saved; stopRecording picks it up even when stop() began it.
     private var recordingFinish: Task<CaptureResult, Error>?
@@ -340,16 +342,18 @@ final class SimulatedCamera: CameraBackend {
             shots.append(shot(at: clock, exposure: values, mirrored: mirrored, foregroundLight: light))
             clock += SimulatedSpec.frameInterval
         }
+        let date = Date()
         let job = SimulatedPhotoJob(
             shots: shots,
             exposures: exposures,
+            offsets: request.bracket.kind == .exposure ? request.bracket.exposureOffsets() : [],
             format: request.processedFormat == .none ? .heif : request.processedFormat,
             quality: request.quality,
             aspect: request.aspect,
-            location: request.location,
-            lensName: lens.info.name,
+            shot: recordedShot(RecordedShot.context(of: request, displayZoom: zoomFactor * lens.info.relativeZoom),
+                               exposure: current(exposures), date: date),
             focalLength: lens.info.equivalentFocalLength * zoomFactor,
-            date: Date()
+            date: date
         )
         delegate?.cameraBackendWillCapture(self)
         let scene = photoScene
@@ -373,7 +377,8 @@ final class SimulatedCamera: CameraBackend {
             var saved = false
             do {
                 identifier = try await PhotoLibrary.savePhoto(primary: photo.encoded.data, primaryType: photo.encoded.typeIdentifier,
-                                                              raw: nil, livePhotoMovie: nil, location: request.location)
+                                                              raw: nil, livePhotoMovie: nil, location: job.shot.assetLocation,
+                                                              creationDate: job.date, isCapture: true)
                 saved = true
             } catch {
                 // The result still goes back, marked unsaved, and the model tells the person why.
@@ -382,6 +387,23 @@ final class SimulatedCamera: CameraBackend {
                                          summary: photo.summary, date: job.date, savedToLibrary: saved))
         }
         return results
+    }
+
+    /// The simulated camera's files say what made them: never an Apple camera, since it runs on real phones too and
+    /// saves into the real library.
+    private func recordedShot(_ described: (context: ShotContext, knownFields: Set<ShotXMP.Field>?),
+                              exposure: ExposureValues, date: Date) -> RecordedShot {
+        let record = ShotRecord(source: .rendered, context: described.context,
+                                device: DeviceIdentityResolver.shared.simulatedIdentity,
+                                lens: LensRecord(lens.info, zoomFactor: zoomFactor, hasFlash: lens.hasFlash,
+                                                 make: DeviceIdentity.appName),
+                                exposure: exposure, date: date)
+        return RecordedShot(record: record, knownFields: described.knownFields)
+    }
+
+    /// The exposure a single photo takes, or a bracket's metered middle frame.
+    private func current(_ exposures: [ExposureValues]) -> ExposureValues {
+        exposures.first ?? exposureRanges.clamp(exposure)
     }
 
     /// One exposure, or the bracket around the current one (or the manual base), never more than the
@@ -444,8 +466,8 @@ final class SimulatedCamera: CameraBackend {
             scene: stackScene,
             queue: stackQueue,
             flipsResult: isFront && !mirrorFrontPhotos,
-            lensName: lens.info.name,
-            focalLength: lens.info.equivalentFocalLength * zoomFactor,
+            shot: recordedShot(RecordedShot.context(of: request, displayZoom: zoomFactor * lens.info.relativeZoom),
+                               exposure: frameExposure, date: Date()),
             progress: progress
         )
         stackJob = job
@@ -471,7 +493,8 @@ final class SimulatedCamera: CameraBackend {
         var saved = false
         do {
             identifier = try await PhotoLibrary.savePhoto(primary: outcome.encoded.data, primaryType: outcome.encoded.typeIdentifier,
-                                                          raw: nil, livePhotoMovie: nil, location: request.location)
+                                                          raw: nil, livePhotoMovie: nil, location: outcome.location,
+                                                          creationDate: outcome.date, isCapture: true)
             saved = true
         } catch {
             // Reported through savedToLibrary; the model shows the message.
@@ -523,9 +546,23 @@ final class SimulatedCamera: CameraBackend {
         }
         let size = SimulatedSpec.previewSize
         let queue = movieQueue
+        let start = Date()
+        var described = RecordedShot.context(of: request, displayZoom: zoomFactor * lens.info.relativeZoom)
+        // What the simulated movie really is, whatever the settings asked for: preview frames, H.264, no sound.
+        if var video = described.context.video {
+            video.codec = .h264
+            video.frameRate = SimulatedSpec.movieFrameRate
+            video.colorMode = .sdr
+            video.audio = false
+            described.context.video = video
+        }
+        let shot = recordedShot(described, exposure: exposureRanges.clamp(exposure), date: start)
+        let metadata = UncheckedMetadata(items: MovieMetadata.items(shot.movie(livePhoto: false)))
         let writer = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<SimulatedMovieWriter, Error>) in
             queue.async {
-                continuation.resume(with: Result { try SimulatedMovieWriter(width: size.width, height: size.height, queue: queue) })
+                continuation.resume(with: Result {
+                    try SimulatedMovieWriter(width: size.width, height: size.height, queue: queue, metadata: metadata.items)
+                })
             }
         }
         guard isRunning else {
@@ -539,7 +576,8 @@ final class SimulatedCamera: CameraBackend {
             self?.endRecordingBackgroundTask()
         }
         recordingStart = CACurrentMediaTime()
-        recordingLocation = request.location
+        recordingLocation = shot.assetLocation
+        recordingDate = start
         lastDurationTick = recordingStart
         if let latestFrame {
             writer.append(latestFrame, at: 0)
@@ -577,6 +615,7 @@ final class SimulatedCamera: CameraBackend {
         guard let writer = recorder else { return nil }
         recorder = nil
         let location = recordingLocation
+        let date = recordingDate
         let task = Task<CaptureResult, Error> {
             // Also when closing the file fails: the time is only needed until there is a result.
             defer { self.endRecordingBackgroundTask() }
@@ -584,7 +623,8 @@ final class SimulatedCamera: CameraBackend {
             var identifier: String?
             var saved = false
             do {
-                identifier = try await PhotoLibrary.saveVideo(at: movie.url, location: location)
+                identifier = try await PhotoLibrary.saveVideo(at: movie.url, location: location, creationDate: date,
+                                                              isCapture: true)
                 saved = true
             } catch {
                 // Photos didn't take it, and a movie left in tmp would only use space.
@@ -1368,11 +1408,13 @@ private struct SimulatedPhoto: @unchecked Sendable {
 private struct SimulatedPhotoJob: Sendable {
     var shots: [SceneShot]
     var exposures: [ExposureValues]
+    /// An exposure bracket's offsets, center first like the exposures; empty for a single photo.
+    var offsets: [Double]
     var format: ProcessedFormat
     var quality: Double
     var aspect: AspectRatio
-    var location: LocationStamp?
-    var lensName: String
+    /// What every file of the job says about the shot.
+    var shot: RecordedShot
     var focalLength: Double
     var date: Date
 
@@ -1381,15 +1423,25 @@ private struct SimulatedPhotoJob: Sendable {
         // Full-size buffers are large; the next photo draws them again.
         defer { scene.releaseCaches() }
         var photos: [SimulatedPhoto] = []
-        for (shot, values) in zip(shots, exposures) {
-            guard let frame = scene.renderFrame(shot, metered: false) else {
+        for (index, (sceneShot, values)) in zip(shots, exposures).enumerated() {
+            guard let frame = scene.renderFrame(sceneShot, metered: false) else {
                 throw CameraError.captureFailed("The simulated scene couldn't be drawn.")
             }
             let image = Self.cropped(frame.image, to: aspect)
-            let metadata = CaptureMetadata(exposureSeconds: values.seconds, iso: values.iso, aperture: values.aperture,
-                                           focalLength35mm: focalLength, lensModel: lensName,
-                                           comment: "Open Shutter simulated camera", date: date, location: location)
-            let encoded = try MediaWriter.encode(image, as: format, quality: quality, metadata: metadata)
+            var record = shot
+            record.record.exposure = values
+            record.record.pixelWidth = image.width
+            record.record.pixelHeight = image.height
+            record.record.isSRGB = MediaWriter.isSRGB(image)
+            record.record.writtenDate = Date()
+            // A bracket's frames come center first, as the offsets do.
+            if exposures.count > 1, var bracket = record.record.context.bracket, bracket.kind == .exposure {
+                bracket.index = index + 1
+                bracket.count = exposures.count
+                bracket.value = index < offsets.count ? offsets[index] : nil
+                record.record.context.bracket = bracket
+            }
+            let encoded = try MediaWriter.encode(image, as: format, quality: quality, metadata: record.rendered)
             photos.append(SimulatedPhoto(encoded: encoded,
                                          thumbnail: encoded.thumbnail ?? MediaWriter.thumbnail(of: image, maxPixelSize: 400),
                                          summary: SimulatedText.photoSummary(values, focalLength: focalLength)))
@@ -1414,7 +1466,9 @@ private final class SimulatedStackJob: @unchecked Sendable {
         var encoded: EncodedImage
         var thumbnail: CGImage?
         var summary: String
+        /// When the first frame was taken, which is when the stack counts as taken.
         var date: Date
+        var location: GeoTag?
     }
 
     private let request: StackRequest
@@ -1423,8 +1477,8 @@ private final class SimulatedStackJob: @unchecked Sendable {
     private let scene: SyntheticScene
     private let queue: DispatchQueue
     private let flipsResult: Bool
-    private let lensName: String
-    private let focalLength: Double
+    /// What the file says, from the press; the frames fill in what they did.
+    private let shot: RecordedShot
     private let progress: @MainActor (StackProgress) -> Void
     /// Scene time from one frame to the next: frames can't come faster than the preview's 30 fps.
     private let frameSpacing: Double
@@ -1440,19 +1494,20 @@ private final class SimulatedStackJob: @unchecked Sendable {
     // Owned by `queue`.
     private var accumulator: StackAccumulator
     private var framesAccumulated = 0
+    private var framesAttempted = 0
     private var wallStart: CFTimeInterval = 0
+    private var startDate = Date()
     private var lastProgress: CFTimeInterval = 0
 
     init(request: StackRequest, plan: StackPlan, firstShot: SceneShot, scene: SyntheticScene, queue: DispatchQueue,
-         flipsResult: Bool, lensName: String, focalLength: Double, progress: @escaping @MainActor (StackProgress) -> Void) {
+         flipsResult: Bool, shot: RecordedShot, progress: @escaping @MainActor (StackProgress) -> Void) {
         self.request = request
         self.plan = plan
         self.firstShot = firstShot
         self.scene = scene
         self.queue = queue
         self.flipsResult = flipsResult
-        self.lensName = lensName
-        self.focalLength = focalLength
+        self.shot = shot
         self.progress = progress
         accumulator = StackAccumulator(width: scene.width, height: scene.height, channels: 4, blend: plan.blend)
         frameSpacing = max(plan.frameSeconds, SimulatedSpec.frameInterval)
@@ -1470,6 +1525,7 @@ private final class SimulatedStackJob: @unchecked Sendable {
         }
         queue.async {
             self.wallStart = CACurrentMediaTime()
+            self.startDate = Date()
             self.lastProgress = self.wallStart
             self.captureFrame(0)
         }
@@ -1501,6 +1557,7 @@ private final class SimulatedStackJob: @unchecked Sendable {
         // Frames shorter than their spacing leave gaps, so their moving lights stay separate streaks.
         shot.isBackToBack = frameSpacing <= plan.frameSeconds
         // A frame that fails to draw is skipped, like a dropped camera frame.
+        framesAttempted += 1
         if let frame = scene.renderLinear(shot) {
             accumulator.add(frame)
             framesAccumulated += 1
@@ -1543,25 +1600,25 @@ private final class SimulatedStackJob: @unchecked Sendable {
             complete(.failure(CameraError.captureFailed("The picture couldn't be put together.")))
             return
         }
-        let date = Date()
-        let metadata = CaptureMetadata(
-            exposureSeconds: captured.effectiveExposureSeconds,
-            iso: captured.iso,
-            aperture: captured.aperture,
-            focalLength35mm: focalLength,
-            lensModel: lensName,
-            comment: "Stacked \(frames) \u{00D7} \(ShutterSpeed(seconds: captured.frameSeconds).label), \(captured.blend.title)",
-            date: date,
-            location: request.location
-        )
+        var record = shot
+        // The plan's frame count, not the captured one: a bulb's cap, or what an early stop cut short.
+        record.record.stack = StackRecord(plan: plan, framesSeen: max(framesAttempted, frames), framesUsed: frames,
+                                          bulb: request.isBulb,
+                                          noiseReduction: plan.purpose == .night ? request.noiseReduction : nil)
+        record.record.date = startDate
+        record.record.endDate = Date()
+        record.record.writtenDate = Date()
+        record.record.pixelWidth = image.width
+        record.record.pixelHeight = image.height
+        record.record.isSRGB = MediaWriter.isSRGB(image)
         let format: ProcessedFormat = request.processedFormat == .none ? .heif : request.processedFormat
         do {
-            let encoded = try MediaWriter.encode(image, as: format, quality: request.quality, metadata: metadata)
+            let encoded = try MediaWriter.encode(image, as: format, quality: request.quality, metadata: record.rendered)
             let summary = MediaWriter.summary(exposureSeconds: captured.effectiveExposureSeconds, iso: captured.iso,
                                               aperture: captured.aperture)
             complete(.success(Outcome(encoded: encoded,
                                       thumbnail: encoded.thumbnail ?? MediaWriter.thumbnail(of: image, maxPixelSize: 400),
-                                      summary: summary, date: date)))
+                                      summary: summary, date: startDate, location: record.assetLocation)))
         } catch {
             complete(.failure(error))
         }
@@ -1625,8 +1682,9 @@ private final class SimulatedMovieWriter: @unchecked Sendable {
     private var lastImage: CGImage?
     private var isClosed = false
 
-    /// Call on `queue`: creating the file and starting the writer touch the disk.
-    init(width: Int, height: Int, queue: DispatchQueue) throws {
+    /// Call on `queue`: creating the file and starting the writer touch the disk. `metadata` goes into the movie,
+    /// which has to be set before writing starts.
+    init(width: Int, height: Int, queue: DispatchQueue, metadata: [AVMetadataItem]) throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("OpenShutter-\(UUID().uuidString).mov")
         let writer: AVAssetWriter
         do {
@@ -1655,6 +1713,7 @@ private final class SimulatedMovieWriter: @unchecked Sendable {
             kCVPixelBufferHeightKey as String: height,
         ])
         writer.add(input)
+        writer.metadata = metadata
         guard writer.startWriting() else {
             try? FileManager.default.removeItem(at: url)
             throw CameraError.captureFailed(writer.error?.localizedDescription ?? "The movie couldn't start.")
@@ -1761,4 +1820,9 @@ private final class SimulatedMovieWriter: @unchecked Sendable {
             }
         }
     }
+}
+
+/// Movie items built on the main actor and handed to the movie queue, which is their only user from then on.
+private struct UncheckedMetadata: @unchecked Sendable {
+    let items: [AVMetadataItem]
 }

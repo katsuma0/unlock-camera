@@ -56,9 +56,9 @@ final class MotionMonitor {
     func beginDrift(into drift: DriftState, equivalentFocalLength: Double, tracksAim: Bool) {
         self.drift = drift
         self.tracksAim = tracksAim
+        drift.begin(equivalentFocalLength: equivalentFocalLength)
         tracker = DriftTracker(pointsPerRadian: drift.pointsPerRadian)
         lastAngleTime = nil
-        drift.begin(equivalentFocalLength: equivalentFocalLength)
         onDriftChange?()
     }
 

@@ -270,7 +270,7 @@ enum ImageIOMetadata {
     }
 
     /// What the copy lost compared with the source, or nil when it kept everything and carries the packet.
-    /// Reading properties and auxiliary data decodes no pixels, so this costs milliseconds even for 48 MP.
+    /// Only properties and the small auxiliary images are read, never the photo's own pixels.
     private static func loss(from source: CGImageSource, index: Int, to copy: Data, expecting path: String) -> String? {
         guard let copied = CGImageSourceCreateWithData(copy as CFData, nil) else { return "the file" }
         guard CGImageSourceGetCount(copied) == CGImageSourceGetCount(source) else { return "images" }
@@ -280,6 +280,20 @@ enum ImageIOMetadata {
                       kCGImagePropertyGPSDictionary, kCGImagePropertyIPTCDictionary]
         for group in groups where before[group] != nil && after[group] == nil {
             return group as String
+        }
+        // Every key of these: the maker note holds the Live Photo pairing, and nothing here changes either.
+        for group in [kCGImagePropertyMakerAppleDictionary, kCGImagePropertyGPSDictionary] {
+            let kept = (after[group] as? [String: Any])?.count ?? 0
+            if let had = (before[group] as? [String: Any])?.count, kept < had {
+                return group as String
+            }
+        }
+        let exifBefore = before[kCGImagePropertyExifDictionary] as? [CFString: Any] ?? [:]
+        let exifAfter = after[kCGImagePropertyExifDictionary] as? [CFString: Any] ?? [:]
+        let facts = [kCGImagePropertyExifExposureTime, kCGImagePropertyExifFNumber, kCGImagePropertyExifISOSpeedRatings,
+                     kCGImagePropertyExifDateTimeOriginal, kCGImagePropertyExifLensModel, kCGImagePropertyExifUserComment]
+        for key in facts where exifBefore[key] != nil && exifAfter[key] == nil {
+            return key as String
         }
         for key in [kCGImagePropertyPixelWidth, kCGImagePropertyPixelHeight, kCGImagePropertyOrientation]
         where (before[key] as? NSNumber) != (after[key] as? NSNumber) {
@@ -367,7 +381,7 @@ enum MovieMetadata {
         return nil
     }
 
-    /// Every item carries a value: QuickTime writers reject an empty one.
+    /// Every item carries a value; one without would only put an empty key in the file.
     private static func text(_ item: AVMutableMetadataItem, _ value: MetadataValue) -> AVMetadataItem? {
         let string: String
         switch value {
@@ -417,9 +431,10 @@ final class DeviceIdentityResolver: @unchecked Sendable {
     /// "1.0".
     let appVersion: String
 
-    /// How much a name can be trusted, lowest first.
+    /// How much a name can be trusted, lowest first. A saved name came from a photo or the pipeline in an earlier
+    /// launch, so it outranks this launch's pipeline guess, and only a photo replaces it.
     private enum Source: Int {
-        case machine, lensModel, saved, recommended, photo
+        case machine, lensModel, recommended, saved, photo
     }
 
     private static let savedKey = "ca.katsuma.openshutter.deviceModel"
@@ -463,7 +478,7 @@ final class DeviceIdentityResolver: @unchecked Sendable {
         DeviceIdentity.simulatedCamera(systemVersion: systemVersion, appVersion: appVersion)
     }
 
-    /// Nothing better than a saved name is known yet.
+    /// Nothing better than a guess from a lens model is known yet.
     var wantsRecommendedModel: Bool {
         lock.withLock { source.rawValue < Source.recommended.rawValue }
     }
@@ -620,7 +635,7 @@ struct RecordedShot: Sendable {
 extension RecordedShot {
     /// The context of a photo request: the model's, or what the request says when the model sent none.
     static func context(of request: PhotoRequest, displayZoom: Double) -> (context: ShotContext, knownFields: Set<ShotXMP.Field>?) {
-        var described = describe(request.shot, location: request.location) {
+        var described = describe(request.shot, location: request.location, displayZoom: displayZoom) {
             ShotContext(mode: .photo, aspect: request.aspect, processing: request.processing, flash: request.flash,
                         livePhoto: request.livePhoto, displayZoom: displayZoom)
         }
@@ -633,7 +648,7 @@ extension RecordedShot {
     }
 
     static func context(of request: StackRequest, displayZoom: Double) -> (context: ShotContext, knownFields: Set<ShotXMP.Field>?) {
-        let described = describe(request.shot, location: request.location) {
+        let described = describe(request.shot, location: request.location, displayZoom: displayZoom) {
             ShotContext(mode: request.plan.purpose == .night ? .night : .long, aspect: request.aspect,
                         displayZoom: displayZoom)
         }
@@ -641,7 +656,7 @@ extension RecordedShot {
     }
 
     static func context(of request: VideoRequest, displayZoom: Double) -> (context: ShotContext, knownFields: Set<ShotXMP.Field>?) {
-        var described = describe(request.shot, location: request.location) {
+        var described = describe(request.shot, location: request.location, displayZoom: displayZoom) {
             ShotContext(mode: .video, displayZoom: displayZoom, video: request.settings)
         }
         if described.context.video == nil {
@@ -651,8 +666,9 @@ extension RecordedShot {
     }
 
     /// The model's context, or `fallback` built from the request. A context with location tags on but no fix takes
-    /// the request's, which came through the same gate in the model.
-    private static func describe(_ shot: ShotContext?, location: GeoTag?,
+    /// the request's, which came through the same gate in the model. `displayZoom` is the device's at the press,
+    /// which beats the model's last reading while a zoom still ramps.
+    private static func describe(_ shot: ShotContext?, location: GeoTag?, displayZoom: Double,
                                  fallback: () -> ShotContext) -> (context: ShotContext, isFallback: Bool) {
         guard var context = shot else {
             var context = fallback()
@@ -662,6 +678,9 @@ extension RecordedShot {
         }
         if context.locationTagsOn, context.location == nil {
             context.location = location
+        }
+        if displayZoom.isFinite, displayZoom > 0 {
+            context.displayZoom = displayZoom
         }
         return (context, false)
     }

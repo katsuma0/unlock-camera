@@ -1,92 +1,23 @@
 import SwiftUI
 import UIKit
 
-/// The captures from this session, with their exposure summaries in the advanced interface, and a way into Photos.
-struct CaptureReviewView: View {
-    @Bindable var model: CameraModel
-    @Environment(\.dismiss) private var dismiss
-    @State private var openFailed = false
+/// The captures from this session, as a section of the gallery's pages that can't read the library: without read
+/// access the thumbnails the camera kept are all the app can show. Nothing when the session has none.
+struct SessionCapturesList: View {
+    let model: CameraModel
 
     var body: some View {
+        let captures = model.recentCaptures
         // The summaries are shutter speeds and ISO values, which belong to the advanced interface.
         let detailed = model.isAdvanced
-        NavigationStack {
-            Group {
-                if model.recentCaptures.isEmpty {
-                    ContentUnavailableView(
-                        "No captures yet",
-                        systemImage: "camera",
-                        description: Text("Photos and videos you take while the app is open appear here.")
-                    )
-                } else {
-                    List {
-                        Section {
-                            ForEach(model.recentCaptures) { capture in
-                                CaptureRow(capture: capture, detailed: detailed)
-                            }
-                        } header: {
-                            Text(Self.countLabel(model.recentCaptures.count))
-                        }
-                    }
-                    .listStyle(.insetGrouped)
+        if !captures.isEmpty {
+            Section {
+                ForEach(captures) { capture in
+                    CaptureRow(capture: capture, detailed: detailed)
                 }
+            } header: {
+                Text(Self.countLabel(captures.count))
             }
-            .navigationTitle("Recent")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        dismiss()
-                    } label: {
-                        Image(systemName: "xmark")
-                    }
-                    .accessibilityLabel("Close")
-                }
-            }
-            .safeAreaInset(edge: .bottom) {
-                openInPhotosBar
-            }
-        }
-        .presentationDetents([.medium, .large])
-        .presentationDragIndicator(.visible)
-        // The rows use the camera's white text, so the sheet stays dark like Settings and the timer sheet.
-        .tint(Theme.accent)
-        .preferredColorScheme(.dark)
-    }
-
-    private var openInPhotosBar: some View {
-        VStack(spacing: 8) {
-            Button {
-                openPhotos()
-            } label: {
-                Label("Open in Photos", systemImage: "photo.on.rectangle")
-                    .font(.headline)
-                    .foregroundStyle(Color.black)
-                    .frame(maxWidth: .infinity, minHeight: 50)
-                    .background(Theme.accent, in: Capsule())
-                    .contentShape(Capsule())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Open in Photos")
-            .accessibilityHint("Leaves Open Shutter and opens the Photos app.")
-            if openFailed {
-                Text("Photos couldn't be opened.")
-                    .font(.footnote)
-                    .foregroundStyle(Theme.secondaryText)
-                    .transition(.opacity)
-            }
-        }
-        .padding(.horizontal, 20)
-        .padding(.top, 8)
-        .padding(.bottom, 12)
-        .background(.bar)
-        .animation(.easeInOut(duration: 0.2), value: openFailed)
-    }
-
-    private func openPhotos() {
-        openFailed = false
-        PhotosApp.open { opened in
-            openFailed = !opened
         }
     }
 
@@ -95,7 +26,7 @@ struct CaptureReviewView: View {
     }
 }
 
-/// The way into the Photos app, shared by the review sheet's button and the thumbnail's menu.
+/// The way into the Photos app, shared by the gallery and the thumbnail's menu.
 @MainActor
 enum PhotosApp {
     /// Opens Photos and reports whether that worked.
@@ -123,7 +54,7 @@ enum PhotosApp {
 }
 
 extension CaptureResult.Kind {
-    /// What a capture is called in the review sheet and by VoiceOver on the thumbnail. The simple interface tells
+    /// What a capture is called in the session list and by VoiceOver on the thumbnail. The simple interface tells
     /// photos from videos and leaves it there.
     func title(detailed: Bool) -> String {
         guard detailed else { return self == .video ? "Video" : "Photo" }
@@ -137,6 +68,8 @@ extension CaptureResult.Kind {
     }
 }
 
+/// One capture with the thumbnail the camera kept. The list follows the appearance setting, so its text uses the
+/// system's colors rather than the camera's white.
 private struct CaptureRow: View {
     let capture: CaptureResult
     /// The advanced interface names the kind of capture and shows its exposure.
@@ -148,16 +81,16 @@ private struct CaptureRow: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(capture.kind.title(detailed: detailed))
                     .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(Theme.primaryText)
+                    .foregroundStyle(.primary)
                 if detailed, !capture.summary.isEmpty {
                     Text(capture.summary)
                         .font(.footnote.monospacedDigit())
-                        .foregroundStyle(Theme.secondaryText)
+                        .foregroundStyle(.secondary)
                         .lineLimit(2)
                 }
                 Text(capture.date, format: .dateTime.hour().minute().second())
                     .font(.caption.monospacedDigit())
-                    .foregroundStyle(Theme.tertiaryText)
+                    .foregroundStyle(.tertiary)
                 if !capture.savedToLibrary {
                     Label("Not saved to Photos", systemImage: "exclamationmark.triangle.fill")
                         .font(.caption.weight(.semibold))
@@ -173,7 +106,7 @@ private struct CaptureRow: View {
     private var thumbnail: some View {
         ZStack {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(Color.white.opacity(0.08))
+                .fill(Color(uiColor: .tertiarySystemFill))
             if let image = capture.thumbnail {
                 Image(decorative: image, scale: 1)
                     .resizable()
@@ -183,12 +116,13 @@ private struct CaptureRow: View {
             } else {
                 Image(systemName: Self.symbol(for: capture.kind))
                     .font(.system(size: 20))
-                    .foregroundStyle(Theme.secondaryText)
+                    .foregroundStyle(.secondary)
             }
             if capture.thumbnail != nil, capture.kind != .photo {
+                // On the picture, so light on a dark disc in either appearance.
                 Image(systemName: Self.symbol(for: capture.kind))
                     .font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(Theme.primaryText)
+                    .foregroundStyle(Color.white)
                     .padding(4)
                     .background(Color.black.opacity(0.55), in: Circle())
                     .padding(3)

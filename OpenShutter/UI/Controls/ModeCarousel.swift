@@ -2,8 +2,9 @@ import SwiftUI
 import UIKit
 import CameraCore
 
-/// The mode strip above the shutter: uppercase titles with the selected one centered in yellow. Swipe or tap to change
-/// mode; the strip follows the finger and springs to the mode it lands on.
+/// The mode strip: uppercase titles with the selected one centered in yellow, between the thumbnail and the flip
+/// button under the frame (above the shutter on phones without room there). Swipe or tap to change mode; the strip
+/// follows the finger and springs to the mode it lands on.
 struct ModeCarousel: View {
     @Binding var mode: CaptureMode
     /// The modes on offer, left to right, each once. The simple interface leaves MANUAL out, and the list can change
@@ -41,6 +42,9 @@ struct ModeCarousel: View {
                         title(item, isHighlighted: position == highlighted)
                     }
                 }
+                // Where the strip sits on the picture (a phone without a band under the frame), a soft shadow keeps
+                // the titles readable over a bright scene without a scrim over the photo.
+                .shadow(color: .black.opacity(0.55), radius: 2)
                 .fixedSize()
                 .offset(x: totalWidth(centers) / 2 - focus)
                 .animation(Theme.spring, value: mode)
@@ -151,7 +155,8 @@ struct ModeCarousel: View {
 
     private func estimatedTextWidth(_ item: CaptureMode) -> CGFloat {
         let weight: UIFont.Weight = legibilityWeight == .bold ? .bold : .semibold
-        let font = UIFont.systemFont(ofSize: 13, weight: weight)
+        // Theme.modeFont is 13 pt, a fifth bigger with Larger labels.
+        let font = UIFont.systemFont(ofSize: 13 * Theme.labelScale, weight: weight)
         let size = (item.title as NSString).size(withAttributes: [.font: font, .kern: 1])
         return ceil(size.width)
     }

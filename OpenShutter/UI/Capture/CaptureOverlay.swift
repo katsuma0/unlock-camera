@@ -141,9 +141,10 @@ private struct CountdownHint: View {
     let model: CameraModel
 
     var body: some View {
-        // A tripod scene's wait counts down like a self timer nobody set, so it says what it is for. The break falls
-        // between the sentences rather than wherever the width runs out.
-        Text(model.isSettling ? "Letting the phone settle.\nTap the shutter to cancel." : "Tap the shutter to cancel.")
+        // A tripod scene's wait counts down like a self timer nobody set, so it says what it is for, and its last
+        // second holds while the phone still moves, which needs saying too. The break falls between the sentences
+        // rather than wherever the width runs out.
+        Text(Self.text(waiting: model.isWaitingForSteady, settling: model.isSettling))
             .font(.footnote.weight(.semibold))
             .foregroundStyle(Theme.secondaryText)
             .multilineTextAlignment(.center)
@@ -152,6 +153,12 @@ private struct CountdownHint: View {
             .offset(y: 96)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .uprightRotation(model.motion.iconRotationDegrees)
+    }
+
+    private static func text(waiting: Bool, settling: Bool) -> String {
+        if waiting { return "Waiting for the phone to settle.\nTap the shutter to cancel." }
+        if settling { return "Letting the phone settle.\nTap the shutter to cancel." }
+        return "Tap the shutter to cancel."
     }
 }
 
@@ -439,7 +446,7 @@ private struct StatusButtons: View {
                     Text("Stop")
                 }
                 .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(AppearanceStore.shared.onAccent)
+                .foregroundStyle(Theme.onAccent)
                 .padding(.horizontal, 18)
                 .frame(height: 36)
                 .background(Theme.accent, in: Capsule())

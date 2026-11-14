@@ -143,10 +143,10 @@ private struct DialPanel: View {
         selection = target
     }
 
-    /// While a lens switch is in flight the model drops zooms aimed at another lens, so a drag released during the
-    /// switch leaves the camera on an earlier value of the same drag. Then the dial asks once more for the value
-    /// under the line. A camera that went anywhere else got there by a pinch or the Camera Control, so the dial
-    /// follows it instead of fighting it.
+    /// A zoom sent while a lens switch is in flight waits in the model for the switch to land. If the camera still
+    /// ends on an earlier value of the same drag, the dial asks once more for the value under the line. A camera
+    /// that went anywhere else got there by a pinch, the wheel or the Camera Control, so the dial follows it instead
+    /// of fighting it.
     private func retryDroppedZoom() -> Bool {
         let sent = sentZooms
         // Once per edit: whatever the camera reports after the second request is the answer.

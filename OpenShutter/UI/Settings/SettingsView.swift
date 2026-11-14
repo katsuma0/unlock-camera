@@ -20,6 +20,8 @@ struct SettingsView: View {
             Form {
                 InterfaceSection(model: model)
                 InterfaceLevelSections(model: model, locationAccess: locationAccess)
+                LookAndControlsSection(model: model)
+                PhotoToolsSection()
                 AboutSection(model: model)
             }
             .formStyle(.grouped)
@@ -31,8 +33,9 @@ struct SettingsView: View {
                 }
             }
         }
-        .tint(Theme.accent)
-        .preferredColorScheme(.dark)
+        // On the stack rather than the form, so the pages pushed from it get green switches too.
+        .toggleStyle(SettingsSwitchStyle())
+        .sheetAppearance()
         .onAppear {
             if locationAccess == nil {
                 locationAccess = LocationPermissionWatcher()
@@ -82,13 +85,17 @@ private struct InterfaceLevelSections: View {
             ViewfinderSection(model: model)
             NightSection(model: model)
             LongExposureSection(model: model)
+            BatterySaverSection(model: model)
             VideoSection(model: model)
             ControlsSection(model: model)
             CameraDetailsSection(capabilities: model.capabilities)
         } else {
+            // The buttons and haptics the simple form listed here have their own page, linked from Look and
+            // controls at both levels.
             SimplePhotosSection(model: model, locationAccess: locationAccess)
             SimpleViewfinderSection(model: model)
-            SimpleControlsSection(model: model)
+            BatterySaverSection(model: model)
+            SimpleVideoSection(model: model)
         }
     }
 }
@@ -122,6 +129,7 @@ private struct SimplePhotosSection: View {
             if photo.silentShutter {
                 Toggle("Quiet shutter", isOn: model.settingBinding(\.capture.silentShutter))
             }
+            Toggle("Prioritize faster shooting", isOn: model.settingBinding(\.capture.prioritizeSpeed))
         } header: {
             Text("Photos")
         } footer: {
@@ -153,8 +161,43 @@ private struct SimplePhotosSection: View {
             notes.append("Only photo mode takes Live Photos.")
         }
         notes.append(locationProblem(enabled: capture.saveLocation, access: access)
-            ?? "Location tags add where each photo was taken. Location is only read while they are on.")
+            ?? "Location tags add where each photo and video was taken. Location is only read while they are on.")
+        notes.append("Every photo also records how it was taken, such as the lens and the camera's settings.")
+        notes.append(simpleSpeedNote)
         return notes
+    }
+}
+
+/// The simple interface's words for prioritize faster shooting; the advanced one names what gives way.
+private let simpleSpeedNote = "Prioritize faster shooting keeps up when you take photos quickly, at a slightly lower quality, on iPhones that can."
+
+private struct SimpleVideoSection: View {
+    let model: CameraModel
+
+    var body: some View {
+        Section {
+            Toggle("Allow audio playback", isOn: model.settingBinding(\.video.allowAudioPlayback))
+        } header: {
+            Text("Video")
+        } footer: {
+            Text(audioPlaybackNote)
+        }
+    }
+}
+
+/// What allowing audio playback means for the recording, for both forms.
+private let audioPlaybackNote = "Music and other apps keep playing while you film. The microphone can pick them up."
+
+/// Battery saver, at both levels. The setting is shared, and the steady status on the camera tells when it applies.
+private struct BatterySaverSection: View {
+    let model: CameraModel
+
+    var body: some View {
+        Section {
+            Toggle("Battery saver", isOn: model.settingBinding(\.display.dimDuringLongShots))
+        } footer: {
+            Text("Darkens the screen during night and long exposure shots of 10 seconds or more, once the phone is steady. Touch the screen to see the shot. It lights up again when the shot ends.")
+        }
     }
 }
 
@@ -168,7 +211,7 @@ private struct SimpleViewfinderSection: View {
         } header: {
             Text("Viewfinder")
         } footer: {
-            Text("The grid divides the picture into thirds. The level line turns yellow when the phone is straight.")
+            Text("The grid divides the picture into thirds. The level line changes color when the phone is straight.")
         }
     }
 
@@ -181,26 +224,6 @@ private struct SimpleViewfinderSection: View {
                 model.updateSettings { $0.display.grid = isOn ? grid : .off }
             }
         )
-    }
-}
-
-private struct SimpleControlsSection: View {
-    let model: CameraModel
-
-    var body: some View {
-        Section {
-            Toggle("Hardware buttons take photos", isOn: model.settingBinding(\.controls.volumeShutter))
-            Toggle("Haptics", isOn: model.settingBinding(\.controls.haptics))
-        } header: {
-            Text("Buttons and feel")
-        } footer: {
-            SettingsFooter([
-                model.capabilities.supportsCameraControls
-                    ? hardwareButtonsNote
-                    : "The volume buttons take the photo. When this is off, they change the volume.",
-                "Haptics are the small taps you feel when you use the controls.",
-            ])
-        }
     }
 }
 
@@ -255,11 +278,13 @@ private struct CaptureSection: View {
         Section {
             SettingsPicker("Processing", selection: model.settingBinding(\.capture.processing),
                          options: pickerOptions(Self.processingLevels(photo), current: capture.processing), label: \.title)
+            Toggle("Prioritize faster shooting", isOn: model.settingBinding(\.capture.prioritizeSpeed))
         } footer: {
             SettingsFooter([
                 capture.processing.detail,
                 Self.processingLimitNote(capture.processing, photo: photo),
                 "Manual exposure always uses Minimal, so the shutter and ISO you set are kept.",
+                "Prioritize faster shooting lets the camera lower the quality of photos taken in quick succession so it keeps up, on iPhones that support it.",
             ])
         }
 
@@ -291,8 +316,20 @@ private struct CaptureSection: View {
             if capture.saveLocation, locationAccess?.isDenied == true {
                 Button("Open Settings") { model.openAppSettings() }
             }
+            SettingsTextRow(title: "Your name", value: capture.artist, prompt: "None") { name in
+                model.updateSettings { $0.capture.artist = name }
+            }
+            SettingsTextRow(title: "Copyright", value: capture.copyright, prompt: "None") { line in
+                model.updateSettings { $0.capture.copyright = line }
+            }
+        } header: {
+            Text("Photo details")
         } footer: {
-            SettingsFooter([Self.locationNote(enabled: capture.saveLocation, access: locationAccess)])
+            SettingsFooter([
+                Self.locationNote(enabled: capture.saveLocation, access: locationAccess),
+                "Your name and the copyright line go into every photo and video, for apps that show who took it. Leave them empty to save neither.",
+                "Every photo also records how it was taken: lens, focal length, shutter, ISO, aperture, white balance, exposure compensation and mode.",
+            ])
         }
     }
 
@@ -421,8 +458,11 @@ private struct CaptureSection: View {
         if capture.rawFormat != .none, photo.livePhoto {
             notes.append("Live Photo is off while RAW is on.")
         }
-        if capture.rawFormat != .none, capture.depth, photo.depth {
-            notes.append("Depth is saved only with photos that have no RAW file.")
+        if capture.depth, photo.depth {
+            // Depth maps come at the sensor's own 4:3, and the photo pipeline embeds them only there.
+            notes.append(capture.aspect.matches(.fourThree)
+                ? "Depth is saved only with 4:3 photos that have no RAW file."
+                : "Depth is saved only with 4:3 photos that have no RAW file, so photos at \(capture.aspect.label) have none.")
         }
         if photo.constantColor {
             // The photo pipeline skips it without a flash, with RAW, and with locked white balance (Apple's advice).
@@ -443,7 +483,7 @@ private struct CaptureSection: View {
 
     private static func locationNote(enabled: Bool, access: LocationPermissionWatcher?) -> String {
         locationProblem(enabled: enabled, access: access)
-            ?? "Adds where each photo was taken. Location is only read while this is on."
+            ?? "Location tags add where each photo and video was taken. Location is only read while they are on."
     }
 }
 
@@ -927,6 +967,9 @@ private struct VideoSection: View {
             SettingsPicker("Stabilization", selection: model.settingBinding(\.video.stabilization),
                          options: pickerOptions(caps.stabilizationModes, current: video.stabilization), label: \.title)
             Toggle("Record sound", isOn: model.settingBinding(\.video.audio))
+            // Without sound the camera leaves the audio session alone, so other apps keep playing anyway.
+            Toggle("Allow audio playback", isOn: model.settingBinding(\.video.allowAudioPlayback))
+                .disabled(!video.audio)
             Toggle("Wind noise reduction", isOn: model.settingBinding(\.video.windNoiseReduction))
                 .disabled(!video.audio)
             Toggle("Low light noise reduction", isOn: model.settingBinding(\.video.lowLightNoiseReduction))
@@ -975,6 +1018,7 @@ private struct VideoSection: View {
         if !recordable {
             notes.append("The current camera can't record these settings exactly, so video uses the closest it has.")
         }
+        notes.append(audioPlaybackNote)
         notes.append("Wind noise reduction takes the rumble of wind out of the sound, on iPhones that support it.")
         notes.append("Shutter angle shows the shutter in degrees while filming; 180\u{00B0} gives the classic film look.")
         var unavailable = UnavailableFeatures()
@@ -1042,10 +1086,8 @@ private struct ControlsSection: View {
     var body: some View {
         let controls = model.settings.controls
 
+        // The hardware buttons and haptics have their own page, linked from Look and controls at both levels.
         Section {
-            // One system interaction carries the volume buttons and the Camera Control click, and its events don't
-            // say which one fired, so a single switch covers both.
-            Toggle("Hardware buttons take photos", isOn: model.settingBinding(\.controls.volumeShutter))
             NavigationLink {
                 CameraControlItemsView(model: model)
             } label: {
@@ -1053,12 +1095,11 @@ private struct ControlsSection: View {
                     ? "\(controls.cameraControlItems.count) of \(CameraControlItemsView.limit)"
                     : "Not on this iPhone")
             }
-            Toggle("Haptics", isOn: model.settingBinding(\.controls.haptics))
             Toggle("Switch lenses while zooming", isOn: model.settingBinding(\.controls.autoLensSwitching))
         } header: {
             Text("Controls")
         } footer: {
-            Text(hardwareButtonsNote + " Switching lenses while zooming moves to the next lens as you pinch past it, like the Camera app.")
+            Text("Switching lenses while zooming moves to the next lens as you pinch or drag the zoom wheel past it, like the Camera app.")
         }
     }
 }
@@ -1251,8 +1292,8 @@ private struct AboutSection: View {
             } message: {
                 // Simple is the default interface, so the advanced one says that the reset leaves it on.
                 Text(model.isAdvanced
-                    ? "Every setting goes back to its default, and advanced controls stay on. Photos and videos you took stay in your library."
-                    : "Every setting goes back to its default. Photos and videos you took stay in your library.")
+                    ? "Every setting goes back to its default, including the look, the top bar and the buttons. Advanced controls stay on, and the accessibility options stay as they are. Photos and videos you took stay in your library."
+                    : "Every setting goes back to its default, including the look, the top bar and the buttons. The accessibility options stay as they are. Photos and videos you took stay in your library.")
             }
         } header: {
             Text("About")
@@ -1269,10 +1310,13 @@ private struct AboutSection: View {
     private func resetAll() {
         let formats = model.capabilities.formats
         model.updateSettings { settings in
+            // The look, the top bar and the button mapping start over with the rest.
             var fresh = CameraSettings.default
             // Simple or advanced, and the answered first-launch question, belong to the interface, not the
             // camera: resetting them would swap the screen behind the sheet, or ask the question again.
             fresh.interface = settings.interface
+            // Accessibility options are what someone needs to use the app at all, so a reset never takes them away.
+            fresh.accessibility = settings.accessibility
             // Mode, lens and zoom say where the camera is, not how it is set up; resetting them would make the
             // preview jump to another lens behind the sheet.
             fresh.mode = settings.mode
@@ -1294,9 +1338,6 @@ private struct AboutSection: View {
 }
 
 // MARK: - Building blocks
-
-/// What the hardware buttons switch does, for both forms.
-private let hardwareButtonsNote = "The volume buttons and a Camera Control click take the photo. When this is off, both go back to iOS: the volume buttons change the volume and a Camera Control click opens the camera app chosen in iOS Settings."
 
 /// Why photos carry no place, or only a rough one, while location tags are on; nil when nothing is in the way.
 @MainActor
@@ -1341,7 +1382,8 @@ private struct PeakingColorRow: View {
                 } label: {
                     Circle()
                         .fill(Self.swatch(color))
-                        .overlay(Circle().strokeBorder(Color.white.opacity(0.3), lineWidth: 1))
+                        // Primary, so the rim stays visible on a light sheet too.
+                        .overlay(Circle().strokeBorder(Color.primary.opacity(0.3), lineWidth: 1))
                         .frame(width: 24, height: 24)
                         .padding(4)
                         .overlay(Circle().strokeBorder(Theme.accent, lineWidth: 2).opacity(isSelected ? 1 : 0))

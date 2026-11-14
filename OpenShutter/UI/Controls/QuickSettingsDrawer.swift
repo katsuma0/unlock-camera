@@ -3,9 +3,10 @@ import CameraCore
 
 /// Glass panel under the top bar with the settings people change between shots. Tap an item to step through its
 /// values; touch and hold the ones with many values to pick directly. The simple interface keeps one row of four.
+/// Every item steps through QuickActions, as its button on the top bar does, so the two never disagree.
 struct QuickSettingsDrawer: View {
     @Bindable var model: CameraModel
-    /// Set by the top bar's timer badge to ask for the timer sheet, which is presented from here.
+    /// Set by the top bar's timer badge or Timer button to ask for the timer sheet, which is presented from here.
     @Binding var timerSheetRequested: Bool
     @State private var showsTimerSheet = false
     /// The timer cycle ends with "custom": after that sheet closes, the next tap wraps around to Off.
@@ -17,8 +18,8 @@ struct QuickSettingsDrawer: View {
             Grid(horizontalSpacing: 2, verticalSpacing: 12) {
                 if advanced {
                     GridRow {
-                        aspectItem(presets: AspectRatio.presets, offersCustom: true)
-                        timerItem(delays: CaptureSchedule.delayPresets, offersCustom: true)
+                        aspectItem(advanced: true)
+                        timerItem(advanced: true)
                         formatItem
                         resolutionItem
                     }
@@ -37,8 +38,8 @@ struct QuickSettingsDrawer: View {
                 } else {
                     // What the simple interface leaves to choose between shots. Everything else runs on automatic.
                     GridRow {
-                        aspectItem(presets: CameraSettings.simpleAspects, offersCustom: false)
-                        timerItem(delays: CameraSettings.simpleDelays, offersCustom: false)
+                        aspectItem(advanced: false)
+                        timerItem(advanced: false)
                         simpleGridItem
                         levelItem
                     }
@@ -94,22 +95,20 @@ struct QuickSettingsDrawer: View {
 
     // MARK: - Capture
 
-    /// `offersCustom` adds the way to a ratio entered in Settings, which the simple interface leaves out.
-    private func aspectItem(presets: [AspectRatio], offersCustom: Bool) -> some View {
+    /// The advanced interface offers every preset and the way to a ratio entered in Settings.
+    private func aspectItem(advanced: Bool) -> some View {
         let aspect = model.settings.capture.aspect
+        let presets = QuickActions.aspects(advanced: advanced)
         let selection = Binding<AspectRatio>(
-            get: { presets.first(where: { $0.matches(aspect) }) ?? aspect },
-            set: { value in
-                Haptics.tick()
-                model.updateSettings { $0.capture.aspect = value }
-            }
+            get: { QuickActions.aspectSelection(aspect, among: presets) },
+            set: { value in QuickActions.setAspect(value, model) }
         )
         let isPreset = presets.contains(where: { $0.matches(aspect) })
         // Video frames are always 16:9; the crop only applies to stills.
         return DrawerMenuItem(model: model, title: "Aspect", value: aspect.label,
-                              isActive: !aspect.matches(.fourThree),
+                              isActive: QuickActions.aspectIsActive(aspect),
                               isEnabled: model.settings.mode != .video,
-                              primaryAction: { cycleAspect(through: presets) }) {
+                              primaryAction: { QuickActions.stepAspect(model) }) {
             Picker("Aspect", selection: selection) {
                 ForEach(presets) { preset in
                     Text(preset.label).tag(preset)
@@ -120,7 +119,7 @@ struct QuickSettingsDrawer: View {
                 }
             }
             .pickerStyle(.inline)
-            if offersCustom {
+            if advanced {
                 Button {
                     // Settings holds the side fields; the drawer stays open underneath and shows the new ratio after.
                     model.isSettingsPresented = true
@@ -130,49 +129,33 @@ struct QuickSettingsDrawer: View {
             }
         } glyph: {
             Text(aspect.label)
-                .font(.system(size: 11, weight: .bold).monospacedDigit())
+                .font(.system(size: 11 * Theme.labelScale, weight: .bold).monospacedDigit())
                 .lineLimit(1)
                 .minimumScaleFactor(0.6)
                 .padding(.horizontal, 4)
         }
     }
 
-    /// Steps through the presets. A ratio entered in Settings sits after the last preset, so the next tap goes to
-    /// the first one.
-    private func cycleAspect(through presets: [AspectRatio]) {
-        guard !presets.isEmpty else { return }
-        let current = model.settings.capture.aspect
-        let index = presets.firstIndex(where: { $0.matches(current) })
-        let next = index.map { presets[($0 + 1) % presets.count] } ?? presets[0]
-        Haptics.tick()
-        model.updateSettings { $0.capture.aspect = next }
-    }
-
-    /// `offersCustom` ends the tap cycle and the menu with the timer sheet, which the simple interface leaves out.
-    private func timerItem(delays: [Double], offersCustom: Bool) -> some View {
+    /// The advanced interface ends the tap cycle and the menu with the timer sheet.
+    private func timerItem(advanced: Bool) -> some View {
         let schedule = model.settings.capture.schedule
+        let delays = QuickActions.delays(advanced: advanced)
         let selection = Binding<Double>(
             // A burst or intervalometer matches none of the plain delays, so no row gets the checkmark.
             get: { schedule.shots == 1 ? schedule.delay : -1 },
-            set: { delay in
-                Haptics.tick()
-                model.updateSettings { $0.capture.schedule = CaptureSchedule(delay: delay) }
-            }
+            set: { delay in QuickActions.setSchedule(CaptureSchedule(delay: delay), model) }
         )
-        let mode = model.settings.mode
-        // Video and bulb start on the press itself, so a timer would never run there.
-        let applies = mode != .video && !(mode == .long && model.settings.longExposure.bulb)
         return DrawerMenuItem(model: model, title: "Timer", value: Self.timerValue(schedule),
                               isActive: !schedule.isOff,
-                              isEnabled: applies,
-                              primaryAction: { cycleTimer(through: delays, endsInSheet: offersCustom) }) {
+                              isEnabled: QuickActions.timerApplies(model),
+                              primaryAction: { cycleTimer(through: delays, endsInSheet: advanced) }) {
             Picker("Timer", selection: selection) {
                 ForEach(delays, id: \.self) { delay in
-                    Text(Self.delayTitle(delay)).tag(delay)
+                    Text(QuickActions.delayTitle(delay)).tag(delay)
                 }
             }
             .pickerStyle(.inline)
-            if offersCustom {
+            if advanced {
                 Button {
                     showsTimerSheet = true
                 } label: {
@@ -186,78 +169,51 @@ struct QuickSettingsDrawer: View {
 
     /// Off, 3s, 5s, 10s, 30s, then the timer sheet for anything else; a custom schedule steps back to Off. Without
     /// the sheet the last delay goes straight back to Off.
-    private func cycleTimer(through presets: [Double], endsInSheet: Bool) {
-        let schedule = model.settings.capture.schedule
-        guard schedule.shots == 1,
-              let index = presets.firstIndex(where: { abs($0 - schedule.delay) < 0.01 }) else {
-            setSchedule(.off)
-            return
-        }
-        if index + 1 < presets.count {
-            setSchedule(CaptureSchedule(delay: presets[index + 1]))
-        } else if !endsInSheet || timerCycleReachedCustom {
+    private func cycleTimer(through delays: [Double], endsInSheet: Bool) {
+        switch QuickActions.timerStep(after: model.settings.capture.schedule, delays: delays,
+                                      endsInSheet: endsInSheet, sheetOffered: timerCycleReachedCustom) {
+        case .schedule(let schedule):
             timerCycleReachedCustom = false
-            setSchedule(.off)
-        } else {
+            QuickActions.setSchedule(schedule, model)
+        case .sheet:
             timerCycleReachedCustom = true
             Haptics.tap()
             showsTimerSheet = true
         }
     }
 
-    private func setSchedule(_ schedule: CaptureSchedule) {
-        Haptics.tick()
-        model.updateSettings { $0.capture.schedule = schedule }
-    }
-
     private var formatItem: some View {
         let format = model.settings.capture.processedFormat
-        let choices = formatChoices
-        // A camera without HEIF has nothing to step through, unless the setting is one it can't write.
-        let canChange = choices.count > 1 || !choices.contains(format)
+        let value = QuickActions.formatValue(format)
         // Stacks write HEIF or JPEG too, so only video turns this off.
-        return DrawerButtonItem(model: model, title: "Format", value: Self.formatValue(format),
+        return DrawerButtonItem(model: model, title: "Format", value: value,
                                 isActive: format != .heif,
-                                isEnabled: model.settings.mode != .video && canChange) {
-            guard !choices.isEmpty else { return }
-            let index = choices.firstIndex(of: format)
-            let next = index.map { choices[($0 + 1) % choices.count] } ?? choices[0]
-            Haptics.tick()
-            model.updateSettings { $0.capture.processedFormat = next }
+                                isEnabled: model.settings.mode != .video && QuickActions.canChangeFormat(model)) {
+            QuickActions.stepFormat(model)
         } glyph: {
-            Text(Self.formatValue(format))
-                .font(.system(size: 10, weight: .heavy))
+            Text(value)
+                .font(.system(size: 10 * Theme.labelScale, weight: .heavy))
                 .lineLimit(1)
                 .minimumScaleFactor(0.6)
                 .padding(.horizontal, 3)
         }
     }
 
-    private var formatChoices: [ProcessedFormat] {
-        model.capabilities.heifSupported ? [.heif, .jpeg] : [.jpeg]
-    }
-
     private var resolutionItem: some View {
         let resolution = model.settings.capture.resolution
-        let choices = Self.resolutionChoices(model.capabilities)
-        let mode = model.settings.mode
-        // Stacks are merged from video frames, so a MANUAL shutter past the hardware limit ignores this too.
-        let singlePhoto = mode == .photo || (mode == .manual && !model.shutterIsStacked)
+        let choices = QuickActions.resolutionChoices(model.capabilities)
         return DrawerButtonItem(model: model, title: "Resolution", value: resolution.title,
                                 isActive: resolution != .automatic,
-                                isEnabled: singlePhoto && choices.count > 1) {
-            let index = choices.firstIndex(of: resolution)
-            let next = index.map { choices[($0 + 1) % choices.count] } ?? .automatic
-            Haptics.tick()
-            model.updateSettings { $0.capture.resolution = next }
+                                isEnabled: QuickActions.resolutionApplies(model) && choices.count > 1) {
+            QuickActions.stepResolution(model)
         } glyph: {
             if let megapixels = resolution.targetMegapixels {
                 Text("\(megapixels)")
-                    .font(.system(size: 15, weight: .bold).monospacedDigit())
+                    .font(.system(size: 15 * Theme.labelScale, weight: .bold).monospacedDigit())
             } else {
                 // Matches the setting's title, Largest.
                 Text("MAX")
-                    .font(.system(size: 11, weight: .bold))
+                    .font(.system(size: 11 * Theme.labelScale, weight: .bold))
             }
         }
     }
@@ -266,7 +222,7 @@ struct QuickSettingsDrawer: View {
 
     private var processingItem: some View {
         let setting = model.settings.capture.processing
-        let choices = Self.processingChoices(maximum: model.capabilities.maxProcessing)
+        let choices = QuickActions.processingChoices(maximum: model.capabilities.maxProcessing)
         let mode = model.settings.mode
         // Manual exposure always captures with Minimal so the camera keeps the chosen shutter and ISO.
         let forcedMinimal = model.isManualExposure
@@ -275,10 +231,7 @@ struct QuickSettingsDrawer: View {
                                 isActive: shown != .balanced,
                                 isEnabled: (mode == .photo || mode == .manual) && !forcedMinimal && choices.count > 1,
                                 hint: forcedMinimal ? "Manual exposure always uses Minimal." : nil) {
-            let index = choices.firstIndex(of: setting)
-            let next = index.map { choices[($0 + 1) % choices.count] } ?? .balanced
-            Haptics.tick()
-            model.updateSettings { $0.capture.processing = next }
+            QuickActions.stepProcessing(model)
         } glyph: {
             Image(systemName: "wand.and.stars")
         }
@@ -286,14 +239,14 @@ struct QuickSettingsDrawer: View {
 
     private var lockItem: some View {
         let locked = model.aeLocked
-        let applies = Self.aeLockApplies(model)
+        let applies = QuickActions.aeLockApplies(model)
         let value = applies ? (locked ? "On" : "Off") : "Manual"
         // With any value set by hand there is no auto exposure left to freeze, but a lock that is on can always
         // be turned off. Nothing changes while a shot or a stack runs, like the strip's AE-L chip. Exposure only:
         // focus keeps following the scene, and touch and hold on the viewfinder is the AE/AF lock.
         return DrawerButtonItem(model: model, title: "AE lock", value: value,
                                 isActive: locked && applies,
-                                isEnabled: (applies || locked) && !Self.exposureIsBusy(model.activity),
+                                isEnabled: (applies || locked) && !QuickActions.exposureIsBusy(model.activity),
                                 hint: applies ? nil : "Exposure is already set by hand.") {
             model.toggleAELock()
         } glyph: {
@@ -307,13 +260,10 @@ struct QuickSettingsDrawer: View {
         let grid = model.settings.display.grid
         let selection = Binding<GridStyle>(
             get: { grid },
-            set: { value in
-                Haptics.tick()
-                model.updateSettings { $0.display.grid = value }
-            }
+            set: { value in QuickActions.set(\.display.grid, to: value, model) }
         )
         return DrawerMenuItem(model: model, title: "Grid", value: grid.title, isActive: grid != .off,
-                              primaryAction: { cycle(\.display.grid, through: GridStyle.allCases) }) {
+                              primaryAction: { QuickActions.stepGrid(model) }) {
             Picker("Grid", selection: selection) {
                 ForEach(GridStyle.allCases) { style in
                     Text(style.title).tag(style)
@@ -328,10 +278,8 @@ struct QuickSettingsDrawer: View {
     /// The simple interface's grid is the rule of thirds or nothing.
     private var simpleGridItem: some View {
         let isOn = model.settings.display.grid != .off
-        let shown = CameraSettings.simpleGrids.first(where: { $0 != .off }) ?? .thirds
         return DrawerButtonItem(model: model, title: "Grid", value: isOn ? "On" : "Off", isActive: isOn) {
-            Haptics.tap()
-            model.updateSettings { $0.display.grid = isOn ? .off : shown }
+            QuickActions.stepGrid(model)
         } glyph: {
             Image(systemName: "square.grid.3x3")
         }
@@ -340,8 +288,7 @@ struct QuickSettingsDrawer: View {
     private var levelItem: some View {
         let isOn = model.settings.display.showLevel
         return DrawerButtonItem(model: model, title: "Level", value: isOn ? "On" : "Off", isActive: isOn) {
-            Haptics.tap()
-            model.updateSettings { $0.display.showLevel.toggle() }
+            QuickActions.toggle(\.display.showLevel, model)
         } glyph: {
             Image(systemName: "level")
         }
@@ -350,7 +297,7 @@ struct QuickSettingsDrawer: View {
     private var histogramItem: some View {
         let style = model.settings.display.histogram
         return DrawerButtonItem(model: model, title: "Histogram", value: style.title, isActive: style != .off) {
-            cycle(\.display.histogram, through: HistogramStyle.allCases)
+            QuickActions.stepHistogram(model)
         } glyph: {
             Image(systemName: "chart.bar.fill")
         }
@@ -359,8 +306,7 @@ struct QuickSettingsDrawer: View {
     private var zebraItem: some View {
         let isOn = model.settings.display.zebras
         return DrawerButtonItem(model: model, title: "Zebras", value: isOn ? "On" : "Off", isActive: isOn) {
-            Haptics.tap()
-            model.updateSettings { $0.display.zebras.toggle() }
+            QuickActions.toggle(\.display.zebras, model)
         } glyph: {
             ZebraGlyph()
         }
@@ -368,9 +314,9 @@ struct QuickSettingsDrawer: View {
 
     private var peakingItem: some View {
         let peaking = model.settings.display.peaking
-        return DrawerButtonItem(model: model, title: "Peaking", value: Self.peakingValue(peaking),
+        return DrawerButtonItem(model: model, title: "Peaking", value: QuickActions.peakingValue(peaking),
                                 isActive: peaking != .off) {
-            cycle(\.display.peaking, through: PeakingMode.allCases)
+            QuickActions.stepPeaking(model)
         } glyph: {
             Image(systemName: "scope")
         }
@@ -379,24 +325,13 @@ struct QuickSettingsDrawer: View {
     private var falseColorItem: some View {
         let isOn = model.settings.display.falseColor
         return DrawerButtonItem(model: model, title: "False color", value: isOn ? "On" : "Off", isActive: isOn) {
-            Haptics.tap()
-            model.updateSettings { $0.display.falseColor.toggle() }
+            QuickActions.toggle(\.display.falseColor, model)
         } glyph: {
             Image(systemName: "paintpalette")
         }
     }
 
     // MARK: - Helpers
-
-    /// Steps a setting to the value after the current one, wrapping around.
-    private func cycle<Value: Equatable>(_ keyPath: WritableKeyPath<CameraSettings, Value>, through values: [Value]) {
-        guard !values.isEmpty else { return }
-        let current = model.settings[keyPath: keyPath]
-        let index = values.firstIndex(of: current)
-        let next = index.map { values[($0 + 1) % values.count] } ?? values[0]
-        Haptics.tick()
-        model.updateSettings { $0[keyPath: keyPath] = next }
-    }
 
     private static func timerValue(_ schedule: CaptureSchedule) -> String {
         if schedule.isOff { return "Off" }
@@ -405,69 +340,6 @@ struct QuickSettingsDrawer: View {
             return Formatting.compactDuration(schedule.delay) + " \u{00D7}\(schedule.shots)"
         }
         return "\(schedule.shots) shots"
-    }
-
-    /// A menu row, worded like the other touch and hold menus ("3 s"); the item's own value stays compact.
-    private static func delayTitle(_ delay: Double) -> String {
-        delay > 0 ? HoldMenuText.time(delay) : "Off"
-    }
-
-    private static func formatValue(_ format: ProcessedFormat) -> String {
-        format == ProcessedFormat.none ? "RAW" : format.title
-    }
-
-    private static func peakingValue(_ mode: PeakingMode) -> String {
-        switch mode {
-        case .off: return "Off"
-        case .manualFocus: return "MF"
-        case .always: return "On"
-        }
-    }
-
-    /// Sizes this camera can shoot. A size counts when one of the lens's photo dimensions is within 20% of it,
-    /// because sensors sold as 48 MP deliver 48.8 MP and 12 MP ones 12.2 MP.
-    private static func resolutionChoices(_ capabilities: CameraCapabilities) -> [PhotoResolution] {
-        var choices: [PhotoResolution] = [.automatic]
-        for option in [PhotoResolution.mp12, .mp24, .mp48] {
-            guard let target = option.targetMegapixels, target > 0 else { continue }
-            let wanted = Double(target)
-            let available = capabilities.photoDimensions.contains { size in
-                let megapixels = Double(size.width) * Double(size.height) / 1_000_000
-                return abs(megapixels - wanted) / wanted < 0.2
-            }
-            if available { choices.append(option) }
-        }
-        return choices
-    }
-
-    /// Levels up to what the camera reports; asking for more would only be clamped by the model.
-    private static func processingChoices(maximum: ProcessingLevel) -> [ProcessingLevel] {
-        let order: [ProcessingLevel] = [.minimal, .balanced, .maximum]
-        guard let limit = order.firstIndex(of: maximum) else { return order }
-        return Array(order[...limit])
-    }
-
-    /// When the model honours AE lock: only while auto exposure owns every value. LONG's Blur and Trails meter
-    /// each frame, so the lock holds there too as long as ISO and aperture are auto.
-    private static func aeLockApplies(_ model: CameraModel) -> Bool {
-        switch model.settings.mode {
-        case .photo, .night:
-            return true
-        case .manual, .video:
-            return !model.isManualExposure
-        case .long:
-            // A fixed Blur or Trails frame shutter leaves no auto exposure to freeze, as in the strip's AE-L chip.
-            return model.settings.longExposure.blend != .additive && model.settings.longExposure.frameSeconds == nil
-                && model.isISOAuto && model.isApertureAuto
-        }
-    }
-
-    /// A change of exposure in the middle of a shot or a stack would end up in the picture.
-    private static func exposureIsBusy(_ activity: CaptureActivity) -> Bool {
-        switch activity {
-        case .capturing, .stacking, .saving: return true
-        case .idle, .countdown, .recording: return false
-        }
     }
 }
 
@@ -528,7 +400,7 @@ private struct DrawerMenuItem<Glyph: View, Options: View>: View {
         .buttonStyle(DrawerPressStyle(isPressed: press.isPressed))
         .accessibilityLabel(title)
         .accessibilityValue(value)
-        .accessibilityHint("Touch and hold for more options.")
+        .accessibilityHint(HoldMenuText.hint)
         .overlay {
             MenuOnHoldLayer(press: press, action: primaryAction, options: options)
         }
@@ -545,19 +417,21 @@ private struct DrawerItemLabel<Glyph: View>: View {
     let glyph: Glyph
 
     var body: some View {
+        // Larger labels makes the glyphs and both lines a fifth bigger; the columns still hold them.
+        let scale = Theme.labelScale
         VStack(spacing: 5) {
             Upright(model: model) { glyph }
-                .font(.system(size: 16, weight: .semibold))
+                .font(.system(size: 16 * scale, weight: .semibold))
                 .foregroundStyle(isActive ? Theme.accent : Theme.primaryText)
                 .frame(width: 44, height: 44)
                 // Filled circles instead of glass: a dozen glass shapes on a glass panel would cost frames.
                 .background(isActive ? Theme.accent.opacity(0.2) : Color.white.opacity(0.12), in: Circle())
             VStack(spacing: 1) {
                 Text(title)
-                    .font(.system(size: 10, weight: .medium))
+                    .font(.system(size: 10 * scale, weight: .medium))
                     .foregroundStyle(Theme.secondaryText)
                 Text(value)
-                    .font(.system(size: 11, weight: .semibold).monospacedDigit())
+                    .font(.system(size: 11 * scale, weight: .semibold).monospacedDigit())
                     .foregroundStyle(isActive ? Theme.accent : Theme.primaryText)
                     .contentTransition(.opacity)
             }
@@ -581,28 +455,6 @@ private struct DrawerPressStyle: ButtonStyle {
         configuration.label
             .scaleEffect(pressed ? 0.92 : 1)
             .animation(Theme.snappy, value: pressed)
-    }
-}
-
-/// Diagonal stripes in a rounded square, the usual zebra symbol; SF Symbols has none.
-private struct ZebraGlyph: View {
-    var body: some View {
-        Canvas { context, size in
-            let rect = CGRect(origin: .zero, size: size)
-            let outline = Path(roundedRect: rect.insetBy(dx: 0.75, dy: 0.75), cornerRadius: 3.5)
-            var stripes = Path()
-            var x = -size.height
-            while x < size.width {
-                stripes.move(to: CGPoint(x: x, y: size.height))
-                stripes.addLine(to: CGPoint(x: x + size.height, y: 0))
-                x += 4.5
-            }
-            context.stroke(outline, with: .foreground, lineWidth: 1.5)
-            context.clip(to: outline)
-            context.stroke(stripes, with: .foreground, lineWidth: 1.5)
-        }
-        .frame(width: 18, height: 18)
-        .accessibilityHidden(true)
     }
 }
 

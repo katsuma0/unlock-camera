@@ -19,9 +19,10 @@ final class LocationProvider: NSObject, CLLocationManagerDelegate {
     override init() {
         super.init()
         manager.delegate = self
-        // Apple's Camera tags photos to a few metres; the cost is paid only while tags are on and the camera is in use.
+        // The most precise fix there is. Its battery cost is paid only while tags are on and the camera is in use.
         manager.desiredAccuracy = kCLLocationAccuracyBest
-        // Every fix, so a phone that stays put on a tripod still has a fresh one when a long session's next shot ends.
+        // Every fix, not only those after a move: a phone that stays put on a tripod still has a fresh one at its next
+        // shot.
         manager.distanceFilter = kCLDistanceFilterNone
         // A phone on a tripod looks like a stop to iOS, which would pause updates and let the fix go stale.
         manager.pausesLocationUpdatesAutomatically = false

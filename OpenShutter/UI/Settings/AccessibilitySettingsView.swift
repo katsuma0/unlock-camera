@@ -40,12 +40,10 @@ struct AccessibilitySettingsView: View {
             Section {
                 Toggle("Speak status", isOn: model.settingBinding(\.accessibility.speakStatus))
             } footer: {
-                Text("Says the countdown out loud, and when a night or long exposure shot starts and ends. It stays quiet while filming, so the video doesn't pick it up. With VoiceOver on, VoiceOver says it instead.")
-            }
-
-            Section {
-            } footer: {
-                Text("Bold Text, Reduce Transparency, Increase Contrast and VoiceOver in iOS Settings work in the camera too.")
+                SettingsFooter([
+                    "Says the countdown out loud, and when a night or long exposure shot starts and ends. It stays quiet while filming and with Live Photo on, so no recording picks it up. With VoiceOver on, VoiceOver says it instead.",
+                    "Bold Text, Reduce Transparency, Increase Contrast and VoiceOver in iOS Settings work in the camera too.",
+                ])
             }
         }
         .navigationTitle("Accessibility")

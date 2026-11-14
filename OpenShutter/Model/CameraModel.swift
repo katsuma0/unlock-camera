@@ -27,15 +27,15 @@ final class CameraModel {
     }
 
     private(set) var activity: CaptureActivity = .idle {
-        didSet { if oldValue != activity { updateIdleTimer() } }
+        didSet { if oldValue != activity { activityDidChange(from: oldValue) } }
     }
     /// The countdown running is only the wait a tripod scene takes after the tap, not a self timer.
     private(set) var isSettling = false
     /// Photos from their request until they are saved. The session can't change lens or mode under them.
     private(set) var photosInFlight = 0
     /// Counts camera swaps started by select(): lens buttons, double tap, Camera Control Lens picks, flips, queued and
-    /// deferred picks. The screen blurs the preview for each. A pinch or the zoom dial swaps without it, because the
-    /// finger is still framing.
+    /// deferred picks, and the swap step of a lens button's zoom. isSwitchingLensVisibly says while one runs, which is
+    /// what the screen veils on. A pinch or the zoom wheel swaps without either, because the finger is still framing.
     private(set) var lensSwitchCount = 0
     /// A focus or white balance bracket is running: one capture made of several photos, stopped with the shutter.
     private(set) var bracketInProgress = false
@@ -43,7 +43,11 @@ final class CameraModel {
     private(set) var bracketStopping = false
     private(set) var stackProgress: StackProgress?
     private(set) var intervalometer: IntervalometerStatus? {
-        didSet { updateIdleTimer() }
+        didSet {
+            updateIdleTimer()
+            // A run that ends while the gallery is up lets the camera stop under it.
+            if (oldValue == nil) != (intervalometer == nil) { updateGalleryPause() }
+        }
     }
     private(set) var recordingDuration: TimeInterval = 0
     private(set) var lastCapture: CaptureResult?
@@ -83,7 +87,10 @@ final class CameraModel {
     }
     var isSettingsPresented = false
     var isDrawerOpen = false
-    var isReviewPresented = false
+    /// The gallery is up (the editor opens inside it). The camera stops under it (updateGalleryPause).
+    var isReviewPresented = false {
+        didSet { if oldValue != isReviewPresented { updateGalleryPause() } }
+    }
 
     let backend: CameraBackend
     var isSimulated: Bool { backend.isSimulated }
@@ -114,8 +121,8 @@ final class CameraModel {
     @ObservationIgnored private var bulbHoldActive = false
     @ObservationIgnored private var lensSwitchInFlight = false
     /// The newest zoom asked for while a lens switch was reconfiguring the session, or one that needs another lens
-    /// while photos were still being saved.
-    @ObservationIgnored private var pendingZoom: (value: Double, animated: Bool)?
+    /// while photos were still being saved. continuing: a finger was still down, so the lens choice keeps its slack.
+    @ObservationIgnored private var pendingZoom: (value: Double, animated: Bool, continuing: Bool)?
     /// The newest lens chosen while a lens switch was reconfiguring the session or photos were still being saved.
     @ObservationIgnored private var pendingPreset: LensPreset?
     /// A long press focused once and is holding that distance (the AF half of AE/AF LOCK). Observed, because the
@@ -311,14 +318,14 @@ final class CameraModel {
     }
 
     /// The target stays on the button until the motion has landed, so the button doesn't count through the values
-    /// in between at the readings' rate. A newer request or a lens swap still running keeps it.
+    /// in between at the readings' rate. A newer request owns the target from then on: it holds or clears its own.
+    /// Called only after a transition's last step, so no swap of the same request is still running.
     private func releaseZoomTarget(after seconds: Double, generation: Int) {
         zoomTargetTask?.cancel()
         let wait = max(seconds.isFinite ? seconds : 0, 0) + Self.zoomTargetLinger
         zoomTargetTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
-            guard !Task.isCancelled, let self, generation == self.zoomRequestGeneration,
-                  !self.lensSwitchInFlight else { return }
+            guard !Task.isCancelled, let self, generation == self.zoomRequestGeneration else { return }
             self.clearZoomTarget(resync: true)
         }
     }
@@ -558,12 +565,17 @@ final class CameraModel {
         guard !hasStarted, !needsWelcome, !inBackground else { return }
         hasStarted = true
         backend.delegate = self
-        Haptics.isEnabled = settings.controls.haptics
+        mirrorHaptics()
         Haptics.prepare()
         motionMonitor.onUpdate = { [weak self] state in
             guard let self else { return }
             if self.motion.isSteady, !state.isSteady { self.steadyLostAt = Date() }
             self.motion = state
+            self.refreshSteadyStatus()
+            self.updateDimming()
+        }
+        motionMonitor.onDriftChange = { [weak self] in
+            self?.refreshSteadyStatus()
         }
 
         authorization = backend.authorizationStatus()
@@ -576,10 +588,13 @@ final class CameraModel {
 
     func stop() {
         cancelSchedule()
+        cancelZoomTransition()
         motionMonitor.stop()
         locationProvider.setEnabled(false)
         backend.stop()
         backendRunning = false
+        dimmer.restore()
+        spoken.stop()
     }
 
     func sceneDidBecomeActive() {
@@ -603,6 +618,7 @@ final class CameraModel {
 
     func sceneDidEnterBackground() {
         inBackground = true
+        spoken.stop()
         guard backendRunning else { return }
         // The scene in front of the lens will have changed by the time the app comes back.
         releaseLock()
@@ -610,6 +626,7 @@ final class CameraModel {
         // A lens change still waiting for photos to save would otherwise land on the stopped session.
         pendingPreset = nil
         pendingZoom = nil
+        cancelZoomTransition()
         if activity == .recording {
             stopRecording()
         }
@@ -647,8 +664,30 @@ final class CameraModel {
         }
     }
 
+    /// Everything that follows what the shutter is doing: Auto-Lock, the haptics hold, the drift crosses, the status
+    /// pill, the battery saver and the gallery's pause.
+    private func activityDidChange(from old: CaptureActivity) {
+        updateIdleTimer()
+        // A tap of the Taptic Engine shakes a phone on a tripod: none while frames come in or a settle runs.
+        var settling = false
+        if case .countdown = activity { settling = countdownIsSilent }
+        Haptics.isSuppressed = activity == .stacking || settling
+        if old == .stacking, activity != .stacking {
+            motionMonitor.endDrift()
+        }
+        refreshSteadyStatus()
+        updateDimming()
+        updateGalleryPause()
+    }
+
     private func startBackend() async {
         guard !backendRunning, !inBackground else { return }
+        // The gallery or the editor is up (a return from the background, or a start that waited): the camera starts
+        // when it closes.
+        if galleryWantsCameraOff {
+            pausedForGallery = true
+            return
+        }
         backendRunning = true
         // A starting camera runs whatever bias it had until applyAll sends these settings.
         lastBiasCommand = .distantFuture
@@ -663,6 +702,7 @@ final class CameraModel {
             sessionState = .running
         }
         refreshLenses()
+        requestedDisplayZoom = settingsDisplayZoom
         applyAll()
         if settings.mode == .video {
             await backend.configureForVideo(settings.video)
@@ -675,8 +715,12 @@ final class CameraModel {
     }
 
     private func refreshLenses() {
-        lenses = backend.lenses
-        lensPresets = backend.lensPresets
+        // Every capabilities update comes through here, and Observation tells each reader of a write even when the
+        // value is the same.
+        let lenses = backend.lenses
+        if lenses != self.lenses { self.lenses = lenses }
+        let presets = backend.lensPresets
+        if presets != lensPresets { lensPresets = presets }
         updateActivePreset()
     }
 
@@ -803,9 +847,27 @@ final class CameraModel {
 
     /// haptic: false for the Camera Control, which clicks on its own, and for a choice replayed after a wait, whose
     /// click already played when it was made.
+    ///
+    /// A lens button zooms to its value instead of cutting to it. On its own lens it glides there. To a longer lens
+    /// it zooms the lens in use in to that framing and swaps at the end, where both lenses frame the same picture; to
+    /// a wider one it swaps at the framing in view and zooms the new lens out. Only the swap is veiled
+    /// (isSwitchingLensVisibly). The selfie camera and Reduce Motion keep the cut.
     func select(_ preset: LensPreset, haptic: Bool = true) {
+        select(preset, haptic: haptic, replaying: false)
+    }
+
+    /// replaying: a choice that waited for a swap or a shot (applyPendingLensChange). Its button and target are
+    /// already the ones showing, which a new tap on the same button would leave alone.
+    private func select(_ preset: LensPreset, haptic: Bool, replaying: Bool) {
         guard !activity.isBusy else { return }
+        // A second tap on the button a glide is already heading to: planned again from where the picture is midway,
+        // it would cut the glide short with a swap.
+        if !replaying, let target = zoomTarget, preset.id == activePresetID, abs(target - preset.displayZoom) < 0.001 {
+            if haptic { Haptics.tap() }
+            return
+        }
         lastZoomCommand = Date()
+        let generation = nextZoomGeneration()
         // Quick taps, or a scroll through the Camera Control's lens picker, end on the lens chosen last.
         guard !lensSwitchInFlight else {
             pendingPreset = preset
@@ -824,44 +886,97 @@ final class CameraModel {
         // This choice is newer than any still waiting.
         pendingPreset = nil
         pendingZoom = nil
-        if let lens = lenses.first(where: { $0.id == preset.lensID }), !lens.isFront {
+        let targetLens = lenses.first(where: { $0.id == preset.lensID })
+        if let targetLens, !targetLens.isFront {
             lastBackPresetID = preset.id
         }
+        // A transition still on its way plans from where it was going; the picture itself is somewhere between,
+        // which is what a swap has to match.
+        let from = requestedDisplayZoom
+        let framing = zoomTarget == nil ? from : readings.displayZoom
+        let to = preset.displayZoom
         activePresetID = preset.id
         settings.lensID = preset.lensID
         settings.zoom = preset.zoomFactor
+        requestedDisplayZoom = to
         scheduleSave()
         if haptic { Haptics.tap() }
         if current == preset.lensID {
-            backend.setZoomFactor(preset.zoomFactor, rampRate: Double(CameraService.zoomRampRate))
+            holdZoomTarget(to)
+            rampZoom(toFactor: preset.zoomFactor, from: from, to: to, generation: generation)
             return
         }
         // The locked point and exposure belong to the lens being left.
         releaseLock()
-        lensSwitchCount &+= 1
-        lensSwitchInFlight = true
-        Task {
-            await backend.select(preset)
-            lensSwitchInFlight = false
-            refreshLenses()
-            applyCameraControls()
-            applyPendingLensChange()
+        guard let currentLens = activeLens, let targetLens, !currentLens.isFront, !targetLens.isFront else {
+            // The selfie camera frames another scene: a cut under the veil, as lens changes have always been.
+            clearZoomTarget(resync: false)
+            switchLens(to: preset, generation: generation)
+            return
+        }
+        holdZoomTarget(to)
+        guard !reducesMotion, framing.isFinite, framing > 0 else {
+            switchLens(to: preset, generation: generation)
+            return
+        }
+        if to > from {
+            // In: the lens in use zooms the whole way, digitally past its own reach, then the longer lens takes over
+            // at the same framing. The swap at the end reads as the camera settling, not as a stutter mid-motion.
+            let factor = clampZoomFactor(to / max(currentLens.relativeZoom, 0.01))
+            rampZoom(toFactor: factor, from: from, to: to, generation: generation, endsTransition: false)
+            // No margin: the swap starting on the ramp's last frames is hidden by the veil, a late one is not.
+            let wait = ZoomMath.rampDuration(from: from, to: to)
+            Task { [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+                guard let self, generation == self.zoomRequestGeneration, self.backendRunning else { return }
+                // A shot started meanwhile keeps its lens; the swap waits for it like any lens change.
+                guard !self.activity.isBusy, self.photosInFlight == 0, !self.lensSwitchInFlight else {
+                    self.pendingPreset = preset
+                    return
+                }
+                self.switchLens(to: preset, generation: generation)
+            }
+        } else {
+            // Out: the wider lens takes over at the framing in view (the backend keeps the factor inside what that
+            // lens can do), then zooms out to the button's value.
+            let start = LensPreset(lensID: targetLens.id, zoomFactor: framing / max(targetLens.relativeZoom, 0.01),
+                                   displayZoom: framing)
+            switchLens(to: start, generation: generation) { [weak self] in
+                self?.rampZoom(toFactor: preset.zoomFactor, from: framing, to: to, generation: generation)
+            }
         }
     }
 
-    /// Pinch and zoom dial. Display zoom is relative to the back wide camera; switches lenses when
-    /// settings.controls.autoLensSwitching is on and the zoom crosses another lens.
+    /// Pinch, the zoom wheel, VoiceOver steps and the zoom dial. Display zoom is relative to the back wide camera;
+    /// switches lenses when settings.controls.autoLensSwitching is on and the zoom crosses another lens.
+    /// animated glides at a lens button's speed (VoiceOver, the wheel's landing, the lens buttons while filming);
+    /// otherwise the zoom follows the finger. continuing: a finger is still down, so the lens in use keeps the zoom a
+    /// little past the next lens's own value instead of swapping back and forth at the boundary; the lift then
+    /// chooses strictly.
     func setDisplayZoom(_ zoom: Double, animated: Bool, continuing: Bool = false) {
         guard zoom.isFinite, zoom > 0 else { return }
         lastZoomCommand = Date()
+        let generation = nextZoomGeneration()
+        let from = requestedDisplayZoom
+        // Only a glide shows a target; a finger's zoom lands at once.
+        if animated {
+            holdZoomTarget(zoom)
+        } else {
+            clearZoomTarget(resync: false)
+        }
         // A pinch or a flicked dial keeps going while the session switches lenses; dropping those values would
         // leave the zoom short of where the finger stopped.
         guard !lensSwitchInFlight else {
-            pendingZoom = (zoom, animated)
+            pendingZoom = (zoom, animated, continuing)
             pendingPreset = nil
+            requestedDisplayZoom = zoom
             return
         }
-        guard let activeLens = activeLens else { return }
+        guard let activeLens = activeLens else {
+            // No camera yet: nothing glides, so nothing may keep showing a target.
+            clearZoomTarget(resync: false)
+            return
+        }
 
         var targetLens = activeLens
         // Photos still being saved keep the session on its lens. A zoom that wants another lens zooms this one for
@@ -869,9 +984,15 @@ final class CameraModel {
         var waitsForPhotos = false
         if settings.controls.autoLensSwitching, !activeLens.isFront, !activity.isBusy {
             let backLenses = lenses.filter { !$0.isFront && $0.kind != .external }
-            // The longest lens that still covers this zoom without cropping past its own field of view.
-            if let best = backLenses.filter({ $0.relativeZoom <= zoom + 0.001 }).max(by: { $0.relativeZoom < $1.relativeZoom })
-                ?? backLenses.min(by: { $0.relativeZoom < $1.relativeZoom }) {
+                .sorted { $0.relativeZoom < $1.relativeZoom }
+            // The longest lens that still covers this zoom without cropping past its own field of view, with some
+            // slack for the lens in use while a finger is down.
+            let index = ZoomMath.lensIndex(for: zoom, lensZooms: backLenses.map(\.relativeZoom),
+                                           current: backLenses.firstIndex(where: { $0.id == activeLens.id }),
+                                           currentMaxFactor: capabilities.zoomRange.upperBound,
+                                           continuing: continuing)
+            if let index {
+                let best = backLenses[index]
                 if photosInFlight == 0 {
                     targetLens = best
                 } else {
@@ -881,7 +1002,7 @@ final class CameraModel {
         }
         // The newest request wins, and a zoom back within this lens's own range cancels a switch still waiting.
         pendingPreset = nil
-        pendingZoom = waitsForPhotos ? (zoom, false) : nil
+        pendingZoom = waitsForPhotos ? (zoom, false, false) : nil
 
         let base = max(targetLens.relativeZoom, 0.01)
         let factor = zoom / base
@@ -892,15 +1013,22 @@ final class CameraModel {
             lensSwitchInFlight = true
             activePresetID = preset.id
             settings.lensID = targetLens.id
+            requestedDisplayZoom = zoom
             Task {
                 await backend.select(preset)
                 lensSwitchInFlight = false
+                lastZoomCommand = Date()
                 refreshLenses()
                 let clamped = clampZoomFactor(factor)
                 settings.zoom = clamped
+                // A lens that can't reach the asked zoom is where a gesture goes on from.
+                if generation == zoomRequestGeneration { requestedDisplayZoom = clamped * base }
                 backend.setZoomFactor(clamped, rampRate: nil)
                 updateActivePreset()
                 scheduleSave()
+                if animated, generation == zoomRequestGeneration {
+                    releaseZoomTarget(after: 0, generation: generation)
+                }
                 applyPendingLensChange()
             }
             return
@@ -908,7 +1036,13 @@ final class CameraModel {
 
         let clamped = clampZoomFactor(factor)
         settings.zoom = clamped
-        backend.setZoomFactor(clamped, rampRate: animated ? Double(CameraService.zoomRampRate) : nil)
+        requestedDisplayZoom = clamped * base
+        if animated {
+            backend.setZoomFactor(clamped, rampRate: ZoomMath.rampRate(from: from, to: zoom))
+            releaseZoomTarget(after: ZoomMath.rampDuration(from: from, to: zoom), generation: generation)
+        } else {
+            backend.setZoomFactor(clamped, rampRate: nil)
+        }
         updateActivePreset(factor: clamped)
         scheduleSave()
     }
@@ -917,10 +1051,10 @@ final class CameraModel {
     private func applyPendingLensChange() {
         if let preset = pendingPreset {
             pendingPreset = nil
-            select(preset, haptic: false)
+            select(preset, haptic: false, replaying: true)
         } else if let pending = pendingZoom {
             pendingZoom = nil
-            setDisplayZoom(pending.value, animated: pending.animated)
+            setDisplayZoom(pending.value, animated: pending.animated, continuing: pending.continuing)
         }
     }
 
@@ -1295,6 +1429,7 @@ final class CameraModel {
             }
             // A second tap ends a bulb or long exposure and keeps what it has, like releasing a cable release.
             backend.finishStackEarly()
+            motionMonitor.endDrift()
             return
         case .countdown:
             cancelSchedule()
@@ -1323,13 +1458,16 @@ final class CameraModel {
         // Earlier photos are still being processed and saved: only another plain photo can start alongside them.
         if photosInFlight > 0, !(pressTakesPlainPhoto && photosInFlight < Self.maxPhotosInFlight) { return }
         var schedule = settings.capture.schedule
-        // A scene shot from a tripod waits a moment first, so the tap on the shutter isn't in the picture. A self
-        // timer counts toward the wait but never shortens it, and a bulb starts when it is told to.
-        let settle = isBulbMode ? 0 : (sceneRecipe?.settleSeconds ?? 0)
+        // A scene shot from a tripod waits a moment first, so the tap on the shutter isn't in the picture, and so
+        // does NIGHT on a tripod. A self timer counts toward the wait but never shortens it, and a bulb starts when it
+        // is told to.
+        let settle = isBulbMode ? 0 : settleSeconds
         isSettling = settle > 0 && schedule.delay == 0
         if settle > 0 {
             schedule.delay = max(schedule.delay, settle)
         }
+        // The status pill keeps what this shot needs from the press on; the plan moves with the light meanwhile.
+        captureNeed = liveSteadyNeed
         if schedule.isOff || isBulbMode {
             scheduleTask = Task { [weak self] in
                 await self?.performCapture(bulb: self?.isBulbMode ?? false, releaseAtExposure: true)
@@ -1366,6 +1504,8 @@ final class CameraModel {
     func shutterHoldBegan() {
         guard isBulbMode, activity == .idle, photosInFlight == 0, canCapture else { return }
         bulbHoldActive = true
+        // A finger on the shutter keeps the screen lit.
+        updateDimming()
         scheduleTask = Task { [weak self] in
             await self?.performCapture(bulb: true)
         }
@@ -1376,7 +1516,9 @@ final class CameraModel {
         bulbHoldActive = false
         if activity == .stacking {
             backend.finishStackEarly()
+            motionMonitor.endDrift()
         }
+        updateDimming()
     }
 
     /// Stops what is running and keeps the result (stack so far, intervalometer, timer).
@@ -1391,6 +1533,8 @@ final class CameraModel {
         cancelSchedule()
         if activity == .stacking {
             backend.finishStackEarly()
+            // No more frames come in, so the crosses have nothing to follow.
+            motionMonitor.endDrift()
         }
         if activity == .recording {
             stopRecording()
@@ -1402,6 +1546,7 @@ final class CameraModel {
         cancelSchedule()
         if activity == .stacking {
             backend.cancelStack()
+            motionMonitor.endDrift()
         }
     }
 
@@ -1409,13 +1554,25 @@ final class CameraModel {
         settings.mode == .long && settings.longExposure.bulb
     }
 
+    /// The wait before a shot that has to start still: the tripod scene's, or a second for NIGHT on a tripod (the
+    /// Tripod choice, or Automatic while the phone is steady), where the press itself would shake the first frames.
+    private var settleSeconds: Double {
+        if let recipe = sceneRecipe { return recipe.settleSeconds }
+        if settings.mode == .night, nightStability != .handheld { return Self.nightTripodSettleSeconds }
+        return 0
+    }
+
     private func cancelSchedule() {
         scheduleTask?.cancel()
         scheduleTask = nil
         intervalometer = nil
         isSettling = false
+        if isWaitingForSteady { isWaitingForSteady = false }
         countdownEndedAt = nil
+        timerSecondsForShot = nil
         if case .countdown = activity {
+            // A countdown called off takes its shot's need with it. A stack an intervalometer stop ends keeps its own.
+            captureNeed = nil
             activity = .idle
         }
     }
@@ -1426,8 +1583,12 @@ final class CameraModel {
             guard let self else { return }
             let start = Date()
             if schedule.delay > 0 {
-                let completed = await self.countdown(schedule.delay, haptics: !silentCountdown)
+                // A settle (the silent countdown) waits a little longer for a phone that still moves.
+                let completed = await self.countdown(schedule.delay, haptics: !silentCountdown,
+                                                     untilSteady: silentCountdown)
                 guard completed else { return }
+                // The first shot's metadata says how long it waited, any wait for the phone included.
+                self.timerSecondsForShot = Date().timeIntervalSince(start)
             }
             for index in 0..<schedule.shots {
                 if Task.isCancelled { break }
@@ -1435,6 +1596,7 @@ final class CameraModel {
                     self.intervalometer = IntervalometerStatus(shot: index + 1, total: schedule.shots, nextShotAt: nil)
                 }
                 await self.performCapture(bulb: false)
+                self.timerSecondsForShot = nil
                 if Task.isCancelled { break }
                 let finishedAt = Date().timeIntervalSince(start)
                 guard let next = schedule.nextStartTime(afterShot: index, finishedAt: finishedAt) else { break }
@@ -1452,22 +1614,47 @@ final class CameraModel {
         }
     }
 
-    /// Counts down whole seconds. Returns false when cancelled.
-    private func countdown(_ seconds: Double, haptics: Bool = true) async -> Bool {
+    /// Counts down whole seconds. Returns false when cancelled. haptics: false for a settle, during which nothing
+    /// may tap the phone (Haptics.isSuppressed). untilSteady: a settle, which waits a little longer for a phone that
+    /// still moves when it runs out.
+    private func countdown(_ seconds: Double, haptics: Bool = true, untilSteady: Bool = false) async -> Bool {
+        countdownIsSilent = !haptics
+        // A self timer's count is said out loud (Speak status); a settle alone has nothing to count for anyone.
+        let speaks = !isSettling
         var remaining = seconds
         while remaining > 0 {
             if Task.isCancelled { return false }
-            activity = .countdown(remaining: Int(remaining.rounded(.up)))
+            let shown = Int(remaining.rounded(.up))
+            activity = .countdown(remaining: shown)
             if haptics { Haptics.tap() }
+            if speaks { speak(String(shown)) }
             let step = remaining - (remaining.rounded(.up) - 1)
             let sleep = step > 0 ? step : 1
             try? await Task.sleep(nanoseconds: UInt64(sleep * 1_000_000_000))
             remaining -= sleep
         }
         if Task.isCancelled { return false }
+        if untilSteady {
+            guard await waitUntilSteady() else { return false }
+        }
         isSettling = false
         countdownEndedAt = Date()
         activity = .idle
+        return true
+    }
+
+    /// A tripod still swaying from the press would smear the first frames. The countdown holds on its last second
+    /// for up to settleExtraSeconds while the sensor says the phone moves. Without a sensor it can't tell, and
+    /// doesn't wait. Returns false when cancelled.
+    private func waitUntilSteady() async -> Bool {
+        guard motion.isAvailable, !motion.isSteady else { return true }
+        isWaitingForSteady = true
+        defer { if isWaitingForSteady { isWaitingForSteady = false } }
+        let deadline = Date().addingTimeInterval(Self.settleExtraSeconds)
+        while !motion.isSteady, Date() < deadline {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            if Task.isCancelled { return false }
+        }
         return true
     }
 
@@ -1506,8 +1693,10 @@ final class CameraModel {
     }
 
     /// releaseAtExposure ends .capturing at the exposure (cameraBackendWillCapture) while this task still awaits
-    /// processing and the save, so the next photo can start.
-    private func performPhoto(bracket: BracketPlan, releaseAtExposure: Bool = false) async {
+    /// processing and the save, so the next photo can start. position: this photo's place in a focus or white
+    /// balance bracket, for its metadata.
+    private func performPhoto(bracket: BracketPlan, position: BracketPosition? = nil,
+                              releaseAtExposure: Bool = false) async {
         photoGeneration &+= 1
         let generation = photoGeneration
         photosInFlight += 1
@@ -1525,8 +1714,10 @@ final class CameraModel {
             if photosInFlight == 0, !lensSwitchInFlight, !activity.isBusy, backendRunning {
                 applyPendingLensChange()
             }
+            // The gallery opened while this photo was saving stops the camera once it is in.
+            updateGalleryPause()
         }
-        let request = makePhotoRequest(bracket: bracket)
+        let request = makePhotoRequest(bracket: bracket, position: position)
         // Read before the shot, since the zoom can change while it is processed.
         let rawNeedsOneX = rawBlockedByZoom
         do {
@@ -1549,7 +1740,10 @@ final class CameraModel {
 
     private func performFocusBracket() async {
         let center = effectiveFocus.lensPosition ?? readings.lensPosition
-        let positions = settings.capture.bracket.focusPositions(center: center)
+        let plan = settings.capture.bracket
+        let positions = plan.focusPositions(center: center)
+        // One id for the set, so a reader can put the photos back together.
+        let group = UUID()
         // One capture from the first frame to the last: the shutter stops it, and lens, mode and focus stay put
         // between frames.
         bracketInProgress = true
@@ -1559,14 +1753,16 @@ final class CameraModel {
             bracketStopping = false
             if activity == .capturing { activity = .idle }
         }
-        for position in positions {
+        for (index, position) in positions.enumerated() {
             if Task.isCancelled { break }
             backend.apply(focus: .manual(position))
             // The lens needs a moment to travel; there is no completion callback across the backend boundary.
             try? await Task.sleep(nanoseconds: 350_000_000)
             // A stopped bracket's sleep returns at once and would still take one more frame.
             if Task.isCancelled { break }
-            await performPhoto(bracket: .off)
+            let place = BracketPosition(kind: .focus, index: index + 1, count: positions.count, step: plan.step,
+                                        value: position, group: group)
+            await performPhoto(bracket: .off, position: place)
         }
         // An AE/AF lock goes back to the distance it held; continuous AF would quietly end it.
         backend.apply(focus: focusHeld ? .manual(center) : currentFocusRequest())
@@ -1576,6 +1772,9 @@ final class CameraModel {
         let whiteBalance = effectiveWhiteBalance
         let center = whiteBalance.kelvinValue ?? readings.kelvin
         let tint = whiteBalance.tintValue
+        let plan = settings.capture.bracket
+        let temperatures = plan.kelvinValues(center: center)
+        let group = UUID()
         bracketInProgress = true
         activity = .capturing
         defer {
@@ -1583,18 +1782,23 @@ final class CameraModel {
             bracketStopping = false
             if activity == .capturing { activity = .idle }
         }
-        for kelvin in settings.capture.bracket.kelvinValues(center: center) {
+        for (index, kelvin) in temperatures.enumerated() {
             if Task.isCancelled { break }
             backend.apply(whiteBalance: .temperature(kelvin: kelvin, tint: tint))
             try? await Task.sleep(nanoseconds: 200_000_000)
             if Task.isCancelled { break }
-            await performPhoto(bracket: .off)
+            let place = BracketPosition(kind: .whiteBalance, index: index + 1, count: temperatures.count,
+                                        step: plan.step, value: kelvin, group: group)
+            await performPhoto(bracket: .off, position: place)
         }
         backend.apply(whiteBalance: currentWhiteBalanceRequest())
     }
 
     private func performStack(request: StackRequest) async {
-        activity = .stacking
+        // The pill keeps the need of the plan that runs, whatever the light does to the plan in view.
+        captureNeed = settings.mode == .long ? longSteadyNeed(plan: request.plan) : liveSteadyNeed
+        dimmer.resetWake()
+        // Set before the activity, so everything that follows .stacking already sees the shot's length.
         stackProgress = StackProgress(
             framesCaptured: 0,
             framesPlanned: request.isBulb ? 0 : request.plan.frameCount,
@@ -1602,26 +1806,57 @@ final class CameraModel {
             estimatedTotal: request.isBulb ? nil : request.plan.estimatedDuration(),
             preview: nil
         )
+        activity = .stacking
+        // The crosses start from where the camera points now; zoom can't change while frames come in.
+        motionMonitor.beginDrift(into: drift,
+                                 equivalentFocalLength: capabilities.lens.equivalentFocalLength * max(readings.zoomFactor, 1),
+                                 tracksAim: !capabilities.lens.isFront)
+        speak("Keep the phone still.")
+        var failure: Error?
+        var cancelled = false
         do {
             let result = try await backend.captureStack(request) { [weak self] progress in
-                self?.stackProgress = progress
+                self?.stackDidProgress(progress)
             }
             activity = .saving
             handle([result])
+            if result.savedToLibrary { speak("Done.") }
         } catch let error as CameraError where error == .cancelled {
-            showToast("Cancelled", symbol: "xmark")
+            cancelled = true
         } catch {
-            report(error)
+            failure = error
         }
         stackProgress = nil
+        captureNeed = nil
         activity = .idle
         bulbHoldActive = false
+        // Said once the shot is over, so the warning's haptic isn't held back with the ones that would shake it.
+        if cancelled {
+            showToast("Cancelled", symbol: "xmark")
+        } else if let failure {
+            report(failure)
+        }
+        // The swap a lens button's zoom still had to make when the shot started.
+        if photosInFlight == 0, !lensSwitchInFlight, backendRunning {
+            applyPendingLensChange()
+        }
+    }
+
+    /// About six times a second while a stack runs.
+    private func stackDidProgress(_ progress: StackProgress) {
+        stackProgress = progress
+        // Every frame is in: the picture is being put together, and the crosses have nothing more to follow.
+        if progress.framesPlanned > 0, progress.framesCaptured >= progress.framesPlanned {
+            motionMonitor.endDrift()
+        }
+        refreshSteadyStatus()
+        updateDimming()
     }
 
     private func startRecording() {
         activity = .recording
         recordingDuration = 0
-        let request = VideoRequest(settings: settings.video, location: currentLocation)
+        let request = VideoRequest(settings: settings.video, location: currentLocation, shot: shotContext())
         Task {
             do {
                 try await backend.startRecording(request)
@@ -1654,6 +1889,9 @@ final class CameraModel {
         if recentCaptures.count > 40 {
             recentCaptures.removeLast(recentCaptures.count - 40)
         }
+        // Every capture passes here, so the gallery's list misses none: photos, RAW pairs, bracket frames, stacks
+        // (also one that finished after a return from the background), videos and intervalometer shots.
+        library.record(results)
         if results.contains(where: { !$0.savedToLibrary }) {
             let status = PHPhotoLibrary.authorizationStatus(for: .addOnly)
             let message = status == .denied || status == .restricted
@@ -1674,11 +1912,23 @@ final class CameraModel {
         settings.capture.saveLocation ? locationProvider.current : nil
     }
 
-    private func makePhotoRequest(bracket: BracketPlan) -> PhotoRequest {
+    /// position: a focus or white balance bracket frame's place in its set. An exposure bracket is one request, and
+    /// the camera numbers its photos, so its position carries the set and the backend fills in each photo's index
+    /// and offset.
+    private func makePhotoRequest(bracket: BracketPlan, position: BracketPosition? = nil) -> PhotoRequest {
         let capture = settings.capture
         let manualBase: ExposureValues? = isManualExposure
             ? ExposureValues(seconds: readings.exposureSeconds, iso: readings.iso, aperture: readings.aperture)
             : nil
+        // Live is switched on and off in PHOTO only, so MANUAL never records a movie nobody can see is on.
+        let livePhoto = capture.livePhoto && settings.mode == .photo
+        let exposureBracket = bracket.kind == .exposure
+            ? BracketPosition(kind: .exposure, count: bracket.exposureOffsets().count, step: bracket.step, group: UUID())
+            : nil
+        var shot = shotContext(bracket: position ?? exposureBracket)
+        shot.processing = effectiveProcessing
+        shot.flash = capture.flash
+        shot.livePhoto = livePhoto
         return PhotoRequest(
             processedFormat: capture.processedFormat,
             rawFormat: capture.rawFormat,
@@ -1687,15 +1937,15 @@ final class CameraModel {
             processing: effectiveProcessing,
             flash: capture.flash,
             aspect: capture.aspect,
-            // Live is switched on and off in PHOTO only, so MANUAL never records a movie nobody can see is on.
-            livePhoto: capture.livePhoto && settings.mode == .photo,
+            livePhoto: livePhoto,
             silentShutter: capture.silentShutter,
             depth: capture.depth,
             constantColor: capture.constantColor,
             contentAwareCorrection: capture.lensCorrection,
             location: currentLocation,
             bracket: bracket.kind == .exposure ? bracket : .off,
-            bracketBase: manualBase
+            bracketBase: manualBase,
+            shot: shot
         )
     }
 
@@ -1707,8 +1957,67 @@ final class CameraModel {
             quality: settings.capture.quality,
             aspect: settings.capture.aspect,
             location: currentLocation,
-            noiseReduction: noiseReduction
+            noiseReduction: noiseReduction,
+            shot: shotContext()
         )
+    }
+
+    /// What the model knows at the press, for the file's metadata: how exposure, focus and white balance were set
+    /// and whether a person or a scene set them, the zoom and the shape, the wait before the shot, its place in an
+    /// intervalometer run or a bracket, and how steady the phone was. The location only while location tags are on
+    /// (currentLocation); the metadata builder checks that again. Photos add their processing, flash and Live.
+    private func shotContext(bracket: BracketPosition? = nil) -> ShotContext {
+        let mode = settings.mode
+        let whiteBalance = effectiveWhiteBalance
+        let focus = effectiveFocus
+        let metered = meteredProduct
+        let steady: Bool? = motion.isAvailable ? motion.isSteady : nil
+        let zoom = readings.displayZoom.isFinite && readings.displayZoom > 0 ? readings.displayZoom : requestedDisplayZoom
+        return ShotContext(
+            mode: mode,
+            advanced: isAdvanced,
+            scene: mode == .long ? settings.longExposure.scene : nil,
+            exposureControl: ExposureControl.from(shutterAuto: isShutterAuto, isoAuto: isISOAuto,
+                                                  apertureAuto: isApertureAuto,
+                                                  variableAperture: capabilities.supportsVariableAperture),
+            bias: requestedBias,
+            aeLocked: aeLocked,
+            // A camera without metering areas meters the way it always does.
+            meteringArea: capabilities.supportsMeteringArea ? settings.exposure.meteringArea : .automatic,
+            meteredProduct: metered.isFinite && metered > 0 ? metered : nil,
+            whiteBalance: whiteBalance,
+            whiteBalanceFromScene: settings.whiteBalance.isAuto && !whiteBalance.isAuto,
+            kelvin: displayKelvin,
+            tint: displayTint,
+            focus: focus,
+            focusFromScene: settings.focus.lensPosition == nil && focus.lensPosition != nil,
+            focusHeld: focusHeld,
+            lensPosition: displayLensPosition,
+            aspect: settings.capture.aspect,
+            displayZoom: zoom,
+            timerSeconds: timerSecondsForShot,
+            interval: intervalometer.map { SequencePosition(index: $0.shot, count: $0.total) },
+            bracket: bracket,
+            stability: shotStability(steady: steady),
+            steadyAtStart: steady,
+            locationTagsOn: settings.capture.saveLocation,
+            location: currentLocation,
+            video: mode == .video ? settings.video : nil,
+            artist: settings.capture.artist,
+            copyright: settings.capture.copyright
+        )
+    }
+
+    /// NIGHT: how steady its plan took the phone to be (Tripod, or Automatic's steady or handheld). LONG and a
+    /// stacked MANUAL shutter plan no stability, so they say whether the sensor called the phone steady; without a
+    /// sensor there is nothing to say.
+    private func shotStability(steady: Bool?) -> NightStability? {
+        switch settings.mode {
+        case .night: return nightStability
+        case .long: return steady.map { $0 ? .steady : .handheld }
+        case .manual: return shutterIsStacked ? steady.map { $0 ? .steady : .handheld } : nil
+        case .photo, .video: return nil
+        }
     }
 
     // MARK: - Settings
@@ -1751,6 +2060,15 @@ final class CameraModel {
         settings = next
         scheduleSave()
         reapply(from: old, to: next)
+        // Outside reapply, which stops early for a mode change: these follow whatever else changed with them.
+        if old.controls != next.controls {
+            mirrorHaptics()
+        }
+        if old.appearance != next.appearance || old.accessibility != next.accessibility {
+            mirrorLook()
+        }
+        refreshSteadyStatus()
+        updateDimming()
     }
 
     func showToast(_ message: String, symbol: String? = nil) {
@@ -1808,9 +2126,6 @@ final class CameraModel {
         if old.controls.cameraControlItems != new.controls.cameraControlItems || levelChanged
             || (controlValuesChanged && activeDial == nil && !applyingControlChange) {
             applyCameraControls()
-        }
-        if old.controls.haptics != new.controls.haptics {
-            Haptics.isEnabled = new.controls.haptics
         }
         if old.capture.saveLocation != new.capture.saveLocation {
             locationProvider.setEnabled(new.capture.saveLocation)
@@ -2200,15 +2515,24 @@ final class CameraModel {
     }
 
     private func updateActivePreset(factor: Double? = nil) {
+        // A lens button's transition owns the active button until it lands: midway the device can still be on the
+        // lens it leaves while the settings already name the new one. clearZoomTarget brings this back in step.
+        guard zoomTarget == nil else { return }
         guard let lensID = backend.activeLensID ?? settings.lensID else {
-            activePresetID = lensPresets.first?.id
+            setActivePreset(lensPresets.first?.id)
             return
         }
         let zoom = factor ?? settings.zoom
         let candidates = lensPresets.filter { $0.lensID == lensID }
         let match = candidates.filter { $0.zoomFactor <= zoom + 0.01 }.max(by: { $0.zoomFactor < $1.zoomFactor })
             ?? candidates.min(by: { $0.zoomFactor < $1.zoomFactor })
-        activePresetID = match?.id ?? activePresetID
+        setActivePreset(match?.id ?? activePresetID)
+    }
+
+    /// A pinch comes through here at the finger's rate, and Observation tells every reader of a write even when the
+    /// value is the same.
+    private func setActivePreset(_ id: String?) {
+        if activePresetID != id { activePresetID = id }
     }
 
     /// The Camera Control's system zoom and exposure sliders drive the device directly. Once the app's own
@@ -2220,6 +2544,10 @@ final class CameraModel {
         if !lensSwitchInFlight, !activity.isBusy, now.timeIntervalSince(lastZoomCommand) > 1,
            readings.zoomFactor.isFinite, readings.zoomFactor > 0, abs(readings.zoomFactor - settings.zoom) > 0.01 {
             settings.zoom = readings.zoomFactor
+            // The next pinch or wheel turn goes on from the slider's zoom.
+            if readings.displayZoom.isFinite, readings.displayZoom > 0 {
+                requestedDisplayZoom = readings.displayZoom
+            }
             updateActivePreset(factor: readings.zoomFactor)
             changed = true
         }
@@ -2659,12 +2987,16 @@ extension CameraModel: CameraBackendDelegate {
         // The Camera Control's stops come from the lens and format, and a pinch can switch lens without select().
         // The backend skips a reinstall when nothing changed.
         applyCameraControls()
+        // A stacked MANUAL shutter, and so the pill, depend on the lens's longest shutter.
+        refreshSteadyStatus()
     }
 
     func cameraBackend(_ backend: CameraBackend, didUpdateReadings readings: LiveReadings) {
         self.readings = readings
         updateStackISOLimit()
         adoptExternalChanges(from: readings)
+        // NIGHT's automatic time and LONG's frames follow the light, and with them whether a tripod is needed.
+        refreshSteadyStatus()
         if adoptNextWhiteBalanceReading, !readings.isAdjustingWhiteBalance {
             adoptNextWhiteBalanceReading = false
             // Written directly, so the request isn't sent again and the measured gains stay. Only the advanced
@@ -2766,6 +3098,9 @@ extension CameraModel: CameraBackendDelegate {
     }
 
     func cameraBackend(_ backend: CameraBackend, controlsFullscreenDidChange isFullscreen: Bool) {
-        controlsFullscreen = isFullscreen
+        if controlsFullscreen != isFullscreen { controlsFullscreen = isFullscreen }
+        // A light press on the Camera Control is someone looking at the screen.
+        if isFullscreen { wakeScreen() }
+        refreshSteadyStatus()
     }
 }

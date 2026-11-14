@@ -47,9 +47,9 @@ struct ViewfinderGeometry: Equatable {
         (picture.width * picture.width + picture.height * picture.height).squareRoot()
     }
 
-    /// The frame as far as it shows: the top bar covers its top at 16:9.
-    func visibleFrame(below topBarBottom: CGFloat) -> CGRect {
-        let top = max(frame.minY, min(topBarBottom, frame.maxY))
+    /// The frame as far as it shows: at 16:9 the top bar covers its top, down to where the open area starts.
+    var visibleFrame: CGRect {
+        let top = min(max(frame.minY, open.minY), frame.maxY)
         return CGRect(x: frame.minX, y: top, width: frame.width, height: frame.maxY - top)
     }
 

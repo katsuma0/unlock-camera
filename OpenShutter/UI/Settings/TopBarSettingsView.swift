@@ -69,6 +69,19 @@ struct TopBarSettingsView: View {
                 let isOverflow = index >= side.room
                 HStack(spacing: 12) {
                     TopBarItemLabel(item: item, rules: rules, note: isOverflow ? "No room" : rules.note(for: item))
+                        .accessibilityElement(children: .combine)
+                        .accessibilityActions {
+                            if index > 0 {
+                                Button("Move up") { reorder(side, from: index, to: index - 1) }
+                            }
+                            if index < items.count - 1 {
+                                Button("Move down") { reorder(side, from: index, to: index + 2) }
+                            }
+                            if otherHasRoom {
+                                Button(side.moveTitle) { move(item, from: side) }
+                            }
+                            Button("Remove") { remove(side, at: IndexSet(integer: index)) }
+                        }
                     Spacer(minLength: 0)
                     Button {
                         move(item, from: side)
@@ -83,19 +96,6 @@ struct TopBarSettingsView: View {
                     .disabled(!otherHasRoom)
                     .accessibilityLabel(side.moveTitle)
                 }
-                .accessibilityElement(children: .combine)
-                .accessibilityActions {
-                    if index > 0 {
-                        Button("Move up") { reorder(side, from: index, to: index - 1) }
-                    }
-                    if index < items.count - 1 {
-                        Button("Move down") { reorder(side, from: index, to: index + 2) }
-                    }
-                    if otherHasRoom {
-                        Button(side.moveTitle) { move(item, from: side) }
-                    }
-                    Button("Remove") { remove(side, at: IndexSet(integer: index)) }
-                }
             }
             .onMove { source, destination in
                 reorder(side, from: source, to: destination)
@@ -106,7 +106,7 @@ struct TopBarSettingsView: View {
         } header: {
             Text(side.title)
         } footer: {
-            Text(side.footer(isEmpty: items.isEmpty))
+            Text(side.footer)
         }
     }
 
@@ -132,6 +132,9 @@ struct TopBarSettingsView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
         }
+        // A borderless button keeps the menu tappable while the list is in edit mode.
+        .menuStyle(.button)
+        .buttonStyle(.borderless)
         .foregroundStyle(.primary)
         .disabled(leadingFull && trailingFull)
         .accessibilityLabel("Add \(rules.title(item))")
@@ -252,7 +255,7 @@ private enum TopBarSide {
         self == .leading ? "Move to the right" : "Move to the left"
     }
 
-    func footer(isEmpty: Bool) -> String {
+    var footer: String {
         switch self {
         case .leading:
             return "Up to 3 buttons. A button that doesn't work in the current mode steps aside and the next one moves up."
@@ -262,8 +265,8 @@ private enum TopBarSide {
     }
 }
 
-/// What the editor needs to know about the camera right now: which buttons work on it and in which modes.
-@MainActor
+/// What the editor needs to know about the camera right now: which buttons work on it and in which modes. Plain
+/// values read once per body, so its checks can go to CameraCore's layout rule as they are.
 private struct TopBarRules {
     let advanced: Bool
     let mode: CaptureMode
@@ -272,6 +275,7 @@ private struct TopBarRules {
     let wantsBadge: Bool
     let videoLabel: String
 
+    @MainActor
     init(model: CameraModel) {
         let settings = model.settings
         advanced = model.isAdvanced
@@ -319,25 +323,20 @@ private struct TopBarRules {
         }
     }
 
-    /// Where the button works, when that is not everywhere, or that this camera lacks it.
+    /// Where the button works, when that is not everywhere, and whether this camera lacks it.
     func note(for item: TopBarItem) -> String? {
-        if item == .flash {
-            return capabilities.hasFlash || capabilities.hasTorch || mode == .video
-                ? "In video, this is the flashlight."
-                : "Not on this camera. In video, this is the flashlight."
-        }
         let onCamera: Bool
         switch item {
-        case .livePhoto, .quietShutter, .raw:
-            // The photo features are reported in the photo modes only.
-            onCamera = mode == .video || isAvailable(item)
-        case .whiteBalance, .stabilization:
+        case .flash:
+            onCamera = capabilities.hasFlash || capabilities.hasTorch
+        case .livePhoto, .quietShutter, .raw, .whiteBalance, .stabilization:
             onCamera = isAvailable(item)
         default:
+            // The rest depend on the mode or a setting, not on the camera.
             onCamera = true
         }
-        let modes = modeNote(item)
-        guard onCamera else { return modes.map { $0 + ". Not on this camera" } ?? "Not on this camera" }
+        let modes = item == .flash ? "In video, this is the flashlight" : modeNote(item)
+        guard onCamera else { return modes.map { "Not on this camera. " + $0 } ?? "Not on this camera" }
         return modes
     }
 
@@ -355,14 +354,14 @@ private struct TopBarRules {
         }
     }
 
-    /// The mode's name inside a sentence.
+    /// The mode's name inside a sentence, as the rest of Settings words it ("Only photo mode takes Live Photos.").
     static func modeName(_ mode: CaptureMode) -> String {
         switch mode {
-        case .photo: return "Photo mode"
-        case .night: return "Night mode"
-        case .long: return "Long exposure"
-        case .manual: return "Manual mode"
-        case .video: return "Video"
+        case .photo: return "photo mode"
+        case .night: return "night mode"
+        case .long: return "long exposure mode"
+        case .manual: return "manual mode"
+        case .video: return "video mode"
         }
     }
 }

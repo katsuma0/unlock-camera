@@ -26,14 +26,12 @@ struct PreserveSettingsView: View {
             Section {
                 Toggle(advanced ? "Exposure" : "Brightness", isOn: model.settingBinding(\.startup.keepBrightness))
             } footer: {
-                Text(advanced
-                    ? "Keeps the exposure compensation you set, Night mode's too, instead of going back to 0."
-                    : "Keeps the brightness you set, Night mode's too, instead of going back to normal.")
-            }
-
-            Section {
-            } footer: {
-                Text("These apply each time Open Shutter starts. Coming back to it from another app keeps everything as it was.")
+                SettingsFooter([
+                    advanced
+                        ? "Keeps the exposure compensation you set, Night mode's too, instead of going back to 0."
+                        : "Keeps the brightness you set, Night mode's too, instead of going back to normal.",
+                    "These apply each time Open Shutter starts. Coming back to it from another app keeps everything as it was.",
+                ])
             }
         }
         .navigationTitle("Preserve settings")

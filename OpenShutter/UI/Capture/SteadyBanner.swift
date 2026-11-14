@@ -5,24 +5,19 @@ import CameraCore
 /// fall on a still phone, so the status is large, on a backing of its own that reads over a white sky or a black one,
 /// and never takes a touch, so taps still focus.
 ///
-/// Place it at the top of the open part of the frame, 12 pt down. It is as tall as its pill, and has no height while
-/// hidden, so toasts and badges can move below it by its measured height. It takes the width it is offered and
-/// centers the pill with 16 pt to spare on each side. With the phone on its side the pill moves to the edge that is
-/// then the person's top and reads upright there; the banner is then as tall as the pill is long.
+/// Place it at the top of the open part of the frame, 12 pt down. It shows exactly while `model.steadyStatus` has a
+/// message (the model drops it under the Camera Control's overlay and the battery saver's black screen). It is as
+/// tall as its pill, and has no height while hidden, so toasts and badges can move below it by its measured height.
+/// It takes the width it is offered and centers the pill with 16 pt to spare on each side. With the phone on its side
+/// the pill moves to the edge that is then the person's top and reads upright there; the banner is then as tall as
+/// the pill is long.
 struct SteadyBanner: View {
     let model: CameraModel
 
     var body: some View {
-        SteadyBannerSlot(model: model, message: Self.message(for: model))
+        SteadyBannerSlot(model: model, message: model.steadyStatus)
             // The controls under the picture cap their text the same way, so the pill keeps to the top band.
             .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
-    }
-
-    /// What the banner shows now. nil while the model has no status for the mode and the moment, while the Camera
-    /// Control's overlay has the screen, and while the battery saver keeps it dark.
-    static func message(for model: CameraModel) -> SteadyMessage? {
-        guard !model.controlsFullscreen, !model.dimmer.isDimmed else { return nil }
-        return model.steadyStatus
     }
 }
 
@@ -115,7 +110,7 @@ private struct SteadyPill: View {
 
     var body: some View {
         let warning = message.isWarning
-        let ink = warning ? Self.onAccent : Theme.primaryText
+        let ink = warning ? Theme.onAccent : Theme.primaryText
         let iconInk = warning ? ink : (message.isIconAccented ? Theme.accent : Theme.primaryText)
         // Glass tints itself after the scene and can't promise contrast for the one thing that has to be read.
         // White on 60 percent black over a white sky is about 5.7:1.
@@ -160,11 +155,6 @@ private struct SteadyPill: View {
             guard !Task.isCancelled else { return }
             withAnimation(.easeInOut(duration: 0.5)) { isQuiet = true }
         }
-    }
-
-    /// Text and glyphs on the accent fill. Black on every camera shade.
-    private static var onAccent: Color {
-        AppearanceStore.shared.onAccent
     }
 
     /// States that only confirm all is well step back once they have been read.

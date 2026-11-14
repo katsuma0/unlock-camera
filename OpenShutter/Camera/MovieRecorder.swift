@@ -31,9 +31,9 @@ final class MovieRecorder: NSObject, AVCaptureFileOutputRecordingDelegate, @unch
         lock.withLock { configuredCodec = codec }
     }
 
-    /// Session queue. Records to a temporary .mov. `completion` fires once, on the main actor,
-    /// after the file is finished and saved to Photos (or failed).
-    func start(rotationAngle: CGFloat, location: LocationStamp?, completion: @escaping @MainActor (Result<CaptureResult, Error>) -> Void) {
+    /// Session queue. Records to a temporary .mov that carries `shot`'s metadata. `completion` fires once, on the main
+    /// actor, after the file is finished and saved to Photos (or failed).
+    func start(rotationAngle: CGFloat, shot: RecordedShot, completion: @escaping @MainActor (Result<CaptureResult, Error>) -> Void) {
         guard !isRecording, !output.isRecording else {
             Self.deliver(.failure(CameraError.busy), to: completion)
             return
@@ -47,9 +47,20 @@ final class MovieRecorder: NSObject, AVCaptureFileOutputRecordingDelegate, @unch
         if connection.isVideoRotationAngleSupported(angle) {
             connection.videoRotationAngle = angle
         }
-        // Also written into the file, so the place survives exports and shares, not only the Photos asset.
-        output.metadata = Self.locationMetadata(location)
         let colorMode = Self.recordedColorMode(of: connection)
+        let codec = lock.withLock { configuredCodec }
+        var shot = shot
+        // What the file holds, which can differ from the settings: the codec and the color the camera fell back to.
+        if var video = shot.record.context.video {
+            if let codec {
+                video.codec = codec
+            }
+            video.colorMode = colorMode
+            shot.record.context.video = video
+        }
+        // Set for every file, also without a location, so each one names its camera, its time and how it was shot,
+        // and the place survives exports and shares, not only the Photos asset.
+        output.metadata = MovieMetadata.items(shot.movie(livePhoto: false))
 
         let name = "OpenShutter-\(UUID().uuidString).mov"
         let url = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true).appendingPathComponent(name)
@@ -60,9 +71,9 @@ final class MovieRecorder: NSObject, AVCaptureFileOutputRecordingDelegate, @unch
         }
         lock.withLock {
             recordings[name] = Recording(
-                location: location,
-                date: Date(),
-                codec: configuredCodec,
+                location: shot.assetLocation,
+                date: shot.record.date,
+                codec: codec,
                 colorMode: colorMode,
                 backgroundTime: backgroundTime,
                 completion: completion
@@ -129,7 +140,8 @@ final class MovieRecorder: NSObject, AVCaptureFileOutputRecordingDelegate, @unch
     /// Unchecked because of `completion`: a main actor closure only ever runs on the main actor, so handing it
     /// to the delegate's queue and back is safe even though its function type isn't marked Sendable.
     private struct Recording: @unchecked Sendable {
-        var location: LocationStamp?
+        var location: GeoTag?
+        /// When the recording started, which is when Photos sorts it.
         var date: Date
         var codec: VideoCodecChoice?
         var colorMode: VideoColorMode
@@ -289,22 +301,6 @@ final class MovieRecorder: NSObject, AVCaptureFileOutputRecordingDelegate, @unch
         return snapped < 0 ? snapped + 360 : snapped
     }
 
-    /// QuickTime location metadata, the ISO 6709 string the Camera app writes ("+37.3349-122.0090+012.300/").
-    private static func locationMetadata(_ location: LocationStamp?) -> [AVMetadataItem]? {
-        guard let location, location.latitude.isFinite, location.longitude.isFinite,
-              abs(location.latitude) <= 90, abs(location.longitude) <= 180 else { return nil }
-        var text = String(format: "%+08.4f%+09.4f", location.latitude, location.longitude)
-        if location.altitude.isFinite {
-            text += String(format: "%+.3f", location.altitude)
-        }
-        text += "/"
-        let item = AVMutableMetadataItem()
-        item.identifier = .quickTimeMetadataLocationISO6709
-        item.value = text as NSString
-        item.dataType = kCMMetadataBaseDataType_UTF8 as String
-        return [item]
-    }
-
     // MARK: - Finishing
 
     private static func deliver(_ result: Result<CaptureResult, Error>, to completion: @escaping @MainActor (Result<CaptureResult, Error>) -> Void) {
@@ -323,7 +319,8 @@ final class MovieRecorder: NSObject, AVCaptureFileOutputRecordingDelegate, @unch
         let thumbnail = await thumbnail(of: asset)
         let summary = await summary(of: asset, codec: recording.codec, colorMode: recording.colorMode)
         do {
-            let identifier = try await PhotoLibrary.saveVideo(at: file, location: recording.location)
+            let identifier = try await PhotoLibrary.saveVideo(at: file, location: recording.location,
+                                                              creationDate: recording.date, isCapture: true)
             return .success(CaptureResult(
                 kind: .video,
                 assetIdentifier: identifier,

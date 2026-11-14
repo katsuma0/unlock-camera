@@ -21,6 +21,8 @@ enum ZoomWheelTouch {
 final class ZoomWheelModel {
     /// The ruler stands in for the lens buttons.
     private(set) var isOpen = false
+    /// A finger is zooming with it: the hold that opened it, or a new touch while it lingers.
+    private(set) var isDragging = false
     /// The zoom under the centre line, 1:1 with the finger. Changes on every touch event.
     private(set) var rawZoom = 1.0
     /// What the readout says: the raw zoom on the wheel's grid, with hysteresis so a resting finger doesn't flicker.
@@ -37,7 +39,6 @@ final class ZoomWheelModel {
     @ObservationIgnored private var lastTickTime: CFTimeInterval = 0
     /// The end the finger pushed into. Its stop played once; it plays again only after the shown value left it.
     @ObservationIgnored private var latchedEnd: Double?
-    @ObservationIgnored private var tickStyle = ZoomTickStyle.everyStep
 
     private struct Stroke {
         /// The zoom at zero travel. It moves with an end the finger pushes past.
@@ -63,6 +64,9 @@ final class ZoomWheelModel {
     /// Selection feedback faster than about 30 a second turns into a buzz.
     private static let tickInterval: CFTimeInterval = 0.035
     private static let lingerNanoseconds: UInt64 = 1_500_000_000
+    /// Zooms closer than this many doublings (under one percent) are the same zoom: a landing the camera reached
+    /// reads back far closer.
+    private static let sameZoomStops = 0.01
 
     // MARK: - Touches
 
@@ -107,11 +111,14 @@ final class ZoomWheelModel {
         return true
     }
 
-    /// A new touch on the lingering wheel: carries on from where the ruler stands, without another hold.
+    /// A new touch on the lingering wheel: carries on from where the ruler stands, without another hold. If the
+    /// zoom moved some other way meanwhile (a pinch, the Camera Control), the ruler goes on from there instead.
     @discardableResult
     func grab(model: CameraModel) -> Bool {
         guard isOpen, stroke == nil, Self.canAdjust(model) else { return false }
-        startStroke(at: rawZoom, model: model)
+        let requested = model.requestedZoom
+        let movedElsewhere = ZoomMath.stops(from: rawZoom, to: requested) > Self.sameZoomStops
+        startStroke(at: movedElsewhere ? requested : rawZoom, model: model)
         return true
     }
 
@@ -139,7 +146,9 @@ final class ZoomWheelModel {
             if let end = latchedEnd, shown != end { latchedEnd = nil }
             stepped(from: previous, to: shown)
         }
-        if pinned, latchedEnd == nil {
+        // Only a real push into the end stops: a wheel opened at its end would otherwise bump on the jitter of the
+        // finger that just held it.
+        if pinned, latchedEnd == nil, stroke.moved {
             latchedEnd = shown
             Haptics.stop()
         }
@@ -160,6 +169,7 @@ final class ZoomWheelModel {
     func end(model: CameraModel) {
         guard let stroke else { return }
         self.stroke = nil
+        if isDragging { isDragging = false }
         if stroke.sentAny {
             let landing = shownZoom
             if Self.canAdjust(model) {
@@ -178,6 +188,7 @@ final class ZoomWheelModel {
         lingerTask?.cancel()
         lingerTask = nil
         stroke = nil
+        if isDragging { isDragging = false }
         touch?.accepted = false
         latchedEnd = nil
         guard isOpen else { return }
@@ -203,27 +214,24 @@ final class ZoomWheelModel {
         if fresh != scale { scale = fresh }
         let start = scale.clamped(zoom)
         stroke = Stroke(start: start, lastSent: start)
+        if !isDragging { isDragging = true }
         if rawZoom != start { rawZoom = start }
         let shown = scale.clamped(ZoomMath.snapped(start))
         if shown != shownZoom { shownZoom = shown }
         latchedEnd = nil
-        tickStyle = model.settings.controls.zoomTicks
     }
 
     /// A tick per step, at most one per 35 ms; a firmer tap, never skipped, where the value reaches a lens button's.
+    /// Haptics decides from the Zoom ticks setting whether the steps between lens values tick at all.
     private func stepped(from previous: Double, to shown: Double) {
         let now = CACurrentMediaTime()
         let low = min(previous, shown)
         let high = max(previous, shown)
         // A fast stroke can step over a lens value between two touch events; the tap still marks it.
         let reachesLens = scale.lensStops.contains { $0 != previous && $0 >= low && $0 <= high }
-        if reachesLens {
-            Haptics.tap()
-            lastTickTime = now
-        } else if tickStyle == .everyStep, now - lastTickTime >= Self.tickInterval {
-            Haptics.tick()
-            lastTickTime = now
-        }
+        guard reachesLens || now - lastTickTime >= Self.tickInterval else { return }
+        Haptics.zoomTick(atLensValue: reachesLens)
+        lastTickTime = now
     }
 
     private func scheduleLinger() {
@@ -533,7 +541,7 @@ struct ZoomReadout: View {
             value: LensMath.zoomLabel(zoom, selected: true),
             detail: scale.showsFocalLength ? scale.focalLength(at: zoom).map(LensMath.focalLengthLabel) : nil
         )
-        // Only this small view reads motion, which updates 30 times a second.
+        // Motion updates 30 times a second; read here, it redraws this bubble and nothing else of the wheel.
         .uprightRotation(model.motion.iconRotationDegrees)
     }
 }

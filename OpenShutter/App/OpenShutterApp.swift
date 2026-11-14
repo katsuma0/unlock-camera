@@ -2,7 +2,16 @@ import SwiftUI
 
 @main
 struct OpenShutterApp: App {
-    @State private var model = CameraModel(backend: OpenShutterApp.makeBackend())
+    @State private var model: CameraModel
+
+    init() {
+        // The model copies the look settings out as it loads them, so the hook comes first: the first frame then
+        // already has the person's accent. The model leaves the views' types alone and calls through this.
+        CameraModel.onLookChange = { appearance, accessibility in
+            AppearanceStore.shared.update(appearance: appearance, accessibility: accessibility)
+        }
+        _model = State(initialValue: CameraModel(backend: OpenShutterApp.makeBackend()))
+    }
 
     var body: some Scene {
         WindowGroup {

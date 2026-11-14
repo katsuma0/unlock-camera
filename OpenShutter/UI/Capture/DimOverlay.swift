@@ -21,12 +21,9 @@ struct DimOverlay: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .ignoresSafeArea()
         .allowsHitTesting(isDimmed)
-        // Darkens slowly, so the brightness step that follows happens on black, and lights up quickly.
-        .animation(isDimmed ? .easeIn(duration: 0.6) : .easeOut(duration: 0.25), value: isDimmed)
-        // The Camera Control's overlay sits over the picture, which has to be seen to use it.
-        .onChange(of: model.controlsFullscreen) { _, fullscreen in
-            if fullscreen, model.dimmer.isDimmed { model.wakeScreen() }
-        }
+        // Darkens over the time the dimmer waits before it lowers the brightness, so that step happens on black.
+        // Lights up quickly: the brightness is already back by then.
+        .animation(isDimmed ? .easeIn(duration: ScreenDimmer.fadeInSeconds) : .easeOut(duration: 0.25), value: isDimmed)
     }
 }
 
@@ -63,7 +60,7 @@ private struct DimScreen: View {
         .task { await followProgress() }
         .task {
             // Once it has faded in, so VoiceOver reads the dark screen instead of a control it hides.
-            try? await Task.sleep(for: .milliseconds(700))
+            try? await Task.sleep(for: .seconds(ScreenDimmer.fadeInSeconds))
             guard !Task.isCancelled else { return }
             isFocused = true
         }

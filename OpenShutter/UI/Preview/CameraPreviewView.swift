@@ -245,13 +245,13 @@ final class ViewfinderInteraction {
         }
     }
 
-    /// Where the focus square is on screen, if it is.
+    /// Where the focus square is, in the preview layer's coordinates, if it is up.
     func visibleFocusPoint(_ model: CameraModel) -> CGPoint? {
         guard let point = model.focusPoint else { return nil }
         // A point the handlers haven't seen yet was tapped a moment ago, so its square has just appeared.
-        guard point == trackedFocusPoint else { return screenPoint(fromLayer: point) }
+        guard point == trackedFocusPoint else { return point }
         guard focusPointIsCurrent, reticleIsFresh || holdsLock(model) else { return nil }
-        return screenPoint(fromLayer: point)
+        return point
     }
 
     /// A tap clears the lock and a long press sets it, so a point that arrived locked came from a long press.
@@ -380,7 +380,7 @@ final class ViewfinderInteraction {
         dragQuarterTurns = model.motion.quarterTurns
         // Beside the focus square when one is up, as in the Camera app; a faded square's old spot means nothing.
         let frame = geometry.frame
-        sliderAnchor = visibleFocusPoint(model) ?? CGPoint(x: frame.midX, y: frame.midY)
+        sliderAnchor = visibleFocusPoint(model).map(screenPoint(fromLayer:)) ?? CGPoint(x: frame.midX, y: frame.midY)
         isDraggingExposure = true
     }
 
@@ -499,11 +499,15 @@ final class ViewfinderInteraction {
 
 // MARK: - Preview layer host
 
-/// Hosts the backend's preview layer and the gesture recognizers. UIKit recognizers report points in the
-/// layer's own coordinates, which is exactly what tap to focus needs, and give the long press a location.
+/// Hosts the backend's preview layer and the gesture recognizers. The host covers the whole screen and the layer sits
+/// at the picture rect inside it; tap to focus hands the model points in the layer's own coordinates, which is what
+/// both backends convert from.
 private struct PreviewSurface: UIViewRepresentable {
     let model: CameraModel
     let interaction: ViewfinderInteraction
+    /// Where the whole camera image goes, in the host's coordinates.
+    let picture: CGRect
+    let isHidden: Bool
 
     func makeCoordinator() -> GestureCoordinator {
         GestureCoordinator(model: model, interaction: interaction)
@@ -514,12 +518,15 @@ private struct PreviewSurface: UIViewRepresentable {
         view.backgroundColor = .black
         // Pinch needs both fingers delivered to this view.
         view.isMultipleTouchEnabled = true
+        // At 16:9 the picture reaches past the screen's sides.
         view.clipsToBounds = true
-        view.attach(model.backend.makePreviewLayer())
         let interaction = self.interaction
-        view.onLayout = { [weak interaction] size in
-            interaction?.viewSize = size
+        view.onPreviewingChange = { [weak interaction] previewing in
+            interaction?.previewingChanged(previewing)
         }
+        view.attach(model.backend.makePreviewLayer())
+        view.setPictureRect(picture, animated: false)
+        view.isHidden = isHidden
         context.coordinator.install(on: view)
         return view
     }
@@ -527,15 +534,35 @@ private struct PreviewSurface: UIViewRepresentable {
     func updateUIView(_ uiView: PreviewHostView, context: Context) {
         context.coordinator.model = model
         uiView.reattachIfNeeded()
+        uiView.setPictureRect(picture, animated: true)
+        // Under the battery saver's black layer the picture would still be drawn 30 times a second. The session and
+        // the shot keep running: frames reach the stack through the video output, not this layer.
+        if uiView.isHidden != isHidden {
+            uiView.isHidden = isHidden
+        }
     }
 }
 
 private final class PreviewHostView: UIView {
-    var onLayout: ((CGSize) -> Void)?
+    /// Called on the main queue with the preview layer's isPreviewing.
+    var onPreviewingChange: ((Bool) -> Void)?
     private var previewLayer: CALayer?
+    private var previewing: NSKeyValueObservation?
+    /// Where the layer goes, in this view's coordinates; null until the camera screen has laid out.
+    private var pictureRect = CGRect.null
 
     func attach(_ layer: CALayer) {
         previewLayer = layer
+        if let video = layer as? AVCaptureVideoPreviewLayer {
+            // AVFoundation says to watch this to learn when video reaches the layer (iOS 13).
+            previewing = video.observe(\.isPreviewing, options: [.initial, .new]) { [weak self] layer, _ in
+                let isPreviewing = layer.isPreviewing
+                DispatchQueue.main.async { self?.onPreviewingChange?(isPreviewing) }
+            }
+        } else {
+            // The simulated camera draws into a plain layer, which shows frames as soon as its session runs.
+            DispatchQueue.main.async { [weak self] in self?.onPreviewingChange?(true) }
+        }
         reattachIfNeeded()
     }
 
@@ -545,6 +572,22 @@ private final class PreviewHostView: UIView {
         guard let previewLayer, previewLayer.superlayer !== layer else { return }
         layer.insertSublayer(previewLayer, at: 0)
         setNeedsLayout()
+    }
+
+    /// Moves the layer to `rect`, springing it there from where it shows now when asked and when there is a
+    /// "there" to start from.
+    func setPictureRect(_ rect: CGRect, animated: Bool) {
+        guard PictureLayerMotion.isUsable(rect), rect != pictureRect else { return }
+        let hadRect = !pictureRect.isNull
+        pictureRect = rect
+        guard let previewLayer else { return }
+        PictureLayerMotion.move(previewLayer, to: rect, animated: animated && hadRect && window != nil)
+    }
+
+    /// A touch in this view's coordinates, in the preview layer's own, which the backends convert from.
+    func layerPoint(fromHostPoint point: CGPoint) -> CGPoint {
+        guard let previewLayer, previewLayer.superlayer === layer else { return point }
+        return previewLayer.convert(point, from: layer)
     }
 
     override func didMoveToWindow() {
@@ -557,12 +600,50 @@ private final class PreviewHostView: UIView {
     override func layoutSubviews() {
         super.layoutSubviews()
         reattachIfNeeded()
+        guard let previewLayer else { return }
+        let target = pictureRect.isNull ? bounds : pictureRect
+        guard previewLayer.frame != target else { return }
         // A standalone layer animates frame changes by default and would trail the view by a quarter second.
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        previewLayer?.frame = bounds
+        previewLayer.frame = target
         CATransaction.commit()
-        onLayout?(bounds.size)
+    }
+}
+
+/// Moves the picture's layers (the preview and the analysis overlay) to a new rect. An aspect change springs them
+/// there on the curve the bands and the grid use (Theme.spring: response 0.32, damping 0.86), so the picture and its
+/// frame move as one.
+@MainActor
+private enum PictureLayerMotion {
+    private static let animationKey = "pictureRect"
+
+    static func isUsable(_ rect: CGRect) -> Bool {
+        !rect.isNull && rect.minX.isFinite && rect.minY.isFinite && rect.width.isFinite && rect.height.isFinite
+            && rect.width > 0 && rect.height > 0
+    }
+
+    static func move(_ layer: CALayer, to rect: CGRect, animated: Bool) {
+        // Where it shows now, a spring still running included.
+        let from = layer.presentation()?.frame ?? layer.frame
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer.frame = rect
+        CATransaction.commit()
+        guard animated, isUsable(from), from != rect else {
+            layer.removeAnimation(forKey: animationKey)
+            return
+        }
+        // The final frame is set already; the transform makes it start out where it was and settles to none.
+        let scale = from.width / rect.width
+        let start = CATransform3DConcat(CATransform3DMakeScale(scale, scale, 1),
+                                        CATransform3DMakeTranslation(from.midX - rect.midX, from.midY - rect.midY, 0))
+        let spring = CASpringAnimation(perceptualDuration: 0.32, bounce: 0.14)
+        spring.keyPath = "transform"
+        spring.fromValue = NSValue(caTransform3D: start)
+        spring.toValue = NSValue(caTransform3D: CATransform3DIdentity)
+        spring.duration = spring.settlingDuration
+        layer.add(spring, forKey: animationKey)
     }
 }
 
@@ -594,13 +675,15 @@ private final class GestureCoordinator: NSObject, UIGestureRecognizerDelegate {
     }
 
     @objc private func handleTap(_ recognizer: UITapGestureRecognizer) {
-        guard recognizer.state == .ended, let view = recognizer.view else { return }
-        interaction.tap(at: recognizer.location(in: view), model: model)
+        guard recognizer.state == .ended, let view = recognizer.view as? PreviewHostView else { return }
+        let point = recognizer.location(in: view)
+        interaction.tap(at: point, layerPoint: view.layerPoint(fromHostPoint: point), model: model)
     }
 
     @objc private func handleLongPress(_ recognizer: UILongPressGestureRecognizer) {
-        guard recognizer.state == .began, let view = recognizer.view else { return }
-        interaction.longPress(at: recognizer.location(in: view), model: model)
+        guard recognizer.state == .began, let view = recognizer.view as? PreviewHostView else { return }
+        let point = recognizer.location(in: view)
+        interaction.longPress(at: point, layerPoint: view.layerPoint(fromHostPoint: point), model: model)
     }
 
     @objc private func handlePinch(_ recognizer: UIPinchGestureRecognizer) {
@@ -611,7 +694,7 @@ private final class GestureCoordinator: NSObject, UIGestureRecognizerDelegate {
         case .changed:
             interaction.pinchChanged(scale: recognizer.scale, model: model)
         case .ended, .cancelled, .failed:
-            interaction.pinchEnded()
+            interaction.pinchEnded(model: model)
         default:
             break
         }
@@ -647,9 +730,11 @@ private final class GestureCoordinator: NSObject, UIGestureRecognizerDelegate {
 /// so the twelve updates a second never re-render the rest of the viewfinder.
 private struct AnalysisOverlay: View {
     let model: CameraModel
+    /// The analyzer draws the whole camera image, so its layer sits where the preview's does.
+    let picture: CGRect
 
     var body: some View {
-        OverlaySurface(image: showsOverlay ? model.analysis?.overlay : nil)
+        OverlaySurface(image: showsOverlay ? model.analysis?.overlay : nil, picture: picture)
             .allowsHitTesting(false)
             .accessibilityHidden(true)
     }
@@ -669,15 +754,18 @@ private struct AnalysisOverlay: View {
 
 private struct OverlaySurface: UIViewRepresentable {
     let image: CGImage?
+    let picture: CGRect
 
     func makeUIView(context: Context) -> OverlayHostView {
         let view = OverlayHostView()
         view.configure()
+        view.setPictureRect(picture, animated: false)
         view.show(image)
         return view
     }
 
     func updateUIView(_ uiView: OverlayHostView, context: Context) {
+        uiView.setPictureRect(picture, animated: true)
         uiView.show(image)
     }
 }
@@ -686,6 +774,8 @@ private struct OverlaySurface: UIViewRepresentable {
 private final class OverlayHostView: UIView {
     private let overlayLayer = CALayer()
     private var shownImage: CGImage?
+    /// Where the overlay goes, in this view's coordinates; null until the camera screen has laid out.
+    private var pictureRect = CGRect.null
 
     func configure() {
         isUserInteractionEnabled = false
@@ -709,42 +799,52 @@ private final class OverlayHostView: UIView {
         CATransaction.commit()
     }
 
+    /// Moves the overlay with the preview layer, on the same spring.
+    func setPictureRect(_ rect: CGRect, animated: Bool) {
+        guard PictureLayerMotion.isUsable(rect), rect != pictureRect else { return }
+        let hadRect = !pictureRect.isNull
+        pictureRect = rect
+        PictureLayerMotion.move(overlayLayer, to: rect, animated: animated && hadRect && window != nil)
+    }
+
     override func layoutSubviews() {
         super.layoutSubviews()
+        let target = pictureRect.isNull ? bounds : pictureRect
+        guard overlayLayer.frame != target else { return }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        overlayLayer.frame = bounds
+        overlayLayer.frame = target
         CATransaction.commit()
     }
 }
 
 // MARK: - Exposure slider
 
-/// The Camera app's sun: it sits beside the focus square and slides along a short track while the
-/// exposure is dragged.
-private struct ExposureSlider: View {
+/// The Camera app's sun: it sits beside the focus square and slides along a short track while the exposure is
+/// dragged. Its own layer above the bands and the capture blink, which belong to the picture, laid out in the
+/// viewfinder's screen space.
+struct ExposureSliderLayer: View {
     let model: CameraModel
     let interaction: ViewfinderInteraction
+    let geometry: ViewfinderGeometry
 
     var body: some View {
-        GeometryReader { proxy in
-            ZStack {
-                if let anchor = visibleAnchor {
-                    let turns = model.motion.quarterTurns
-                    SunSliderGraphic(
-                        bias: ViewfinderInteraction.currentBias(model),
-                        showsTrack: interaction.isDraggingExposure,
-                        showsValue: interaction.sliderAnchor != nil,
-                        side: Self.side(for: anchor, quarterTurns: turns, in: proxy.size)
-                    )
-                    .rotationEffect(.degrees(Self.degrees(quarterTurns: turns)))
-                    .position(anchor)
-                    .transition(.opacity)
-                }
+        ZStack {
+            if let anchor = visibleAnchor {
+                let turns = model.motion.quarterTurns
+                SunSliderGraphic(
+                    bias: ViewfinderInteraction.currentBias(model),
+                    showsTrack: interaction.isDraggingExposure,
+                    showsValue: interaction.sliderAnchor != nil,
+                    side: Self.side(for: anchor, quarterTurns: turns, in: geometry.visibleFrame)
+                )
+                .rotationEffect(.degrees(Self.degrees(quarterTurns: turns)))
+                .position(anchor)
+                .transition(.opacity)
             }
-            .frame(width: proxy.size.width, height: proxy.size.height)
-            .animation(.easeOut(duration: 0.2), value: visibleAnchor == nil)
         }
+        .frame(width: geometry.screen.width, height: geometry.screen.height)
+        .animation(.easeOut(duration: 0.2), value: visibleAnchor == nil)
         .allowsHitTesting(false)
         .accessibilityHidden(true)
         .onChange(of: model.focusPoint, initial: true) { _, point in
@@ -762,27 +862,35 @@ private struct ExposureSlider: View {
             guard !Task.isCancelled else { return }
             interaction.freshnessExpired()
         }
-        // A zoom or lens change moves the picture under the focus point, so the sun no longer belongs there.
+        // A zoom or lens change moves the picture under the focus point, so the sun no longer belongs there. So
+        // does a new picture rect (another aspect ratio or VIDEO): the same point now lands somewhere else.
         .onChange(of: model.settings.zoom) {
             interaction.focusPointMoved()
         }
         .onChange(of: model.activePresetID) {
             interaction.focusPointMoved()
         }
+        .onChange(of: geometry.picture) {
+            interaction.focusPointMoved()
+        }
     }
 
     /// The drag's anchor, or the focus point while its square is on screen.
     private var visibleAnchor: CGPoint? {
-        interaction.sliderAnchor ?? interaction.visibleFocusPoint(model)
+        if let anchor = interaction.sliderAnchor { return anchor }
+        let picture = geometry.picture
+        return interaction.visibleFocusPoint(model).map { CGPoint(x: $0.x + picture.minX, y: $0.y + picture.minY) }
     }
 
-    /// 1 puts the sun on the user's right of the focus square, -1 on the left when the right side is off screen.
-    private static func side(for anchor: CGPoint, quarterTurns: Int, in size: CGSize) -> CGFloat {
+    /// 1 puts the sun on the user's right of the focus square, -1 on the left when the right side runs off the
+    /// part of the frame that shows.
+    private static func side(for anchor: CGPoint, quarterTurns: Int, in area: CGRect) -> CGFloat {
         let reach = SunSliderGraphic.sunDistance + 14
         let offset = ViewfinderInteraction.screenVector(CGPoint(x: reach, y: 0), quarterTurns: quarterTurns)
         let sun = CGPoint(x: anchor.x + offset.x, y: anchor.y + offset.y)
         let margin: CGFloat = 8
-        let fits = sun.x >= margin && sun.x <= size.width - margin && sun.y >= margin && sun.y <= size.height - margin
+        let fits = sun.x >= area.minX + margin && sun.x <= area.maxX - margin
+            && sun.y >= area.minY + margin && sun.y <= area.maxY - margin
         return fits ? 1 : -1
     }
 
