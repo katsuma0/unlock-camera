@@ -915,6 +915,7 @@ private struct ShutterSlot: View {
             isEnabled: model.canCapture || activity.isBusy || model.intervalometer != nil,
             // A press the model would ignore gets no click, so the shutter is never felt to fire without firing.
             acceptsPress: model.shutterAcceptsPress,
+            isDimmed: model.dimmer.isDimmed,
             action: { pressShutter(model) },
             onHoldBegan: isBulb ? { model.shutterHoldBegan() } : nil,
             onHoldEnded: isBulb ? { model.shutterHoldEnded() } : nil
