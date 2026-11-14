@@ -111,29 +111,31 @@ enum PhotoInfoReader {
         let summary = summaryRows(groups: groups, topLevel: topLevel, app: xmp.app, extraImages: extraImages)
         let appRows = ShotXMP.Field.allCases.compactMap { field in
             xmp.app[field].map { PhotoInfoRow(id: "app/" + field.rawValue, title: PhotoInfoNames.appTitle(field),
-                                         value: PhotoInfoNames.appValue(field, $0)) }
+                                              value: PhotoInfoNames.appValue(field, $0)) }
         }
 
         var sections: [PhotoInfoSection] = []
         for name in PhotoInfoNames.sortedGroups(groups.keys) {
             guard let group = groups[name], !group.isEmpty else { continue }
             sections.append(PhotoInfoSection(id: "group/" + name, title: PhotoInfoNames.groupTitle(name),
-                                        rows: rows(group, group: name, id: "group/" + name)))
+                                             rows: rows(group, group: name, id: "group/" + name)))
         }
         if !topLevel.isEmpty {
-            sections.append(PhotoInfoSection(id: "image", title: "Image", rows: rows(topLevel, group: nil, id: "image")))
+            sections.append(PhotoInfoSection(id: "image", title: "Image",
+                                             rows: rows(topLevel, group: nil, id: "image")))
         }
         if !container.isEmpty {
-            sections.append(PhotoInfoSection(id: "file", title: "File", rows: rows(container, group: nil, id: "file")))
+            sections.append(PhotoInfoSection(id: "file", title: "File",
+                                             rows: rows(container, group: nil, id: "file")))
         }
         if !extraImages.isEmpty {
             sections.append(PhotoInfoSection(id: "extra", title: "Extra images", footer: extraImagesFooter,
-                                        rows: extraImages))
+                                             rows: extraImages))
         }
         if !xmp.rows.isEmpty {
             // ImageIO repeats the EXIF and TIFF fields here under their XMP names, so the list opens folded.
             let all = PhotoInfoRow(id: "xmp", title: "All tags", value: count(xmp.rows.count, "tag", "tags"),
-                              children: xmp.rows, isPersonal: xmp.rows.contains(where: \.isPersonal))
+                                   children: xmp.rows, isPersonal: xmp.rows.contains(where: \.isPersonal))
             sections.append(PhotoInfoSection(id: "xmp", title: "XMP", rows: [all]))
         }
 
@@ -166,8 +168,12 @@ enum PhotoInfoReader {
         let tiff = groups[key(kCGImagePropertyTIFFDictionary)] ?? [:]
         let exifAux = groups[key(kCGImagePropertyExifAuxDictionary)] ?? [:]
         func value(_ group: [String: Any], _ name: CFString) -> Any? { group[key(name)] }
-        func number(_ group: [String: Any], _ name: CFString) -> Double? { value(group, name).flatMap(PhotoInfoNames.number) }
-        func integer(_ group: [String: Any], _ name: CFString) -> Int? { value(group, name).flatMap(PhotoInfoNames.int) }
+        func number(_ group: [String: Any], _ name: CFString) -> Double? {
+            value(group, name).flatMap(PhotoInfoNames.number)
+        }
+        func integer(_ group: [String: Any], _ name: CFString) -> Int? {
+            value(group, name).flatMap(PhotoInfoNames.int)
+        }
         func text(_ group: [String: Any], _ name: CFString) -> String? {
             PhotoInfoNames.text(value(group, name)).flatMap { $0.isEmpty ? nil : $0 }
         }
@@ -209,7 +215,8 @@ enum PhotoInfoReader {
             let light = integer(exif, kCGImagePropertyExifLightSource).flatMap {
                 $0 == 0 ? nil : MetadataFormat.lightSource($0)
             }
-            add("White balance", [MetadataFormat.whiteBalance(balance), light].compactMap { $0 }.joined(separator: ", "))
+            let balanceText = [MetadataFormat.whiteBalance(balance), light].compactMap { $0 }.joined(separator: ", ")
+            add("White balance", balanceText)
         }
         add("Metering", integer(exif, kCGImagePropertyExifMeteringMode).map(MetadataFormat.meteringMode))
         add("Software", text(tiff, kCGImagePropertyTIFFSoftware))
@@ -326,8 +333,8 @@ enum PhotoInfoReader {
         let nestedGroup = group == PhotoInfoNames.makerApple ? group : ""
         if let nested = value as? [String: Any] {
             return PhotoInfoRow(id: id, title: title, value: count(nested.count, "value", "values"),
-                           children: rows(nested, group: nestedGroup, id: id, personal: isPersonal),
-                           isPersonal: isPersonal)
+                                children: rows(nested, group: nestedGroup, id: id, personal: isPersonal),
+                                isPersonal: isPersonal)
         }
         if let array = value as? [Any], !array.allSatisfy(PhotoInfoNames.isScalar) {
             let children = array.prefix(maxChildren).enumerated().map { offset, element in
@@ -335,12 +342,12 @@ enum PhotoInfoReader {
                     id: id + "/\(offset)", personal: isPersonal)
             }
             return PhotoInfoRow(id: id, title: title, value: count(array.count, "item", "items"),
-                           children: children + more(array.count, id: id), isPersonal: isPersonal)
+                                children: children + more(array.count, id: id), isPersonal: isPersonal)
         }
         if let array = value as? [Any], array.count > shownListLength {
             let shown = array.prefix(shownListLength).map(PhotoInfoNames.describe).joined(separator: ", ")
             return PhotoInfoRow(id: id, title: title, value: shown + ", and \(array.count - shownListLength) more",
-                           isPersonal: isPersonal)
+                                isPersonal: isPersonal)
         }
         let text = PhotoInfoNames.value(group: group, key: name, value: value, siblings: siblings)
             ?? PhotoInfoNames.describe(value)
@@ -388,14 +395,14 @@ enum PhotoInfoReader {
                 return PhotoInfoRow(id: id, title: title, value: elements[0].value, isPersonal: personal)
             }
             return PhotoInfoRow(id: id, title: title, value: count(array.count, "item", "items"),
-                           children: elements + more(array.count, id: id), isPersonal: personal)
+                                children: elements + more(array.count, id: id), isPersonal: personal)
         }
         if let fields = value as? [String: AnyObject] {
             let children = fields.sorted { $0.key < $1.key }.prefix(maxChildren).map { name, element in
                 xmpElement(element, title: name, id: id + "/" + name, personal: personal)
             }
             return PhotoInfoRow(id: id, title: title, value: count(fields.count, "field", "fields"), children: children,
-                           isPersonal: personal)
+                                isPersonal: personal)
         }
         return PhotoInfoRow(id: id, title: title, value: value.map(PhotoInfoNames.describe) ?? "", isPersonal: personal)
     }

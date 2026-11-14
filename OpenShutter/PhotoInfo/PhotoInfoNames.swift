@@ -74,6 +74,10 @@ enum PhotoInfoNames {
             // Apple doesn't document these; the number is all there is to go by.
             return "Apple tag " + key
         }
+        // A dictionary nested in another, such as the container's "{FileContents}".
+        if key.hasPrefix("{") {
+            return groupTitles[key] ?? MetadataFormat.readableKey(groupTitle(key))
+        }
         let names = group.flatMap { keyTitles[$0] } ?? (group == nil ? topTitles : [:])
         return names[key] ?? MetadataFormat.readableKey(key)
     }
@@ -435,9 +439,15 @@ enum PhotoInfoNames {
                 int(value).map { named($0, [0: "None", 1: "Low gain up", 2: "High gain up", 3: "Low gain down",
                                              4: "High gain down"]) }
             }),
-            (kCGImagePropertyExifContrast, { value, _ in int(value).map { named($0, [0: "Normal", 1: "Soft", 2: "Hard"]) } }),
-            (kCGImagePropertyExifSaturation, { value, _ in int(value).map { named($0, [0: "Normal", 1: "Low", 2: "High"]) } }),
-            (kCGImagePropertyExifSharpness, { value, _ in int(value).map { named($0, [0: "Normal", 1: "Soft", 2: "Hard"]) } }),
+            (kCGImagePropertyExifContrast, { value, _ in
+                int(value).map { named($0, [0: "Normal", 1: "Soft", 2: "Hard"]) }
+            }),
+            (kCGImagePropertyExifSaturation, { value, _ in
+                int(value).map { named($0, [0: "Normal", 1: "Low", 2: "High"]) }
+            }),
+            (kCGImagePropertyExifSharpness, { value, _ in
+                int(value).map { named($0, [0: "Normal", 1: "Soft", 2: "Hard"]) }
+            }),
             (kCGImagePropertyExifSubjectDistRange, { value, _ in
                 int(value).map { named($0, [0: "Unknown", 1: "Macro", 2: "Close", 3: "Distant"]) }
             }),
@@ -490,7 +500,9 @@ enum PhotoInfoNames {
             (kCGImagePropertyGPSTrack, { value, siblings in
                 number(value).flatMap { MetadataFormat.direction($0, ref: text(siblings[trackRef])) }
             }),
-            (kCGImagePropertyGPSHPositioningError, { value, _ in number(value).flatMap(MetadataFormat.positioningError) }),
+            (kCGImagePropertyGPSHPositioningError, { value, _ in
+                number(value).flatMap(MetadataFormat.positioningError)
+            }),
             (kCGImagePropertyGPSVersion, { value, _ in version(value) }),
         ]),
         kCGImagePropertyJFIFDictionary as String: formatterTable([
@@ -659,7 +671,9 @@ enum PhotoInfoNames {
         if let string = value as? String { return cleaned(string) }
         if let data = value as? Data { return data.count == 1 ? "1 byte" : "\(data.count) bytes" }
         if let array = value as? [Any] { return array.map(describe).joined(separator: ", ") }
-        if let dictionary = value as? [String: Any] { return dictionary.count == 1 ? "1 value" : "\(dictionary.count) values" }
+        if let dictionary = value as? [String: Any] {
+            return dictionary.count == 1 ? "1 value" : "\(dictionary.count) values"
+        }
         return String(describing: value)
     }
 

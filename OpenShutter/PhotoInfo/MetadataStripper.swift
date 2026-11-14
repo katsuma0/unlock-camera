@@ -38,7 +38,8 @@ enum MetadataStripper {
     /// Writes the clean copy into `folder`, named after `originalName` ("IMG_0001 no metadata.HEIC"). It decodes and
     /// encodes the full picture, which takes a moment and a lot of memory for a large photo: call it off the main
     /// actor, one at a time.
-    static func cleanCopy(of url: URL, mode: StripMode, into folder: URL, originalName: String? = nil) throws -> CleanCopy {
+    static func cleanCopy(of url: URL, mode: StripMode, into folder: URL,
+                          originalName: String? = nil) throws -> CleanCopy {
         _ = namesMatchImageIO
         guard let facts = SourceFacts(url: url) else { throw Failure.unreadable }
         let writable = Set(CGImageDestinationCopyTypeIdentifiers() as? [String] ?? [])
@@ -61,7 +62,9 @@ enum MetadataStripper {
                     }
                 }
                 guard problems.isEmpty else {
-                    log.error("Clean copy, \(step.method.rawValue, privacy: .public) \(variant.tag, privacy: .public) into \(step.outputType, privacy: .public): \(problems.joined(separator: "; "), privacy: .public)")
+                    let way = "\(step.method.rawValue) \(variant.tag) into \(step.outputType)"
+                    let found = problems.joined(separator: "; ")
+                    log.error("Clean copy, \(way, privacy: .public): \(found, privacy: .public)")
                     try? FileManager.default.removeItem(at: attempt)
                     continue
                 }
@@ -323,13 +326,13 @@ enum MetadataStripper {
     private static func upright(_ facts: SourceFacts) throws -> CGImage {
         let side = max(facts.width, facts.height)
         guard side > 0 else { return try decoded(facts) }
-        let options: [CFString: Any] = [
+        let options = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceThumbnailMaxPixelSize: side,
             kCGImageSourceShouldCacheImmediately: true,
-        ]
-        guard let image = CGImageSourceCreateThumbnailAtIndex(facts.source, facts.primary, options as CFDictionary) else {
+        ] as [CFString: Any] as CFDictionary
+        guard let image = CGImageSourceCreateThumbnailAtIndex(facts.source, facts.primary, options) else {
             throw Failure.unreadable
         }
         return image
@@ -348,7 +351,9 @@ enum MetadataStripper {
         return rendered
     }
 
-    private static let gainMapTypes: [CFString] = [kCGImageAuxiliaryDataTypeHDRGainMap, kCGImageAuxiliaryDataTypeISOGainMap]
+    private static let gainMapTypes: [CFString] = [
+        kCGImageAuxiliaryDataTypeHDRGainMap, kCGImageAuxiliaryDataTypeISOGainMap,
+    ]
 
     /// Depth and the portrait and segmentation mattes: images of the scene's shape and of the people in it.
     private static let strayAuxiliaryTypes: [CFString] = [
@@ -486,7 +491,8 @@ enum MetadataStripper {
             if holdsThumbnail(container) {
                 found.append("embedded thumbnail")
             }
-            for type in strayAuxiliaryTypes where CGImageSourceCopyAuxiliaryDataInfoAtIndex(copy, primary, type) != nil {
+            for type in strayAuxiliaryTypes
+            where CGImageSourceCopyAuxiliaryDataInfoAtIndex(copy, primary, type) != nil {
                 found.append(type as String)
             }
         }
