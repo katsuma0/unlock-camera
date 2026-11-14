@@ -206,6 +206,8 @@ private struct StatusBlock: View {
         // Stop. The model's flag lands an update after a tap, and the local one covers that moment.
         let finishing = isFinishing || model.isFinishingStack
         GeometryReader { proxy in
+            let point = Self.place(in: proxy.size, block: blockSize, degrees: degrees,
+                                   crossCenter: isStacking ? crossCenter : nil)
             VStack(spacing: 10) {
                 if let status = model.intervalometer {
                     IntervalStatusLine(status: status)
@@ -235,11 +237,11 @@ private struct StatusBlock: View {
                 blockSize = size
             }
             .uprightRotation(degrees)
-            .position(Self.place(in: proxy.size, block: blockSize, degrees: degrees,
-                                 crossCenter: isStacking ? crossCenter : nil))
-            .animation(Theme.spring, value: degrees)
-            // Turned, the block's place depends on its length, which changes as Cancel leaves; it moves with Cancel.
-            .animation(Theme.snappy, value: blockSize)
+            .position(point)
+            // Keyed on the place, not on what moved it: a turn, Cancel leaving and each stack of an intervalometer
+            // starting or ending all move the block. Every move glides on the frame's spring, and cuts under Reduce
+            // motion like the turn itself.
+            .frameMotion(value: point)
         }
         .onChange(of: model.activity) { _, activity in
             if activity != .stacking { isFinishing = false }
@@ -249,7 +251,9 @@ private struct StatusBlock: View {
     /// Below the middle in portrait, clear of the subject; centred when turned, where a sideways block fits. A stack
     /// keeps it off the drift crosses too, since lining them up is what the steady status asks for: lower down in
     /// portrait, and toward the open area's top end when the phone is turned or upside down. Turned, the status, the
-    /// histogram and the badges keep to the sides of that end, so its middle is free.
+    /// histogram and the badges keep to the sides of that end, so its middle is free. Where the open area is too short
+    /// to clear the crosses' reach, as with the phone turned at the shorter shapes, the block stays on screen and the
+    /// camera screen draws the crosses over it.
     private static func place(in size: CGSize, block: CGSize, degrees: Double, crossCenter: CGPoint?) -> CGPoint {
         let usual = CGPoint(x: size.width / 2, y: degrees == 0 ? size.height * 0.72 : size.height / 2)
         guard let cross = crossCenter, cross.y.isFinite else { return usual }

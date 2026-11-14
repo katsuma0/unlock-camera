@@ -403,14 +403,17 @@ private struct ViewfinderStack: View {
             ModeSwitchVeil(isVisible: veilVisible)
             ShutterBlink(model: model)
             FrameBands(frame: frame, solid: bandsSolid)
-            DriftCrosshair(model: model, imageDiagonal: geometry.pictureDiagonal)
-                .position(x: frame.midX, y: frame.midY)
-                .allowsHitTesting(false)
             // Countdown, status and Stop sit in the part of the frame the top bar and the controls leave open.
             CaptureOverlay(model: model, crossCenter: CGPoint(x: frame.midX - open.minX, y: frame.midY - open.minY))
                 .frame(width: max(open.width, 1), height: max(open.height, 1))
                 .position(x: open.midX, y: open.midY)
                 .frameMotion(value: open)
+            // Over the stack's status: where the open area is too short for the block to clear the crosses, as with
+            // the phone turned at the shorter shapes, the crosses stay in sight. They never take a touch, so Stop and
+            // Cancel under them still do.
+            DriftCrosshair(model: model, imageDiagonal: geometry.pictureDiagonal)
+                .position(x: frame.midX, y: frame.midY)
+                .allowsHitTesting(false)
             ViewfinderOverlays(model: model, geometry: geometry, topShift: bannerShift)
             ExposureSliderLayer(model: model, interaction: interaction, geometry: geometry)
             HistogramSlot(model: model, open: open, topShift: bannerShift)
