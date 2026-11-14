@@ -1128,6 +1128,9 @@ extension CameraService {
             if let engine = job.engine, job.phase == .collecting {
                 engine.finishEarly()
                 finishStack(job)
+                // Said before the restart: a restart that works publishes only .running, which the model already
+                // has, so without this it would go on asking to keep still while the picture is put together.
+                publishState(.interrupted("The camera stopped, so the shot ends with the frames it has."))
             } else if job.phase == .settingExposure {
                 endStack(job, result: .failure(CameraError.captureFailed(message ?? "The camera stopped unexpectedly.")))
             }
