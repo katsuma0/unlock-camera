@@ -81,11 +81,21 @@ final class CameraModel {
             if activeDial == nil { applyCameraControls() }
         }
     }
-    var isSettingsPresented = false
+    /// Settings covers the camera. A shot can still run under it, but the battery saver leaves that screen lit.
+    var isSettingsPresented = false {
+        didSet {
+            guard oldValue != isSettingsPresented else { return }
+            coverDidChange(closed: !isSettingsPresented)
+        }
+    }
     var isDrawerOpen = false
     /// The gallery is up (the editor opens inside it). The camera stops under it (updateGalleryPause).
     var isReviewPresented = false {
-        didSet { if oldValue != isReviewPresented { updateGalleryPause() } }
+        didSet {
+            guard oldValue != isReviewPresented else { return }
+            updateGalleryPause()
+            coverDidChange(closed: !isReviewPresented)
+        }
     }
 
     let backend: CameraBackend
@@ -200,6 +210,11 @@ final class CameraModel {
     /// up to a tenth of a second old, and a lens button's zoom plans from it.
     @ObservationIgnored private var requestedDisplayZoom: Double = 1
     @ObservationIgnored private var zoomTargetTask: Task<Void, Never>?
+    /// The zoom request whose glide holds zoomTarget (holdZoomTarget, releaseZoomTarget).
+    @ObservationIgnored private var zoomTargetGeneration = 0
+    /// The countdown has just run out and its shot starts in this same turn, so a lens change parked behind the
+    /// countdown waits for the shot (activityDidChange).
+    @ObservationIgnored private var countdownRanOut = false
     /// What the shot being counted down or taken needs, fixed when it started: the plan keeps moving with the light,
     /// and the pill shouldn't change its mind halfway.
     @ObservationIgnored private var captureNeed: SteadyNeed?
@@ -272,10 +287,21 @@ final class CameraModel {
     }
 
     /// The next back lens button, wrapping around after the longest (a hardware button's Next lens). While filming,
-    /// the recording lens zooms to that button's value instead, as the lens buttons do.
+    /// the recording lens zooms to the next button's value past the zoom asked for last, as the lens buttons do, and
+    /// wraps once no value it can reach is left.
     func selectNextLens() {
         let presets = backLensPresets
         guard !presets.isEmpty else { return }
+        if activity == .recording {
+            // A movie keeps its lens, so the active button can stay on a shorter one while the zoom moves on (the
+            // wide at 5x still lights its 2x button), and stepping from it would ask for the same value again.
+            let reach = capabilities.zoomRange.upperBound * (activeLens?.relativeZoom ?? 1)
+            let next = presets.first(where: {
+                $0.displayZoom > requestedDisplayZoom + 0.01 && $0.displayZoom <= reach + 0.01
+            }) ?? presets[0]
+            setDisplayZoom(next.displayZoom, animated: true)
+            return
+        }
         // Quick presses step on from the button already chosen, not from the one a glide or a swap still shows.
         let currentID = pendingPreset?.id
             ?? zoomTarget.flatMap { target in presets.first(where: { abs($0.displayZoom - target) < 0.01 })?.id }
@@ -283,11 +309,7 @@ final class CameraModel {
         let next = presets.firstIndex(where: { $0.id == currentID }).map { presets[($0 + 1) % presets.count] }
             ?? presets.first(where: { $0.id == lastBackPresetID })
             ?? presets[0]
-        if activity == .recording {
-            setDisplayZoom(next.displayZoom, animated: true)
-        } else {
-            select(next)
-        }
+        select(next)
     }
 
     // MARK: Zoom transition bookkeeping
@@ -311,21 +333,25 @@ final class CameraModel {
         return zoomRequestGeneration
     }
 
-    private func holdZoomTarget(_ value: Double) {
+    /// generation: the request whose glide shows the target from now on, the only one that lets go of it.
+    private func holdZoomTarget(_ value: Double, generation: Int) {
         zoomTargetTask?.cancel()
         zoomTargetTask = nil
+        zoomTargetGeneration = generation
         if zoomTarget != value { zoomTarget = value }
     }
 
     /// The target stays on the button until the motion has landed, so the button doesn't count through the values
-    /// in between at the readings' rate. A newer request owns the target from then on: it holds or clears its own.
-    /// Called only after a transition's last step, so no swap of the same request is still running.
+    /// in between at the readings' rate. Only the request holding it lets go: a newer one that glides holds its own,
+    /// and one that glides nothing (a choice parked behind a shot) would otherwise leave the button frozen on a
+    /// target with nothing on its way there. Called after a transition's last step, or for a step called off.
     private func releaseZoomTarget(after seconds: Double, generation: Int) {
+        guard zoomTarget != nil, generation == zoomTargetGeneration else { return }
         zoomTargetTask?.cancel()
         let wait = max(seconds.isFinite ? seconds : 0, 0) + Self.zoomTargetLinger
         zoomTargetTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
-            guard !Task.isCancelled, let self, generation == self.zoomRequestGeneration else { return }
+            guard !Task.isCancelled, let self, generation == self.zoomTargetGeneration else { return }
             self.clearZoomTarget(resync: true)
         }
     }
@@ -339,21 +365,25 @@ final class CameraModel {
         if resync { updateActivePreset() }
     }
 
-    /// Leaving the app or the camera drops whatever step a lens button's transition had left. The settings already
-    /// hold where it was going, so the camera opens there again.
+    /// Leaving the app or the camera drops whatever step a lens button's transition had left. The settings name the
+    /// lens the camera is on, or the one a swap was bringing up, with the zoom it was going to, and the next start
+    /// brings the camera there (startBackend): a warm session keeps whatever the device had reached.
     private func cancelZoomTransition() {
         zoomRequestGeneration &+= 1
         clearZoomTarget(resync: false)
     }
 
     /// Glides the active lens to a device zoom `factor` at the speed a lens button takes from `from` to `to`
-    /// (display zoom). endsTransition: false while a lens swap is still to follow, which releases the target itself.
+    /// (display zoom); with Reduce Motion it cuts there. endsTransition: false while a lens swap is still to follow,
+    /// which releases the target itself.
     private func rampZoom(toFactor factor: Double, from: Double, to: Double, generation: Int,
                           endsTransition: Bool = true) {
         lastZoomCommand = Date()
-        backend.setZoomFactor(factor, rampRate: ZoomMath.rampRate(from: from, to: to))
+        let glides = !reducesMotion
+        backend.setZoomFactor(factor, rampRate: glides ? ZoomMath.rampRate(from: from, to: to) : nil)
         if endsTransition {
-            releaseZoomTarget(after: ZoomMath.rampDuration(from: from, to: to), generation: generation)
+            // A cut keeps the target only until the readings catch up with it.
+            releaseZoomTarget(after: glides ? ZoomMath.rampDuration(from: from, to: to) : 0, generation: generation)
         }
     }
 
@@ -370,12 +400,11 @@ final class CameraModel {
             lastZoomCommand = Date()
             refreshLenses()
             applyCameraControls()
-            if generation == zoomRequestGeneration {
-                if let completion {
-                    completion()
-                } else {
-                    releaseZoomTarget(after: 0, generation: generation)
-                }
+            if generation == zoomRequestGeneration, let completion {
+                completion()
+            } else {
+                // The last step, or a newer request called off the rest.
+                releaseZoomTarget(after: 0, generation: generation)
             }
             applyPendingLensChange()
         }
@@ -408,7 +437,9 @@ final class CameraModel {
         case .countdown:
             phase = .countingDown
         case .stacking:
-            // Once every frame is in, the picture is being put together and holding still no longer matters.
+            // Once every frame is in, or the shot was told to finish, the picture is being put together and holding
+            // still no longer matters.
+            if isFinishingStack { return nil }
             if let progress = stackProgress, progress.framesPlanned > 0, progress.framesCaptured >= progress.framesPlanned {
                 return nil
             }
@@ -451,19 +482,39 @@ final class CameraModel {
     /// second), the motion sensor, the shutter's state, a bulb hold and the setting.
     private func updateDimming() {
         let progress = stackProgress
-        let framesAllIn = progress.map { $0.framesPlanned > 0 && $0.framesCaptured >= $0.framesPlanned } ?? false
-        let shouldDim = DimPolicy.shouldDim(
-            isEnabled: settings.display.dimDuringLongShots,
-            isCapturing: activity == .stacking && progress != nil,
-            elapsed: progress?.elapsed ?? 0,
-            total: progress?.estimatedTotal,
-            framesAllIn: framesAllIn,
-            isSteady: motion.isSteady,
-            sensorAvailable: motion.isAvailable,
-            bulbHeld: bulbHoldActive,
-            sinceWake: dimmer.secondsSinceWake
-        )
+        // A bulb plans no frames, so only a finish asked for says its last frame is in.
+        let framesAllIn = isFinishingStack
+            || (progress.map { $0.framesPlanned > 0 && $0.framesCaptured >= $0.framesPlanned } ?? false)
+        func rule(steady: Bool) -> Bool {
+            DimPolicy.shouldDim(
+                isEnabled: settings.display.dimDuringLongShots,
+                // The gallery or Settings can be up while an intervalometer or a settled shot runs under it. The
+                // dark layer and its wake touch sit under them, and the brightness is the whole screen's.
+                isCapturing: activity == .stacking && progress != nil && !isReviewPresented && !isSettingsPresented,
+                elapsed: progress?.elapsed ?? 0,
+                total: progress?.estimatedTotal,
+                framesAllIn: framesAllIn,
+                isSteady: steady,
+                sensorAvailable: motion.isAvailable,
+                bulbHeld: bulbHoldActive,
+                sinceWake: dimmer.secondsSinceWake
+            )
+        }
+        let shouldDim = rule(steady: motion.isSteady)
+        // A gust or a bump lights the dark screen for the crosses, and it stays lit the wake time, as after a touch.
+        // Darkened again at the next calm moment, wind would flash the screen with every gust.
+        if dimmer.isDimmed, !shouldDim, rule(steady: true) {
+            dimmer.wake()
+            return
+        }
         dimmer.update(shouldDim: shouldDim)
+    }
+
+    /// The gallery or Settings opened or closed over the camera. Opening lights the screen at once; closing during a
+    /// shot is a look at it, so it stays lit the wake time before it may go dark again.
+    private func coverDidChange(closed: Bool) {
+        if closed, activity == .stacking { dimmer.noteLook() }
+        updateDimming()
     }
 
     /// Under the black screen the crosses stop drawing (tracking goes on) and the pill steps aside.
@@ -491,6 +542,9 @@ final class CameraModel {
             pendingZoom = nil
             cancelZoomTransition()
             motionMonitor.stop()
+            // The most precise fix and the compass are for shots, and none can start under the gallery.
+            // startBackend turns them back on.
+            locationProvider.setEnabled(false)
             backend.stop()
             backendRunning = false
         } else if pausedForGallery, !isReviewPresented {
@@ -635,7 +689,11 @@ final class CameraModel {
             // A bracket's remaining frames would only fail one by one against the stopped session.
             cancelSchedule()
         }
+        // The stopped session finishes a stack with the frames it has, and the return finds it putting them together.
+        noteStackFinishing()
         motionMonitor.stop()
+        // Every request still on its way took its location when it was made.
+        locationProvider.setEnabled(false)
         backend.stop()
         backendRunning = false
     }
@@ -863,6 +921,8 @@ final class CameraModel {
         // it would cut the glide short with a swap.
         if !replaying, let target = zoomTarget, preset.id == activePresetID, abs(target - preset.displayZoom) < 0.001 {
             if haptic { Haptics.tap() }
+            // Its swap was parked behind a shot that has ended since: the tap takes it now.
+            if pendingPreset?.id == preset.id { replayParkedLensChange() }
             return
         }
         lastZoomCommand = Date()
@@ -901,7 +961,7 @@ final class CameraModel {
         scheduleSave()
         if haptic { Haptics.tap() }
         if current == preset.lensID {
-            holdZoomTarget(to)
+            holdZoomTarget(to, generation: generation)
             rampZoom(toFactor: preset.zoomFactor, from: from, to: to, generation: generation)
             return
         }
@@ -1429,6 +1489,7 @@ final class CameraModel {
             // A second tap ends a bulb or long exposure and keeps what it has, like releasing a cable release.
             backend.finishStackEarly()
             motionMonitor.endDrift()
+            noteStackFinishing()
             return
         case .countdown:
             cancelSchedule()
@@ -1516,6 +1577,7 @@ final class CameraModel {
         if activity == .stacking {
             backend.finishStackEarly()
             motionMonitor.endDrift()
+            noteStackFinishing()
         }
         updateDimming()
     }
@@ -1534,10 +1596,21 @@ final class CameraModel {
             backend.finishStackEarly()
             // No more frames come in, so the crosses have nothing to follow.
             motionMonitor.endDrift()
+            noteStackFinishing()
         }
         if activity == .recording {
             stopRecording()
         }
+    }
+
+    /// A running stack was told to finish and keeps what it has. The stack goes on putting the picture together
+    /// for a while, and the screen says so whichever button stopped it: lit for Processing, with no pill asking to
+    /// keep still. Never for a cancel, which ends the shot without a picture.
+    private func noteStackFinishing() {
+        guard activity == .stacking, !isFinishingStack else { return }
+        isFinishingStack = true
+        refreshSteadyStatus()
+        updateDimming()
     }
 
     /// Aborts a running stack and discards it.
@@ -1794,6 +1867,7 @@ final class CameraModel {
     }
 
     private func performStack(request: StackRequest) async {
+        isFinishingStack = false
         // The pill keeps the need of the plan that runs, whatever the light does to the plan in view.
         captureNeed = settings.mode == .long ? longSteadyNeed(plan: request.plan) : liveSteadyNeed
         dimmer.resetWake()
@@ -1826,6 +1900,7 @@ final class CameraModel {
             failure = error
         }
         stackProgress = nil
+        isFinishingStack = false
         captureNeed = nil
         activity = .idle
         bulbHoldActive = false
@@ -1967,8 +2042,34 @@ final class CameraModel {
     /// (currentLocation); the metadata builder checks that again. Photos add their processing, flash and Live.
     private func shotContext(bracket: BracketPosition? = nil) -> ShotContext {
         let mode = settings.mode
-        let whiteBalance = effectiveWhiteBalance
-        let focus = effectiveFocus
+        var whiteBalance = effectiveWhiteBalance
+        var whiteBalanceFromScene = settings.whiteBalance.isAuto && !whiteBalance.isAuto
+        var kelvin = displayKelvin
+        var tint = displayTint
+        var focus = effectiveFocus
+        var focusFromScene = settings.focus.lensPosition == nil && focus.lensPosition != nil
+        var held = focusHeld
+        var lensPosition = displayLensPosition
+        // A focus or white balance bracket frame runs at the value its loop set on the camera, not the person's
+        // setting. Only where the camera takes such a value: without it the loop's request changes nothing.
+        if let bracket, let value = bracket.value, value.isFinite {
+            switch bracket.kind {
+            case .whiteBalance where capabilities.supportsCustomWhiteBalance:
+                // The tint performWhiteBalanceBracket keeps for every frame.
+                let frameTint = whiteBalance.tintValue
+                whiteBalance = .kelvin(value, tint: frameTint)
+                whiteBalanceFromScene = false
+                kelvin = value
+                tint = frameTint
+            case .focus where capabilities.supportsManualFocus:
+                focus = .manual(lensPosition: value)
+                focusFromScene = false
+                held = false
+                lensPosition = value
+            default:
+                break
+            }
+        }
         let metered = meteredProduct
         let steady: Bool? = motion.isAvailable ? motion.isSteady : nil
         let zoom = readings.displayZoom.isFinite && readings.displayZoom > 0 ? readings.displayZoom : requestedDisplayZoom
@@ -1985,13 +2086,13 @@ final class CameraModel {
             meteringArea: capabilities.supportsMeteringArea ? settings.exposure.meteringArea : .automatic,
             meteredProduct: metered.isFinite && metered > 0 ? metered : nil,
             whiteBalance: whiteBalance,
-            whiteBalanceFromScene: settings.whiteBalance.isAuto && !whiteBalance.isAuto,
-            kelvin: displayKelvin,
-            tint: displayTint,
+            whiteBalanceFromScene: whiteBalanceFromScene,
+            kelvin: kelvin,
+            tint: tint,
             focus: focus,
-            focusFromScene: settings.focus.lensPosition == nil && focus.lensPosition != nil,
-            focusHeld: focusHeld,
-            lensPosition: displayLensPosition,
+            focusFromScene: focusFromScene,
+            focusHeld: held,
+            lensPosition: lensPosition,
             aspect: settings.capture.aspect,
             displayZoom: zoom,
             timerSeconds: timerSecondsForShot,

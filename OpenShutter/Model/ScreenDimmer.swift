@@ -72,6 +72,12 @@ final class ScreenDimmer {
         wokeAt = nil
     }
 
+    /// The person is looking at the screen without having touched the overlay: a sheet that covered the camera
+    /// during the shot has just closed. It stays lit the wake time, as after a touch.
+    func noteLook() {
+        wokeAt = Date()
+    }
+
     /// Brightness first, then the layer, so the picture never shows at the lowered brightness.
     func restore() {
         lowerTask?.cancel()
