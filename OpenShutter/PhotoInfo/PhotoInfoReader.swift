@@ -95,9 +95,9 @@ enum PhotoInfoReader {
         let xmp = xmpTags(CGImageSourceCopyMetadataAtIndex(source, index, nil))
         let extraImages = auxiliaryImages(source, index: index)
 
-        let width = PhotoInfoNames.int(topLevel[key(kCGImagePropertyPixelWidth)] as Any) ?? 0
-        let height = PhotoInfoNames.int(topLevel[key(kCGImagePropertyPixelHeight)] as Any) ?? 0
-        let orientation = PhotoInfoNames.int(topLevel[key(kCGImagePropertyOrientation)] as Any) ?? 1
+        let width = topLevel[key(kCGImagePropertyPixelWidth)].flatMap(PhotoInfoNames.int) ?? 0
+        let height = topLevel[key(kCGImagePropertyPixelHeight)].flatMap(PhotoInfoNames.int) ?? 0
+        let orientation = topLevel[key(kCGImagePropertyOrientation)].flatMap(PhotoInfoNames.int) ?? 1
         let turned = orientation >= 5 && orientation <= 8
         let shownWidth = turned ? height : width
         let shownHeight = turned ? width : height
@@ -105,9 +105,9 @@ enum PhotoInfoReader {
             ? "\(shownWidth) \u{00D7} \(shownHeight), " + Formatting.megapixels(width: shownWidth, height: shownHeight)
             : nil
         let fileSize = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.int64Value
-            ?? PhotoInfoNames.int(container[key(kCGImagePropertyFileSize)] as Any).map(Int64.init)
+            ?? container[key(kCGImagePropertyFileSize)].flatMap(PhotoInfoNames.int).map(Int64.init)
 
-        let location = location(groups[PhotoInfoNames.gps] ?? [:])
+        let place = placeTaken(groups[PhotoInfoNames.gps] ?? [:])
         let summary = summaryRows(groups: groups, topLevel: topLevel, app: xmp.app, extraImages: extraImages)
         let appRows = ShotXMP.Field.allCases.compactMap { field in
             xmp.app[field].map { InfoRow(id: "app/" + field.rawValue, title: PhotoInfoNames.appTitle(field),
@@ -140,18 +140,18 @@ enum PhotoInfoReader {
         let inventory = MetadataStripper.inventory(of: source, at: index)
         let held = MetadataStripPlan.categories(in: inventory)
         let categories = MetadataStripPlan.Category.allCases.filter { held.contains($0) }
-        let hasPersonalRows = location != nil || sections.contains { $0.rows.contains(where: containsPersonal) }
+        let hasPersonalRows = place != nil || sections.contains { $0.rows.contains(where: containsPersonal) }
         let typeName = UTType(type)?.localizedDescription ?? type
         let fileName = url.lastPathComponent
 
         let plainText = text(fileName: fileName, typeName: typeName, sizeText: sizeText, fileSize: fileSize,
-                             summary: summary, locationRows: location?.rows ?? [], appRows: appRows,
+                             summary: summary, locationRows: place?.rows ?? [], appRows: appRows,
                              sections: sections)
         return PhotoInfo(fileName: fileName, typeIdentifier: type, typeName: typeName, sizeText: sizeText,
                          fileSize: fileSize, imageCount: CGImageSourceGetCount(source),
                          isRAW: PhotoInfoFiles.isRAW(typeIdentifier: type),
                          thumbnail: thumbnail(source, index: index), summary: summary,
-                         location: location?.place, locationRows: location?.rows ?? [], appRows: appRows,
+                         location: place?.place, locationRows: place?.rows ?? [], appRows: appRows,
                          sections: sections, categories: categories, hasPersonalRows: hasPersonalRows,
                          plainText: plainText)
     }
@@ -260,7 +260,7 @@ enum PhotoInfoReader {
 
     // MARK: - Location
 
-    private static func location(_ gps: [String: Any]) -> (place: PhotoLocation, rows: [InfoRow])? {
+    private static func placeTaken(_ gps: [String: Any]) -> (place: PhotoLocation, rows: [InfoRow])? {
         func value(_ name: CFString) -> Any? { gps[key(name)] }
         func number(_ name: CFString) -> Double? { value(name).flatMap(PhotoInfoNames.number) }
         func text(_ name: CFString) -> String? { PhotoInfoNames.text(value(name)) }
