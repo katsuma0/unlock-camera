@@ -28,7 +28,7 @@ final class CaptureLibrary: NSObject, PHPhotoLibraryChangeObserver {
     private(set) var isLoaded = false
     /// The recorded assets the library shows now, newest first. nil without read access or before the first fetch.
     private(set) var assets: AssetList?
-    /// Recorded assets the last fetch didn't find: deleted, in Recently Deleted, hidden, or outside a limited
+    /// Recorded assets the last fetch didn't find: deleted outside the gallery, hidden, or outside a limited
     /// selection. The list keeps them: a restored photo comes back with the same identifier.
     private(set) var missingCount = 0
     /// The newest visible asset's picture, so the camera's thumbnail shows the last photo again after a relaunch.
