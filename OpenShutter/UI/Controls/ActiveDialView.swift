@@ -60,6 +60,8 @@ private struct DialPanel: View {
                 Text(kind == .aperture ? "This lens has a fixed aperture." : "Not available on this camera.")
                     .font(.footnote)
                     .foregroundStyle(Theme.secondaryText)
+                    // At 16:9 this sits on the picture with nothing behind it.
+                    .shadow(color: .black.opacity(0.6), radius: 4)
                     .frame(height: 56)
                     .opacity(dimmed ? 0.45 : 1)
             } else {
