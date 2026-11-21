@@ -17,7 +17,7 @@ struct GalleryAccessView: View {
             Section {
                 VStack(alignment: .leading, spacing: 12) {
                     Image(systemName: "photo.on.rectangle.angled")
-                        .font(.system(size: 34, weight: .regular))
+                        .font(.system(size: 34, weight: .light))
                         .foregroundStyle(.tint)
                         .accessibilityHidden(true)
                     Text("Your photos from Open Shutter")
@@ -138,7 +138,7 @@ struct LimitedAccessBanner: View {
         }
         .padding(12)
         .background(Color(uiColor: .secondarySystemGroupedBackground),
-                    in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    in: RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous))
     }
 }
 

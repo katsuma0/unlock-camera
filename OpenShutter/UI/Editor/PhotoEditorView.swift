@@ -339,7 +339,7 @@ private struct EditorBusyOverlay: View {
             }
             .padding(.horizontal, 28)
             .padding(.vertical, 22)
-            .cameraGlass(in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+            .cameraGlass(in: RoundedRectangle(cornerRadius: Theme.Radius.sheet, style: .continuous))
             .accessibilityElement(children: .combine)
         }
     }

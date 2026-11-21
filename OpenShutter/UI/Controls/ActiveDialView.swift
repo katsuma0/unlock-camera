@@ -299,7 +299,7 @@ private struct FocusEndGlyphs: View {
             Spacer(minLength: 0)
             UprightImage(model: model, systemName: "infinity")
         }
-        .font(.system(size: 12, weight: .semibold))
+        .font(.system(size: 12, weight: .regular))
         .foregroundStyle(Theme.secondaryText)
         // Grey glyphs on the picture at the dial's ends: the shadow keeps them apart from a bright sky.
         .legibleShadow()
@@ -444,7 +444,7 @@ private struct PresetButton: View {
     var body: some View {
         Button(action: action) {
             UprightImage(model: model, systemName: systemName)
-                .font(.system(size: 15, weight: .semibold))
+                .font(.system(size: 15, weight: .medium))
                 .foregroundStyle(isSelected ? Theme.accent : Theme.primaryText)
                 .frame(width: 38, height: 38)
                 .cameraGlass(in: Circle())

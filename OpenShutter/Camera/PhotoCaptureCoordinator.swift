@@ -374,7 +374,9 @@ final class PhotoCaptureCoordinator: NSObject, AVCapturePhotoCaptureDelegate {
 
         guard !results.isEmpty else {
             if let error = batch.error as? CameraError { return .failure(error) }
-            let reason = batch.error?.localizedDescription ?? "The camera returned no photo."
+            // AVFoundation's text names error domains and codes; the log keeps it, people get a plain line.
+            if let error = batch.error { Self.log.error("Capture failed: \(error, privacy: .public)") }
+            let reason = batch.error == nil ? "The camera returned no photo." : "Try again."
             return .failure(CameraError.captureFailed(reason))
         }
         // A save that failed still returns its result, marked unsaved, so the model can tell the user.

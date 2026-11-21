@@ -155,19 +155,27 @@ private struct ExposureChip: View {
                 Text(EVFormat.label(bias))
                     .contentTransition(.numericText(value: bias))
             }
+            // Flattened first: the value redraws with every detent while the dial turns.
+            .compositingGroup()
+            .accentGlow(isOpen)
         }
         .font(Theme.chipFont)
         .foregroundStyle(isAdjusted || isOpen ? Theme.accent : Theme.primaryText)
         .lineLimit(1)
         // The shutter chip's floor: inside the room beside the lens buttons a long value shrinks a little.
         .minimumScaleFactor(0.7)
-        .padding(.horizontal, 9)
-        .frame(height: 30)
+        .padding(.horizontal, Theme.chipPadding)
+        .frame(height: Theme.chipHeight)
         .cameraGlass(in: Capsule())
         .instrumentEdge(isActive: isOpen)
         .animation(Theme.spring, value: isOpen)
         .scaleEffect(press.isPressed ? 0.94 : 1)
         .animation(Theme.snappy, value: press.isPressed)
+        // Felt as the exposure leaves the camera's own, as the strip's chips do.
+        .onChange(of: isAdjusted) { old, new in
+            guard isOpen, !old, new else { return }
+            Haptics.takeOver()
+        }
         .frame(minWidth: 44, minHeight: 44)
         .contentShape(Rectangle())
         .onTapGesture { Self.toggleDial(model) }

@@ -68,6 +68,12 @@ struct LensPicker: View {
                         focusedID = newValue
                     }
                 }
+                // A soft tap as a glide's figure comes to rest on its lens, the press's tap having said it left.
+                // Not under the wheel, whose own ticks already follow the finger.
+                .onChange(of: zoomTarget != nil) { gliding, glides in
+                    guard gliding, !glides, !isWheelOpen else { return }
+                    Haptics.land()
+                }
                 .onChange(of: displayZoom) { _, newValue in
                     if let stale = zoomAtSwitch, abs(newValue - stale) > 0.005 {
                         zoomAtSwitch = nil
@@ -142,12 +148,15 @@ struct LensPicker: View {
         // One view whatever the button's role, changing only its values: the active role passes from button to
         // button under a finger dragging the wheel, and a change of view there would cancel the drag.
         return Text(title)
-            .font(.system(size: isActive ? 13 : 12, weight: .semibold).monospacedDigit())
+            // One size in both roles: the circle grows and the colour changes, so the figure itself stays put as
+            // the role passes and doesn't jitter under a finger dragging the wheel.
+            .font(.system(size: 12, weight: .semibold).monospacedDigit())
             .foregroundStyle(isActive ? Theme.accent : Theme.primaryText)
             .lineLimit(1)
             .minimumScaleFactor(0.6)
             .padding(.horizontal, 4)
             .contentTransition(.numericText())
+            .accentGlow(isActive)
             .uprightRotation(rotation)
             .frame(width: diameter, height: diameter)
             .cameraGlass(in: Circle())

@@ -20,6 +20,9 @@ enum Haptics {
     private static let medium = UIImpactFeedbackGenerator(style: .medium)
     private static let heavy = UIImpactFeedbackGenerator(style: .heavy)
     private static let rigid = UIImpactFeedbackGenerator(style: .rigid)
+    private static let soft = UIImpactFeedbackGenerator(style: .soft)
+    /// When the steady sign last said the phone was still, so a hand that keeps settling isn't tapped every second.
+    private static var lastSettle: Date?
     private static let notification = UINotificationFeedbackGenerator()
 
     private static var canPlay: Bool { isEnabled && !isSuppressed }
@@ -71,6 +74,40 @@ enum Haptics {
         case .light: rigid.impactOccurred(intensity: 0.4)
         case .normal: rigid.impactOccurred(intensity: 0.7)
         case .strong: rigid.impactOccurred(intensity: 1)
+        }
+    }
+
+    /// A lens figure coming to rest at the end of its glide: softer than the press's tap that started it.
+    static func land() {
+        guard canPlay else { return }
+        switch strength {
+        case .light: soft.impactOccurred(intensity: 0.4)
+        case .normal: soft.impactOccurred(intensity: 0.65)
+        case .strong: soft.impactOccurred(intensity: 0.95)
+        }
+    }
+
+    /// The steady sign's wave lying flat and green: the phone is still enough to shoot. At most once every few
+    /// seconds, since a hand-held phone settles and stirs again and again.
+    static func settle() {
+        guard canPlay else { return }
+        let now = Date()
+        if let lastSettle, now.timeIntervalSince(lastSettle) < 4 { return }
+        lastSettle = now
+        switch strength {
+        case .light: light.impactOccurred(intensity: 0.3)
+        case .normal: light.impactOccurred(intensity: 0.5)
+        case .strong: light.impactOccurred(intensity: 0.8)
+        }
+    }
+
+    /// A value going from the camera's own to one set by hand: a firm click, so the change of who holds it is felt.
+    static func takeOver() {
+        guard canPlay else { return }
+        switch strength {
+        case .light: rigid.impactOccurred(intensity: 0.45)
+        case .normal: rigid.impactOccurred(intensity: 0.65)
+        case .strong: rigid.impactOccurred(intensity: 0.9)
         }
     }
 

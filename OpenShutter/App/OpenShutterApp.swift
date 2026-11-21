@@ -29,7 +29,12 @@ struct OpenShutterApp: App {
         #else
         let isSimulator = false
         #endif
+        // The fake camera is a development aid; a store build always uses the real one.
+        #if DEBUG
         let forced = ProcessInfo.processInfo.arguments.contains("-simulatedCamera")
+        #else
+        let forced = false
+        #endif
         // No device lookup here: it wakes the camera server on the main thread before the first frame, and
         // CameraService already reports a missing camera from its own queue.
         if isSimulator || forced {

@@ -171,7 +171,8 @@ private struct FormatRowView: View {
 private enum CapabilityReport {
     /// Only for a build that can't see iOS 27's features, which would otherwise read as missing from the camera.
     static var intro: String? {
-        buildLacksIOS27Features ? "Built with Xcode 26, so iOS 27 features read as missing." : nil
+        guard buildLacksIOS27Features else { return nil }
+        return "This version of Open Shutter can't use iOS 27 features yet, so they show as missing."
     }
 
     /// iOS 27 features are compiled only by Xcode 27 (Swift 6.4). On iOS 27 an Xcode 26 build would otherwise seem

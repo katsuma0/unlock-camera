@@ -88,7 +88,7 @@ struct ExposureSettingsView: View {
             if !UnavailableFeatures.runsIOS27 {
                 notes.append("Aperture speed needs iOS 27 and a lens with a variable aperture.")
             } else if !UnavailableFeatures.hasIOS27Code {
-                notes.append("Aperture speed needs an Xcode 27 build and a lens with a variable aperture.")
+                notes.append("Aperture speed needs a newer version of Open Shutter and a lens with a variable aperture.")
             } else {
                 notes.append("Aperture speed needs a lens with a variable aperture.")
             }

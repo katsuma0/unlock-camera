@@ -141,7 +141,7 @@ private struct HeaderSection: View {
                     .resizable()
                     .scaledToFit()
                     .frame(maxHeight: 240)
-                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.small, style: .continuous))
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 4)
             }

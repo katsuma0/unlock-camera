@@ -1,6 +1,7 @@
 import SwiftUI
 import UIKit
 import Photos
+import PhotosUI
 import CameraCore
 
 /// The app's photos and videos, three to a row as in Photos: the oldest at the top and the newest at the bottom,
@@ -15,6 +16,8 @@ struct GalleryGrid: View {
     @Binding var selection: Set<String>
     let onOpen: (String) -> Void
     let onChangeShared: () -> Void
+    /// Share, Favorite or Delete from a cell's touch-and-hold menu.
+    let onAction: (GridAction, PHAsset) -> Void
 
     @State private var width: CGFloat = 0
     @Environment(\.displayScale) private var displayScale
@@ -43,6 +46,8 @@ struct GalleryGrid: View {
                                 onOpen(id)
                             } onToggle: {
                                 toggle(id)
+                            } onAction: { action, asset in
+                                onAction(action, asset)
                             }
                         }
                     }
@@ -108,8 +113,11 @@ private struct GridCell: View {
     let isSelected: Bool
     let onOpen: () -> Void
     let onToggle: () -> Void
+    let onAction: (GridAction, PHAsset) -> Void
 
     @State private var image: UIImage?
+    /// The duration over a video, in the system's small text, capped so it never covers the picture.
+    @ScaledMetric(relativeTo: .caption2) private var durationSize: CGFloat = 11
 
     var body: some View {
         let entry = library.entry(for: id)
@@ -128,14 +136,12 @@ private struct GridCell: View {
                 }
                 .clipShape(shape)
                 .overlay {
-                    // The picked ones keep full brightness and take the ring; the rest step back a little.
-                    if isSelecting, !isSelected {
-                        shape.fill(Color.black.opacity(0.22))
-                    }
-                }
-                .overlay {
+                    // The picked ones take a light wash of the accent, which reads at a glance down a long grid
+                    // without a frame round each; the rest step back a little.
                     if isSelected {
-                        shape.strokeBorder(Theme.accent, lineWidth: 2.5)
+                        shape.fill(Theme.accent.opacity(0.24))
+                    } else if isSelecting {
+                        shape.fill(Color.black.opacity(0.22))
                     }
                 }
                 .overlay(alignment: .bottomTrailing) {
@@ -146,7 +152,7 @@ private struct GridCell: View {
                             .transition(.scale(scale: 0.6).combined(with: .opacity))
                     } else if let asset, asset.mediaType == .video {
                         Text(Formatting.clock(asset.duration))
-                            .font(.system(size: 11, weight: .medium).monospacedDigit())
+                            .font(.system(size: min(durationSize, 15), weight: .medium).monospacedDigit())
                             .foregroundStyle(Color.white)
                             .shadow(color: .black.opacity(0.6), radius: 2)
                             .padding(5)
@@ -169,6 +175,7 @@ private struct GridCell: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(GridCellButtonStyle())
+        .modifier(CellMenu(asset: isSelecting ? nil : asset, manager: library.imageManager, onAction: onAction))
         .matchedTransitionSource(id: id, in: zoomSpace)
         .accessibilityLabel(asset.map {
             GalleryText.spokenDescription(of: $0, detail: GalleryText.detailTitle(entry?.kind))
@@ -191,7 +198,7 @@ private struct GridCell: View {
 
 /// The grid's own measures, kept here so the camera's tokens stay the camera's.
 private enum GridStyle {
-    static let cornerRadius: CGFloat = 3
+    static let cornerRadius = Theme.Radius.cell
     /// The dial header's spaced capitals.
     static let tracking: CGFloat = 1.2
 }
@@ -205,6 +212,8 @@ private struct CellTag: View {
     }
 
     private let mark: Mark
+    @ScaledMetric(relativeTo: .caption2) private var symbolSize: CGFloat = 9
+    @ScaledMetric(relativeTo: .caption2) private var textSize: CGFloat = 8.5
 
     init?(kind: CapturedAssetKind?, asset: PHAsset?) {
         switch kind {
@@ -222,10 +231,10 @@ private struct CellTag: View {
             switch mark {
             case .symbol(let name):
                 Image(systemName: name)
-                    .font(.system(size: 9, weight: .semibold))
+                    .font(.system(size: min(symbolSize, 13), weight: .semibold))
             case .text(let text):
                 Text(text)
-                    .font(.system(size: 8.5, weight: .bold))
+                    .font(.system(size: min(textSize, 12), weight: .bold))
                     .tracking(0.6)
             }
         }
@@ -234,7 +243,7 @@ private struct CellTag: View {
         .padding(.horizontal, 4)
         .padding(.vertical, 2.5)
         // A dark backing, so the mark reads over a bright sky.
-        .background(Color.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 3, style: .continuous))
+        .background(Color.black.opacity(0.55), in: RoundedRectangle(cornerRadius: Theme.Radius.cell, style: .continuous))
         .accessibilityHidden(true)
     }
 }
@@ -247,7 +256,7 @@ private struct GridEmptyState: View {
     var body: some View {
         VStack(spacing: 14) {
             Image(systemName: symbol)
-                .font(.system(size: 34, weight: .ultraLight))
+                .font(.system(size: 34, weight: .light))
                 .foregroundStyle(.secondary)
                 .accessibilityHidden(true)
             Text(text)
@@ -284,6 +293,128 @@ private struct SelectionMark: View {
         .frame(width: 22, height: 22)
         .shadow(color: .black.opacity(0.35), radius: 2)
         .accessibilityHidden(true)
+    }
+}
+
+/// What a cell's touch-and-hold menu can do to its asset.
+enum GridAction {
+    case share, favorite, delete
+}
+
+/// Touch and hold on a cell: a larger look at it, playing if it is a Live Photo, with Share, Favorite and Delete.
+/// Off in Select mode, where a hold would fight the ticks.
+private struct CellMenu: ViewModifier {
+    let asset: PHAsset?
+    let manager: PHImageManager
+    let onAction: (GridAction, PHAsset) -> Void
+
+    func body(content: Content) -> some View {
+        if let asset {
+            content.contextMenu {
+                Button {
+                    onAction(.share, asset)
+                } label: {
+                    Label("Share", systemImage: "square.and.arrow.up")
+                }
+                if asset.canPerform(.properties) {
+                    Button {
+                        onAction(.favorite, asset)
+                    } label: {
+                        Label(asset.isFavorite ? "Unfavorite" : "Favorite",
+                              systemImage: asset.isFavorite ? "heart.slash" : "heart")
+                    }
+                }
+                if asset.canPerform(.delete) {
+                    Divider()
+                    Button(role: .destructive) {
+                        onAction(.delete, asset)
+                    } label: {
+                        Label("Delete", systemImage: "trash")
+                    }
+                }
+            } preview: {
+                CellPreview(asset: asset, manager: manager)
+            }
+        } else {
+            content
+        }
+    }
+}
+
+/// The look a held cell lifts into: the whole picture, uncropped, at a size the menu leaves room for.
+private struct CellPreview: View {
+    let asset: PHAsset
+    let manager: PHImageManager
+    @State private var image: UIImage?
+    @State private var livePhoto: PHLivePhoto?
+    @Environment(\.displayScale) private var displayScale
+
+    var body: some View {
+        let size = Self.size(for: asset)
+        ZStack {
+            Color(uiColor: .secondarySystemFill)
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+            }
+            if let livePhoto {
+                PreviewLivePhoto(livePhoto: livePhoto)
+                    .transition(.opacity)
+            }
+        }
+        .frame(width: size.width, height: size.height)
+        .clipped()
+        .task {
+            await load(pixelSize: CGSize(width: size.width * displayScale, height: size.height * displayScale))
+        }
+    }
+
+    /// Up to 320 by 420 points, in the asset's own shape.
+    private static func size(for asset: PHAsset) -> CGSize {
+        let maxSize = CGSize(width: 320, height: 420)
+        guard asset.pixelWidth > 0, asset.pixelHeight > 0 else { return CGSize(width: 320, height: 320) }
+        let aspect = CGFloat(asset.pixelWidth) / CGFloat(asset.pixelHeight)
+        let width = min(maxSize.width, maxSize.height * aspect)
+        return CGSize(width: width.rounded(), height: (width / aspect).rounded())
+    }
+
+    private func load(pixelSize: CGSize) async {
+        for await update in AssetRequests.fullImage(for: asset, pixelSize: pixelSize, manager: manager) {
+            if case .value(let picture, _) = update { image = picture }
+        }
+        // The movie is only fetched once the still is up, and not at all where motion is reduced, so a quick hold
+        // costs no more than the still.
+        guard asset.playbackStyle == .livePhoto, !AppearanceStore.shared.reduceMotion, !Task.isCancelled else {
+            return
+        }
+        for await update in AssetRequests.livePhoto(for: asset, pixelSize: pixelSize, manager: manager) {
+            if case .value(let picture, true) = update {
+                withAnimation(Theme.fade) { livePhoto = picture }
+            }
+        }
+    }
+}
+
+/// A Live Photo that plays once, silently, as soon as it is shown.
+private struct PreviewLivePhoto: UIViewRepresentable {
+    let livePhoto: PHLivePhoto
+
+    func makeUIView(context: Context) -> PHLivePhotoView {
+        let view = PHLivePhotoView()
+        view.contentMode = .scaleAspectFill
+        view.clipsToBounds = true
+        view.isMuted = true
+        view.livePhoto = livePhoto
+        view.startPlayback(with: .full)
+        return view
+    }
+
+    func updateUIView(_ view: PHLivePhotoView, context: Context) {
+        if view.livePhoto !== livePhoto {
+            view.livePhoto = livePhoto
+            view.startPlayback(with: .full)
+        }
     }
 }
 

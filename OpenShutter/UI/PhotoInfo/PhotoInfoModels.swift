@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import OSLog
 import Photos
 import PhotosUI
 import _PhotosUI_SwiftUI
@@ -13,6 +14,8 @@ import CameraCore
 @MainActor
 @Observable
 final class PhotoInfoModel {
+    private static let log = Logger(subsystem: "ca.katsuma.openshutter", category: "PhotoInfo")
+
     enum Phase {
         /// `progress` is how far an iCloud original has downloaded, when Photos says.
         case loading(progress: Double?)
@@ -174,7 +177,10 @@ final class PhotoInfoModel {
             save = .saved
             Haptics.success()
         } catch {
-            save = .failed(error.localizedDescription)
+            // The system's wording can name frameworks and codes; the person gets a plain sentence and the log the
+            // detail.
+            Self.log.error("Saving the clean copy failed: \(String(describing: error), privacy: .public)")
+            save = .failed("The copy couldn't be saved to Photos.")
         }
     }
 

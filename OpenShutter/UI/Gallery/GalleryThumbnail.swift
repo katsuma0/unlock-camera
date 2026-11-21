@@ -13,8 +13,13 @@ private enum GalleryZoom {
 
 struct ThumbnailButton: View {
     @Bindable var model: CameraModel
+    /// The copy of a new shot that flies here from the picture. The square keeps its last picture until it lands.
+    let flight: CaptureFlight
     @State private var press = PressTracker()
-    @State private var landing = false
+    /// The picture the square shows. It trails the newest one while a shot is on its way here, and a frame that
+    /// draws the new key before onChange has seen it still shows this one, so the square never shows the new shot
+    /// ahead of its copy.
+    @State private var shown: ThumbnailPicture?
     @Namespace private var galleryZoom
     @Environment(\.displayScale) private var displayScale
 
@@ -24,11 +29,13 @@ struct ThumbnailButton: View {
         let isHidden = activity == .recording || activity == .stacking
         let canOpen = Self.canOpen(model)
         let picture = ThumbnailPicture(capture: model.lastCapture, library: library)
+        // The same key draws the live picture, so an image that changes under one key still comes through.
+        let face = shown.map { $0.key == picture.key ? picture : $0 } ?? picture
         Button {
             Self.showGallery(model)
         } label: {
             Upright(model: model) {
-                ThumbnailImage(picture: picture)
+                ThumbnailImage(picture: face)
             }
         }
         // With nothing to show a tap does nothing, so the square stays still under the finger.
@@ -43,28 +50,50 @@ struct ThumbnailButton: View {
             ThumbnailTouchLayer(model: model, press: press)
         }
         .matchedTransitionSource(id: GalleryZoom.thumbnail, in: galleryZoom)
-        // A short swell as a new picture lands, so the eye catches where the shot went. Not with Reduce motion.
-        .scaleEffect(landing ? 1.06 : 1)
+        .onGeometryChange(for: CGRect.self) { geometry in
+            geometry.frame(in: .named(CaptureFlight.space))
+        } action: { frame in
+            flight.thumbnailFrame = frame
+        }
         .opacity(isHidden ? 0 : 1)
         .allowsHitTesting(!isHidden)
-        .animation(Theme.spring, value: picture.key)
         .animation(Theme.fade, value: isHidden)
         .fullScreenCover(isPresented: $model.isReviewPresented) {
             GalleryView(model: model)
                 .galleryZoomTransition(sourceID: GalleryZoom.thumbnail, in: galleryZoom)
         }
-        .onChange(of: picture.key) { old, new in
-            // Only a picture that replaces one: the first fetch after launch is no new shot.
-            guard old != nil, new != nil, !AppearanceStore.shared.reduceMotion else { return }
-            withAnimation(Theme.snappy) {
-                landing = true
-            } completion: {
-                withAnimation(Theme.spring) { landing = false }
+        .onChange(of: picture.key, initial: true) { _, key in
+            guard shown != nil else {
+                shown = picture
+                return
             }
+            if launchFlight(for: key) { return }
+            // Anything that is not a fresh shot, and every shot with Reduce Motion: the squares cross-fade.
+            withAnimation(.easeInOut(duration: 0.25)) { shown = picture }
         }
         .onAppear {
             // The newest photo comes back after a relaunch, but only where access was already given: this never asks.
             library.loadLatestThumbnail(pixelSide: (ThumbnailImage.side * displayScale).rounded(.up))
+        }
+    }
+
+    /// Sends a copy of the shot just taken from the picture to the square, where it takes the square's place as it
+    /// lands. Only for this session's newest capture, once its thumbnail exists: a Night shot or a HEIF photo
+    /// arrives some time after the blink, and its flight starts then, as the picture is ready. False where nobody
+    /// would see it fly, and the square cross-fades instead.
+    private func launchFlight(for key: String?) -> Bool {
+        guard let key, let capture = model.lastCapture, key == capture.id.uuidString, let image = capture.thumbnail,
+              !AppearanceStore.shared.reduceMotion,
+              model.activity != .recording, model.activity != .stacking,
+              !model.isReviewPresented, !model.controlsFullscreen, !model.dimmer.isDimmed else { return false }
+        let model = self.model
+        return flight.launch(image: image, key: key, degrees: model.motion.iconRotationDegrees) {
+            // The newest picture as it lands, built afresh: a later shot that took over the flight lands as its own.
+            var still = Transaction(animation: nil)
+            still.disablesAnimations = true
+            withTransaction(still) {
+                shown = ThumbnailPicture(capture: model.lastCapture, library: model.library)
+            }
         }
     }
 
@@ -187,12 +216,13 @@ private struct ThumbnailImage: View {
                     .frame(width: side, height: side)
                     .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                     .id(picture.key)
-                    .transition(AppearanceStore.shared.reduceMotion
-                        ? AnyTransition.opacity : .scale(scale: 0.6).combined(with: .opacity))
+                    // A new shot arrives on its flying copy, which takes this place without a change of size, so
+                    // only the pictures that come without one fade.
+                    .transition(.opacity)
             }
             if picture.isVideo {
                 Image(systemName: "video.fill")
-                    .font(.system(size: 10, weight: .bold))
+                    .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(Theme.primaryText)
                     .legibleShadow()
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
@@ -236,5 +266,63 @@ private struct PressScaleButtonStyle: ButtonStyle {
             .scaleEffect(pressed ? PressScaleStyle().scale : 1)
             .animation(Theme.snappy, value: pressed)
             .contentShape(Rectangle())
+    }
+}
+
+// MARK: - Capture flight
+
+/// A small copy of the shot just taken, gliding from the picture frame into the thumbnail after the blink. The
+/// thumbnail asks for it and measures where it lands; the camera screen draws it over the controls
+/// (CaptureFlightLayer), from the frame it lays out. Only what is drawn moves: the photo is saved and the next shot
+/// can be taken while it flies.
+@MainActor
+@Observable
+final class CaptureFlight {
+    /// The coordinate space the camera screen lays its layers out in, the whole screen.
+    nonisolated static let space = "camera"
+
+    struct Shot: Identifiable {
+        let id = UUID()
+        let image: CGImage
+        let key: String
+        /// The turn the thumbnail wears, so the copy reads upright as the square does.
+        let degrees: Double
+    }
+
+    /// The copy in the air.
+    private(set) var shot: Shot?
+    /// The thumbnail's frame in the camera's space. Not observed: the copy reads it once, as it sets off.
+    @ObservationIgnored var thumbnailFrame: CGRect?
+    @ObservationIgnored private var landing: (() -> Void)?
+
+    /// A copy longer in the air than this has lost its view (the screen went away under it), and lands anyway, so
+    /// the square never keeps an old picture.
+    private static let longestFlight: UInt64 = 900_000_000
+
+    /// Starts a flight, or false where there is nowhere to land. A newer shot takes over a copy still in the air,
+    /// and only the newest lands.
+    func launch(image: CGImage, key: String, degrees: Double, landed: @escaping () -> Void) -> Bool {
+        guard let frame = thumbnailFrame, frame.width > 1, frame.height > 1 else { return false }
+        let next = Shot(image: image, key: key, degrees: degrees)
+        shot = next
+        landing = landed
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: Self.longestFlight)
+            self?.land(next.id)
+        }
+        return true
+    }
+
+    /// The copy reached the square: the square takes the picture over in the same update the copy goes.
+    func land(_ id: UUID) {
+        guard shot?.id == id else { return }
+        let landed = landing
+        landing = nil
+        var still = Transaction(animation: nil)
+        still.disablesAnimations = true
+        withTransaction(still) {
+            shot = nil
+            landed?()
+        }
     }
 }

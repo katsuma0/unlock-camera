@@ -99,12 +99,6 @@ struct ModeCarousel: View {
             .onGeometryChange(for: CGFloat.self, of: { $0.size.width }) { width in
                 measuredWidths[item] = width
             }
-            // An overlay, so the dot never changes a title's size and the strip never shifts when it moves on.
-            .overlay(alignment: .bottom) {
-                AccentDot()
-                    .offset(y: 7)
-                    .opacity(isHighlighted ? 1 : 0)
-            }
             .animation(Theme.snappy, value: isHighlighted)
             .padding(.horizontal, Self.itemPadding)
             .frame(height: Self.height)

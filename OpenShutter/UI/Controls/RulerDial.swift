@@ -783,7 +783,7 @@ private struct StackBadge: View {
         } label: {
             // The glyph NIGHT's plan pill wears: one sign for a stacked exposure.
             Image(systemName: "square.stack.3d.up.fill")
-                .font(.system(size: 11, weight: .semibold))
+                .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(Theme.accent)
                 .frame(width: Self.width, height: 20)
                 .background(Capsule().fill(Theme.accent.opacity(0.18)))

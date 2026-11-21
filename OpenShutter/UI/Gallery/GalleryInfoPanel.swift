@@ -17,7 +17,7 @@ enum InfoPanelStyle {
 
     /// "SHUTTER", "LENS": the dial header's capitals.
     static let label = Font.caption2.weight(.semibold)
-    static let labelTracking: CGFloat = 0.8
+    static let labelTracking = Theme.smallCapsTracking
     /// The exposure values, the biggest numbers in the panel.
     static let reading = Font.title3.weight(.semibold).monospacedDigit()
     /// Spec values and the file line.
@@ -38,8 +38,8 @@ enum InfoPanelStyle {
     static let grabber = Color.white.opacity(0.3)
 
     static let sideMargin: CGFloat = 8
-    static let cornerRadius: CGFloat = 22
-    static let wellRadius: CGFloat = 14
+    static let cornerRadius = Theme.Radius.sheet
+    static let wellRadius = Theme.Radius.card
     static let inset: CGFloat = 16
     static let sectionGap: CGFloat = 18
     static let mapHeight: CGFloat = 132
@@ -412,7 +412,7 @@ private struct ExposureCell: View {
     var body: some View {
         VStack(spacing: 4) {
             InfoLabel(text: cell.label)
-            ToneValue(reading: cell.reading, font: InfoPanelStyle.reading)
+            ToneValue(reading: cell.reading, font: InfoPanelStyle.reading, size: .reading)
                 .lineLimit(1)
                 .fixedSize()
         }
@@ -424,6 +424,9 @@ private struct ExposureCell: View {
 /// How a NIGHT or LONG shot was made: its frames, the light they add up to, and LONG's blend.
 private struct StackStrip: View {
     let stack: PhotoFacts.Stack
+    // The placeholder strip shown while the file loads has made-up numbers, so it draws no wave of its own.
+    @Environment(\.redactionReasons) private var redaction
+    @Environment(\.dynamicTypeSize) private var typeSize
 
     var body: some View {
         let symbol = stack.scene.map { Image(firstAvailableSystemName: $0.symbolNames) }
@@ -437,6 +440,13 @@ private struct StackStrip: View {
                 Text(stack.title)
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(InfoPanelStyle.primary)
+                    .layoutPriority(1)
+                if let trace = StackTrace(stack: stack), redaction.isEmpty, !typeSize.isAccessibilitySize {
+                    Spacer(minLength: 12)
+                    StackWave(trace: trace)
+                        .frame(minWidth: 40, idealWidth: 84, maxWidth: 84)
+                        .frame(height: 18)
+                }
             }
             let stats = self.stats
             if !stats.isEmpty {
@@ -481,6 +491,118 @@ private struct StackStrip: View {
         if let blend = stack.blend { stats.append(Stat(label: "Blend", value: blend)) }
         return stats
     }
+}
+
+/// The shape of one stack's wave, taken from its numbers so two shots rarely draw the same line: more frames lay
+/// more faint lines under the main one, as the frames were laid over each other, and a longer total calms the wave,
+/// as the phone had to keep still for it.
+private struct StackTrace: Equatable {
+    /// Height against the strip's room, 0 to 1.
+    let amplitude: Double
+    /// Where along its flow the wave rests, in MotionWave's cycles.
+    let phase: Double
+    /// Faint lines under the main one, 1 to 3.
+    let echoes: Int
+
+    init?(stack: PhotoFacts.Stack) {
+        let frames = stack.frames.flatMap(Self.leadingNumber)
+        let seconds = stack.total.flatMap(Self.seconds)
+        guard frames != nil || seconds != nil else { return nil }
+        let kept = frames ?? 1
+        let calm = min(log10(1 + (seconds ?? 1)) / 3, 1)
+        amplitude = 0.62 - 0.3 * calm
+        let seed = Double(kept) * 0.137 + (seconds ?? 0) * 0.011
+        phase = seed.truncatingRemainder(dividingBy: 1) * MotionWave.flowPeriod
+        echoes = min(max(kept / 10, 1), 3)
+    }
+
+    /// 28 from "28 of 30".
+    private static func leadingNumber(_ text: String) -> Int? {
+        Int(text.prefix { $0.isNumber })
+    }
+
+    /// Seconds from the panel's "30s", "2m 5s", "1h 2m", "0.5s".
+    private static func seconds(_ text: String) -> Double? {
+        var total = 0.0
+        var number = ""
+        var found = false
+        for character in text {
+            if character.isNumber || character == "." {
+                number.append(character)
+                continue
+            }
+            guard let value = Double(number) else { number = ""; continue }
+            switch character {
+            case "h": total += value * 3600
+            case "m": total += value * 60
+            case "s": total += value
+            default: continue
+            }
+            found = true
+            number = ""
+        }
+        return found ? total : nil
+    }
+}
+
+/// The stack's wave at rest, drawn as the steady sign draws its line: a main stroke over fainter ones, running out
+/// clear at both ends. Still, so it never asks for frames.
+private struct StackWave: View {
+    let trace: StackTrace
+
+    var body: some View {
+        let accent = Theme.accent
+        Canvas { context, size in
+            let room = CGRect(origin: .zero, size: size).insetBy(dx: 0, dy: 1.5)
+            guard room.width > 1, room.height > 1 else { return }
+            let ink = GraphicsContext.Shading.linearGradient(
+                Gradient(stops: Self.fade.map { .init(color: accent.opacity($0.opacity), location: $0.location) }),
+                startPoint: CGPoint(x: room.minX, y: room.midY), endPoint: CGPoint(x: room.maxX, y: room.midY))
+            let reach = Double(room.height / 2)
+            for index in 0..<trace.echoes {
+                let echo = Self.echoes[index]
+                context.opacity = echo.opacity
+                let path = Self.path(lift: trace.amplitude * echo.scale * reach, phase: trace.phase - echo.lag,
+                                     in: room)
+                context.stroke(path, with: ink, style: StrokeStyle(lineWidth: 1, lineCap: .round, lineJoin: .round))
+            }
+            context.opacity = 0.9
+            let path = Self.path(lift: trace.amplitude * reach, phase: trace.phase, in: room)
+            context.stroke(path, with: ink, style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
+        }
+        .accessibilityHidden(true)
+    }
+
+    /// The steady sign's two echoes and a third for the longest stacks: height against the main wave, lag in
+    /// cycles, strength.
+    private static let echoes: [(scale: Double, lag: Double, opacity: Double)] = [
+        (0.6, 0.07, 0.45),
+        (-0.35, 0.14, 0.3),
+        (0.25, 0.21, 0.22),
+    ]
+
+    private static func path(lift: Double, phase: Double, in rect: CGRect) -> Path {
+        var path = Path()
+        let count = max(Int(rect.width.rounded(.up)), 2)
+        for index in 0...count {
+            let along = Double(index) / Double(count)
+            let point = CGPoint(x: rect.minX + rect.width * CGFloat(along),
+                                y: rect.midY - CGFloat(lift * MotionWave.shape(at: along, phase: phase)))
+            if index == 0 { path.move(to: point) } else { path.addLine(to: point) }
+        }
+        return path
+    }
+
+    /// Clear at both ends and full across the middle, eased like the steady sign's line so no end shows as an edge.
+    private static let fade: [(location: CGFloat, opacity: Double)] = {
+        let ramp: CGFloat = 0.22
+        let steps = 6
+        let rising = (0...steps).map { step -> (location: CGFloat, opacity: Double) in
+            let t = Double(step) / Double(steps)
+            return (location: ramp * CGFloat(t), opacity: t * t * (3 - 2 * t))
+        }
+        return rising + rising.reversed().map { (location: 1 - $0.location, opacity: $0.opacity) }
+    }()
 }
 
 // MARK: - Specs
@@ -649,10 +771,10 @@ private struct InfoHistogram: View {
                     .equatable()
             }
             .frame(height: InfoPanelStyle.histogramHeight)
-            .background(InfoPanelStyle.wellFill, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .background(InfoPanelStyle.wellFill, in: RoundedRectangle(cornerRadius: InfoPanelStyle.wellRadius, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: InfoPanelStyle.wellRadius, style: .continuous))
             .overlay {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                RoundedRectangle(cornerRadius: InfoPanelStyle.wellRadius, style: .continuous)
                     .strokeBorder(InfoPanelStyle.edge, lineWidth: 0.5)
             }
             if clipping.shadows || clipping.highlights {
@@ -888,20 +1010,28 @@ private struct InfoLabel: View {
 private struct ToneValue: View {
     let reading: PhotoFacts.Reading
     let font: Font
-    /// The chips' A is 7 pt beside 12 pt digits; this keeps the same proportion as Dynamic Type scales the value.
-    @ScaledMetric(relativeTo: .title3) private var markSize: CGFloat = 9
+    var size: Size = .value
+
+    enum Size {
+        /// The exposure deck's title3 numbers.
+        case reading
+        /// The spec list's subheadline values.
+        case value
+    }
+
+    // The chips' A is 7 pt beside 12 pt digits. These keep that proportion beside each font as Dynamic Type scales
+    // it, so the A reads the same here as on the camera.
+    @ScaledMetric(relativeTo: .title3) private var readingMark: CGFloat = 20 * 7 / 12
+    @ScaledMetric(relativeTo: .subheadline) private var valueMark: CGFloat = 15 * 7 / 12
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 1.5) {
+        let mark = size == .reading ? readingMark : valueMark
+        HStack(alignment: .firstTextBaseline, spacing: SmallAutoMark.spacing(for: mark)) {
             Text(reading.value)
                 .font(font)
                 .foregroundStyle(reading.tone == .manual ? Theme.accent : InfoPanelStyle.primary)
             if reading.tone == .auto {
-                Text("A")
-                    .font(.system(size: markSize, weight: .bold))
-                    .foregroundStyle(InfoPanelStyle.secondary)
-                    .baselineOffset(markSize * 4 / 7)
-                    .accessibilityHidden(true)
+                SmallAutoMark(size: mark)
             }
         }
     }

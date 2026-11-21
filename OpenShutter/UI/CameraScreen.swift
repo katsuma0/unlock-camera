@@ -9,16 +9,25 @@ import CameraCore
 struct CameraScreen: View {
     @Bindable var model: CameraModel
     @Environment(\.scenePhase) private var scenePhase
+    /// Settings zooms out of the gear in the top bar.
+    @Namespace private var settingsZoom
 
     var body: some View {
         // The gallery is presented from the thumbnail (GalleryThumbnail.swift), which its zoom transition starts from.
         ZStack {
             Theme.background
                 .ignoresSafeArea()
-            ScreenContent(model: model)
+            ScreenContent(model: model, settingsZoom: settingsZoom)
         }
         .sheet(isPresented: $model.isSettingsPresented) {
             SettingsView(model: model)
+                .settingsZoomTransition(settingsZoom)
+        }
+        .alert("Open Shutter can't save to Photos", isPresented: $model.isPhotosAccessAlertShown) {
+            Button("Open Settings") { model.openAppSettings() }
+            Button("Not now", role: .cancel) {}
+        } message: {
+            Text("Turn on Photos access for Open Shutter in Settings, then take the shot again.")
         }
         .task { await model.start() }
         .onChange(of: scenePhase) { _, phase in
@@ -37,11 +46,12 @@ struct CameraScreen: View {
 /// The camera or the permission page.
 private struct ScreenContent: View {
     let model: CameraModel
+    let settingsZoom: Namespace.ID
 
     var body: some View {
         ZStack {
             if model.authorization == .authorized {
-                CameraLayout(model: model)
+                CameraLayout(model: model, settingsZoom: settingsZoom)
                     .transition(.opacity)
             } else {
                 PermissionView(model: model)
@@ -55,7 +65,7 @@ private struct ScreenContent: View {
 // MARK: - Layout
 
 /// The screen space every layer of the camera is laid out in: the whole screen, safe areas included.
-private let cameraSpace = "camera"
+private let cameraSpace = CaptureFlight.space
 
 /// The camera over the whole screen, in the order of Apple's iOS 26 Camera. The viewfinder covers the screen: the 16:9
 /// region runs at full width from the safe area's top, the photo frame is the largest of its shape inside it, and the
@@ -65,6 +75,7 @@ private let cameraSpace = "camera"
 /// changes. A phone with no band there (iPhone SE) stacks the controls up from the bottom edge in their earlier order.
 private struct CameraLayout: View {
     let model: CameraModel
+    let settingsZoom: Namespace.ID
 
     /// The controls' top edge on screen, once measured. The open part of the frame ends there.
     @State private var controlsTop: CGFloat?
@@ -90,6 +101,8 @@ private struct CameraLayout: View {
     @State private var imageAspect = 3.0 / 4.0
     /// The bands are solid black. They turn see-through once the picture is live and has settled.
     @State private var bandsSolid = true
+    /// The copy of a new shot on its way from the picture to the thumbnail.
+    @State private var flight = CaptureFlight()
 
     @Environment(\.displayScale) private var displayScale
     @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
@@ -158,7 +171,7 @@ private struct CameraLayout: View {
                     .allowsHitTesting(!fullscreen)
                     .accessibilityHidden(fullscreen)
 
-                ControlsZone(model: model, wheel: wheel, modeRowInBand: placement.modeRowY != nil,
+                ControlsZone(model: model, wheel: wheel, flight: flight, modeRowInBand: placement.modeRowY != nil,
                              lensGap: placement.lensGap)
                     .onGeometryChange(for: CGFloat.self) { geometry in
                         geometry.frame(in: .named(cameraSpace)).minY
@@ -171,7 +184,7 @@ private struct CameraLayout: View {
                     .accessibilityHidden(fullscreen)
 
                 if let modeRowY = placement.modeRowY {
-                    ModeRow(model: model)
+                    ModeRow(model: model, flight: flight)
                         .frame(width: size.width, height: Self.modeRowHeight)
                         .position(x: size.width / 2, y: modeRowY)
                         .opacity(fullscreen ? 0 : 1)
@@ -180,12 +193,16 @@ private struct CameraLayout: View {
                 }
 
                 // Drawn after the drawer so the drawer slides out from underneath it.
-                TopBar(model: model, timerSheetRequested: $timerSheetShown)
+                TopBar(model: model, timerSheetRequested: $timerSheetShown, settingsZoom: settingsZoom)
                     .frame(width: size.width)
                     .padding(.top, insets.top)
                     .opacity(fullscreen ? 0 : 1)
                     .allowsHitTesting(!fullscreen)
                     .accessibilityHidden(fullscreen)
+
+                // Over the controls, so the copy passes over the rows between the picture and the thumbnail.
+                CaptureFlightLayer(flight: flight, pictureFrame: geometry.frame)
+                    .frame(width: size.width, height: size.height)
 
                 // Over the quick settings and the controls a message can share the screen with, so where the open
                 // part of the frame is short it is still read whole. It goes under the panel while that is open, and
@@ -448,11 +465,12 @@ private struct ViewfinderStack: View {
         let open = geometry.open
         ZStack(alignment: .topLeading) {
             Theme.background
+            // The mode switch's veil is a blurred still of the last frame, laid in the picture's own view so the
+            // blur never runs over the live layer.
             CameraPreviewView(model: model, interaction: interaction, geometry: geometry,
-                              isHidden: model.dimmer.isDimmed, isFrozen: lensFrozen)
+                              isHidden: model.dimmer.isDimmed, isFrozen: lensFrozen, isVeiled: veilVisible)
             StackPreviewLayer(model: model, picture: geometry.picture)
-            ModeSwitchVeil(isVisible: veilVisible)
-            ShutterBlink(model: model, frame: frame)
+            ShutterBlink(model: model)
             FrameBands(frame: frame, solid: bandsSolid)
             // Read off the picture like the bands, so every mark made on the picture is drawn over it: at the top's
             // middle it often meets a focus square's lock label, and the badges move under it.
@@ -478,21 +496,6 @@ private struct ViewfinderStack: View {
         }
         .frame(width: geometry.screen.width, height: geometry.screen.height, alignment: .topLeading)
         .clipped()
-    }
-}
-
-/// The Camera app blurs the preview while it changes modes; a backdrop material blurs the live layer underneath.
-private struct ModeSwitchVeil: View {
-    let isVisible: Bool
-
-    var body: some View {
-        Rectangle()
-            .fill(.thinMaterial)
-            .overlay(Theme.background.opacity(0.2))
-            .environment(\.colorScheme, .dark)
-            .opacity(isVisible ? 1 : 0)
-            .allowsHitTesting(false)
-            .accessibilityHidden(true)
     }
 }
 
@@ -877,6 +880,7 @@ private struct ControlsZone: View {
     /// The zoom wheel a hold on a lens button opens. Its readout reaches over the rows above the lens row, so they
     /// fade while it is open.
     let wheel: ZoomWheelModel
+    let flight: CaptureFlight
     /// The thumbnail, the modes and the flip button have a row of their own in the band under the frame (ModeRow).
     /// Without a band (iPhone SE) the thumbnail and the flip button flank the shutter and the modes sit above it.
     let modeRowInBand: Bool
@@ -905,21 +909,23 @@ private struct ControlsZone: View {
                 // nothing moves under the finger.
                 Group {
                     if dial != nil {
+                        // Comes into focus where it stands rather than sliding up: nothing on the camera travels to
+                        // arrive, and the chips under it stay put.
                         ActiveDialView(model: model)
-                            .transition(.opacity.combined(with: .move(edge: .bottom)))
+                            .transition(.cameraFocus)
                     }
                     if showsPanel {
                         ModePanels(model: model, mode: mode, hasRoom: hasRoomForModeRow, dialOpen: dial != nil,
                                    isRecording: isRecording)
                             // NIGHT's two kinds of shot are one mode on screen, so its panel changes in place.
                             .id(mode.carouselMode)
-                            .transition(.opacity)
+                            .transition(.cameraFocus)
                     } else if showsReadout {
                         // As tall as the strip of chips: when PHOTO's shutter dial leads into MANUAL at its first
                         // tick, the strip takes this row over and the dial stays where the finger is.
                         ReadoutHUD(model: model)
                             .frame(height: 44)
-                            .transition(.opacity)
+                            .transition(.cameraFocus)
                     } else if dial == .shutter {
                         // With the readout switched off the row is kept free for that dial, for the same reason.
                         Color.clear
@@ -950,7 +956,7 @@ private struct ControlsZone: View {
                 ShutterRow(model: model)
                     .padding(.top, max(0, lensGap - 6))
             } else {
-                BottomRow(model: model)
+                BottomRow(model: model, flight: flight)
             }
         }
         .padding(.bottom, modeRowInBand ? 0 : 4)
@@ -1137,6 +1143,7 @@ private struct CarouselSlot: View {
 /// button and the thumbnail trade places.
 private struct ModeRow: View {
     let model: CameraModel
+    let flight: CaptureFlight
 
     var body: some View {
         let leftHanded = AppearanceStore.shared.leftHanded
@@ -1144,11 +1151,11 @@ private struct ModeRow: View {
             if leftHanded {
                 FlipButton(model: model)
             } else {
-                ThumbnailButton(model: model)
+                ThumbnailButton(model: model, flight: flight)
             }
             CarouselSlot(model: model)
             if leftHanded {
-                ThumbnailButton(model: model)
+                ThumbnailButton(model: model, flight: flight)
             } else {
                 FlipButton(model: model)
             }
@@ -1210,7 +1217,7 @@ private struct ShutterRow: View {
     }
 }
 
-/// A round button beside the shutter. Lit with an accent ring while its feature is on.
+/// A round button beside the shutter. Lit in the accent while its feature is on.
 private struct ShutterSideButton: View {
     static let standardSize: CGFloat = 50
 
@@ -1232,8 +1239,8 @@ private struct ShutterSideButton: View {
     }
 }
 
-/// The look of a round button beside the shutter: a glass circle, with the glyph and a ring in the accent while its
-/// feature is on.
+/// The look of a round button beside the shutter: a glass circle. While its feature is on the glass takes a tint
+/// of the accent and the glyph glows in it, which says "on" without a ring drawn round the glass.
 private struct ShutterSideFace: View {
     let image: Image
     let isActive: Bool
@@ -1241,12 +1248,13 @@ private struct ShutterSideFace: View {
 
     var body: some View {
         image
-            .font(.system(size: size * 0.38, weight: .semibold))
+            .font(.system(size: size * 0.38, weight: .medium))
             .foregroundStyle(isActive ? Theme.accent : Theme.primaryText)
+            .accentGlow(isActive)
             .frame(width: size, height: size)
-            .cameraGlass(in: Circle())
-            .overlay(Circle().strokeBorder(isActive ? Theme.accent : Color.clear, lineWidth: 2))
+            .cameraGlass(in: Circle(), tint: isActive ? Theme.accent.opacity(0.22) : nil)
             .contentShape(Circle())
+            .animation(Theme.snappy, value: isActive)
     }
 }
 
@@ -1305,6 +1313,7 @@ private struct SceneMenuRows: View {
 /// The thumbnail, the shutter and the flip button in one row, when there is no band for a mode row of their own.
 private struct BottomRow: View {
     let model: CameraModel
+    let flight: CaptureFlight
 
     var body: some View {
         let leftHanded = AppearanceStore.shared.leftHanded
@@ -1317,7 +1326,7 @@ private struct BottomRow: View {
                 if leftHanded {
                     FlipButton(model: model)
                 } else {
-                    ThumbnailButton(model: model)
+                    ThumbnailButton(model: model, flight: flight)
                 }
                 if model.settings.mode.usesStacking {
                     SceneSideButton(model: model, size: 44)
@@ -1343,7 +1352,7 @@ private struct BottomRow: View {
                 .opacity(drawerHeld ? Theme.Dim.held : 1)
                 .animation(Theme.snappy, value: drawerHeld)
                 if leftHanded {
-                    ThumbnailButton(model: model)
+                    ThumbnailButton(model: model, flight: flight)
                 } else {
                     FlipButton(model: model)
                 }
@@ -1436,6 +1445,67 @@ private struct FlipButton: View {
         .allowsHitTesting(!isHidden)
         .animation(Theme.fade, value: isHidden)
         .accessibilityLabel("Switch camera")
+    }
+}
+
+// MARK: - Capture flight
+
+/// Draws the copy of a new shot on its way to the thumbnail (CaptureFlight). Reads the flight on its own, so a
+/// launch redraws this layer and nothing else.
+private struct CaptureFlightLayer: View {
+    let flight: CaptureFlight
+    /// The photo frame, where the copy sets off.
+    let pictureFrame: CGRect
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            if let shot = flight.shot, let target = flight.thumbnailFrame {
+                FlyingShot(shot: shot, from: pictureFrame, to: target, flight: flight)
+                    .id(shot.id)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
+/// The copy itself: the frame's size and place at the start, the thumbnail's at the end, on a critically damped
+/// spring so it settles into the square without passing it. Its rim comes up as it nears the square's, so the
+/// copy turns into the thumbnail rather than landing on it.
+private struct FlyingShot: View {
+    let shot: CaptureFlight.Shot
+    let from: CGRect
+    let to: CGRect
+    let flight: CaptureFlight
+    @State private var landed = false
+    @State private var visible = false
+
+    var body: some View {
+        let rect = landed ? to : from
+        // The thumbnail shows the photo turned with the phone. On its side the photo is as wide as the frame is
+        // tall, so its box is laid out across and then turned into the frame.
+        let quarter = Int((abs(shot.degrees) / 90).rounded())
+        let sideways = quarter % 2 == 1
+        let shape = RoundedRectangle(cornerRadius: landed ? 8 : 2, style: .continuous)
+        Image(decorative: shot.image, scale: 1)
+            .resizable()
+            .scaledToFill()
+            .frame(width: sideways ? rect.height : rect.width, height: sideways ? rect.width : rect.height)
+            .clipShape(shape)
+            .overlay(shape.strokeBorder(Color.white.opacity(landed ? 0.85 : 0), lineWidth: 1))
+            .rotationEffect(.degrees(shot.degrees))
+            .position(x: rect.midX, y: rect.midY)
+            .opacity(visible ? 1 : 0)
+            .onAppear {
+                // A short fade in, so the copy lifts off the picture instead of appearing over it.
+                withAnimation(.easeOut(duration: 0.08)) { visible = true }
+                withAnimation(Theme.flight) {
+                    landed = true
+                } completion: {
+                    flight.land(shot.id)
+                }
+            }
     }
 }
 

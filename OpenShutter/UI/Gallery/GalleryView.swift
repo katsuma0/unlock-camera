@@ -70,7 +70,8 @@ private struct GalleryHome: View {
         Group {
             if access.canRead {
                 GalleryGrid(library: library, zoomSpace: zoomSpace, scrollID: $scrollID, isSelecting: isSelecting,
-                            selection: $selection, onOpen: onOpen, onChangeShared: onChangeShared)
+                            selection: $selection, onOpen: onOpen, onChangeShared: onChangeShared,
+                            onAction: perform)
             } else {
                 GalleryAccessView(model: model, library: library)
             }
@@ -209,8 +210,36 @@ private struct GalleryHome: View {
         }
     }
 
+    /// A cell's touch-and-hold menu.
+    private func perform(_ action: GridAction, on asset: PHAsset) {
+        switch action {
+        case .share:
+            share([asset])
+        case .favorite:
+            GalleryHaptics.favorite()
+            Task {
+                do {
+                    try await library.setFavorite(asset, !asset.isFavorite)
+                } catch {
+                    failure = "The favorite couldn't be changed."
+                }
+            }
+        case .delete:
+            Task {
+                do {
+                    try await library.delete(asset)
+                } catch {
+                    if !CaptureLibrary.isCancellation(error) { failure = "This couldn't be deleted." }
+                }
+            }
+        }
+    }
+
     private func shareSelection() {
-        let chosen = selectedAssets()
+        share(selectedAssets())
+    }
+
+    private func share(_ chosen: [PHAsset]) {
         guard !chosen.isEmpty, sharing == nil else { return }
         sharing = ShareJob(total: chosen.count)
         let manager = library.imageManager
@@ -224,7 +253,7 @@ private struct GalleryHome: View {
             if cancelled {
                 GalleryFiles.clearShares()
             } else if urls.isEmpty {
-                failure = "These couldn't be shared."
+                failure = chosen.count == 1 ? "This couldn't be shared." : "These couldn't be shared."
             } else {
                 // Any that failed are left out; the rest still go.
                 shareURLs = urls

@@ -155,32 +155,26 @@ struct ShutterButton: View {
         // NIGHT's shutter is the plain white disc: the mode is already named in the carousel and on the scene button.
         if showsBulbGlyph {
             Image(systemName: "lightbulb.fill")
-                .font(.system(size: 18, weight: .semibold))
+                .font(.system(size: 18, weight: .medium))
                 .foregroundStyle(Color.black.opacity(0.55))
                 .transition(.opacity.combined(with: .scale(scale: 0.6)))
         }
     }
 
-    /// A hairline rim carrying fine ticks, like a lens barrel's, in the band the solid ring used to fill, so the disc
-    /// and the hit area keep their size. While a stack runs the ticks dim and the accent sweeps along them.
     private var ring: some View {
         ZStack {
-            ShutterDial(color: .white)
-                .opacity(kind == .stacking ? 0.28 : 1)
+            Circle()
+                .strokeBorder(Color.white.opacity(kind == .stacking ? 0.28 : 1), lineWidth: Self.ringWidth)
             if kind == .stacking {
                 if progress > 0 {
-                    ShutterDial(color: Theme.accent)
-                        .mask {
-                            Circle()
-                                .inset(by: Self.ringWidth / 2)
-                                .trim(from: 0, to: progress)
-                                .stroke(style: StrokeStyle(lineWidth: Self.ringWidth + 2))
-                                .rotationEffect(.degrees(-90))
-                                .animation(isDimmed ? nil : .linear(duration: 0.3), value: progress)
-                        }
+                    Circle()
+                        .inset(by: Self.ringWidth / 2)
+                        .trim(from: 0, to: progress)
+                        .stroke(Theme.accent, style: StrokeStyle(lineWidth: Self.ringWidth, lineCap: .round))
+                        .rotationEffect(.degrees(-90))
+                        .animation(isDimmed ? nil : .linear(duration: 0.3), value: progress)
                 } else {
-                    ShutterDial(color: Theme.accent)
-                        .mask { PendingArc(lineWidth: Self.ringWidth + 2, isPaused: isDimmed) }
+                    PendingArc(lineWidth: Self.ringWidth, isPaused: isDimmed)
                 }
             }
         }
@@ -293,44 +287,6 @@ struct ShutterButton: View {
     private var accessibilityProgress: String {
         guard kind == .stacking, progress > 0 else { return "" }
         return "\(Int((progress * 100).rounded())) percent"
-    }
-}
-
-/// The shutter's rim: a fine circle at the outer edge and 60 ticks inside it, every fifth one longer. It takes only
-/// a colour, which never changes while it shows, so SwiftUI draws it once and keeps it through presses and redraws.
-private struct ShutterDial: View, Equatable {
-    let color: Color
-
-    var body: some View {
-        ZStack {
-            DialTicks(major: false)
-                .stroke(color.opacity(0.6), lineWidth: 0.75)
-            DialTicks(major: true)
-                .stroke(color, lineWidth: 1)
-            Circle()
-                .strokeBorder(color, lineWidth: DialTicks.rim)
-        }
-    }
-}
-
-private struct DialTicks: Shape {
-    static let count = 60
-    static let rim: CGFloat = 1.25
-    /// The long ticks or the short ones, so each kind gets its own weight.
-    let major: Bool
-
-    func path(in rect: CGRect) -> Path {
-        var path = Path()
-        let center = CGPoint(x: rect.midX, y: rect.midY)
-        let outer = min(rect.width, rect.height) / 2 - Self.rim
-        for i in 0..<Self.count where (i % 5 == 0) == major {
-            let inner = outer - (major ? 3.5 : 2)
-            let angle = Double(i) / Double(Self.count) * 2 * .pi
-            let (dx, dy) = (CGFloat(cos(angle)), CGFloat(sin(angle)))
-            path.move(to: CGPoint(x: center.x + dx * inner, y: center.y + dy * inner))
-            path.addLine(to: CGPoint(x: center.x + dx * outer, y: center.y + dy * outer))
-        }
-        return path
     }
 }
 

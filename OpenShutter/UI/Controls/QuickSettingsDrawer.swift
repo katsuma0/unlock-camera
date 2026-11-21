@@ -136,7 +136,7 @@ struct QuickSettingsDrawer: View {
                               isEnabled: applies && !stacked && choices.count > 1,
                               hint: hint) {
             Text("RAW")
-                .font(.system(size: 10 * Theme.labelScale, weight: .heavy))
+                .font(.system(size: 10 * Theme.labelScale, weight: .bold))
                 .lineLimit(1)
                 .minimumScaleFactor(0.6)
                 .padding(.horizontal, 3)
@@ -361,10 +361,10 @@ private struct FormatGlyph: View {
         let scale = Theme.labelScale
         VStack(spacing: 0) {
             Text(QuickActions.formatCode(choice))
-                .font(.system(size: 10 * scale, weight: .heavy))
+                .font(.system(size: 10 * scale, weight: .bold))
             if choice.isHigh {
                 Text("HIGH")
-                    .font(.system(size: 7 * scale, weight: .heavy))
+                    .font(.system(size: 7 * scale, weight: .bold))
             }
         }
         .lineLimit(1)
@@ -498,7 +498,7 @@ private struct DrawerItemLabel<Glyph: View>: View {
         let scale = Theme.labelScale
         VStack(spacing: 5) {
             Upright(model: model) { glyph }
-                .font(.system(size: 16 * scale, weight: .semibold))
+                .font(.system(size: 16 * scale, weight: .medium))
                 .foregroundStyle(isActive ? Theme.accent : Theme.primaryText)
                 .frame(width: 44, height: 44)
                 // Filled circles instead of glass: a dozen glass shapes on a glass panel would cost frames.

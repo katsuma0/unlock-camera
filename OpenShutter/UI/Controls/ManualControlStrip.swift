@@ -339,7 +339,7 @@ private struct ChipFace: View {
             // The lens row's chip has room for the value alone, with the moon where it is a night shot's length.
             if compact, let symbol {
                 Image(systemName: symbol)
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(Theme.accent)
             }
             HStack(alignment: .firstTextBaseline, spacing: content.hugsTitle ? 1 : 4) {
@@ -353,6 +353,10 @@ private struct ChipFace: View {
                         .contentTransition(.numericText(value: content.numeric))
                 }
             }
+            // The value redraws with every detent while its dial turns, so the bloom is drawn on a flattened copy
+            // of the few glyphs rather than traced round each one again.
+            .compositingGroup()
+            .accentGlow(isSelected)
         }
         .font(Theme.chipFont)
         .foregroundStyle(content.tone == .manual ? Theme.accent : Theme.primaryText)
@@ -360,9 +364,9 @@ private struct ChipFace: View {
         // The strip's chips share the row and the lens row's has the room beside the lens buttons, so each shrinks
         // its text a little instead of reaching a neighbour.
         .minimumScaleFactor(0.7)
-        .padding(.horizontal, compact ? 9 : 6)
+        .padding(.horizontal, compact ? Theme.chipPadding : 6)
         .frame(maxWidth: compact ? nil : .infinity)
-        .frame(height: 30)
+        .frame(height: Theme.chipHeight)
         .cameraGlass(in: Capsule())
         .instrumentEdge(isActive: isSelected)
         .scaleEffect(isPressed ? 0.94 : 1)
@@ -374,6 +378,12 @@ private struct ChipFace: View {
         // live readings never keep it running.
         .animation(Theme.snappy, value: content.value.count)
         .animation(Theme.spring, value: isSelected)
+        // The moment a dial takes a value away from the camera is felt as well as seen. Only with the dial open:
+        // a mode change can turn a chip manual too, and that is no turn of the person's.
+        .onChange(of: content.tone) { old, new in
+            guard isSelected, old == .auto, new == .manual else { return }
+            Haptics.takeOver()
+        }
     }
 }
 
@@ -396,29 +406,13 @@ struct AutoMarked<Value: View>: View {
 
     var body: some View {
         let mark = size * Theme.labelScale
-        HStack(alignment: .firstTextBaseline, spacing: mark / 7) {
+        HStack(alignment: .firstTextBaseline, spacing: SmallAutoMark.spacing(for: mark)) {
             value
             if isAuto {
-                AutoMarkGlyph(size: mark)
+                SmallAutoMark(size: mark)
                     .transition(.opacity)
             }
         }
-    }
-}
-
-/// The A itself. It grows with Larger labels as the value does, so its top stays level with the top of the digits.
-private struct AutoMarkGlyph: View {
-    let size: CGFloat
-
-    var body: some View {
-        Text("A")
-            .font(.system(size: size, weight: .bold))
-            .foregroundStyle(Theme.secondaryText)
-            .baselineOffset(size * 4 / 7)
-            // Keeps its size while the value beside it shrinks to fit.
-            .minimumScaleFactor(1)
-            .fixedSize()
-            .accessibilityHidden(true)
     }
 }
 

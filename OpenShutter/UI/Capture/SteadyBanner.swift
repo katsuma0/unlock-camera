@@ -253,7 +253,11 @@ private struct MotionLine: View {
                     guard !Task.isCancelled else { return }
                 }
                 clock.settle()
-                if isFlowing { isFlowing = false }
+                guard isFlowing else { return }
+                isFlowing = false
+                // Once per calm, as the wave comes to lie flat and green, never while it stays flat. A cover over
+                // the sign lays it flat by the other path and says nothing.
+                if !isHidden { Haptics.settle() }
             }
             .accessibilityHidden(true)
     }
@@ -365,7 +369,7 @@ private struct SteadyIconView: View {
                 .frame(width: size * 10 / 11, height: size)
         case .hand:
             Image(systemName: "hand.raised.fill")
-                .font(.system(size: size * 0.82, weight: .semibold))
+                .font(.system(size: size * 0.82, weight: .medium))
                 .frame(width: size, height: size)
         }
     }

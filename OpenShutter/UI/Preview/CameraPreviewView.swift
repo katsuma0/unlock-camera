@@ -17,11 +17,13 @@ struct CameraPreviewView: View {
     let isHidden: Bool
     /// A lens swap is running: the last frame stays up until the new camera's frames arrive.
     var isFrozen = false
+    /// A change of mode is under way: a still of the last frame blurs over the picture, then fades into the new one.
+    var isVeiled = false
 
     var body: some View {
         ZStack {
             PreviewSurface(model: model, interaction: interaction, picture: geometry.picture, isHidden: isHidden,
-                           isFrozen: isFrozen)
+                           isFrozen: isFrozen, isVeiled: isVeiled)
             AnalysisOverlay(model: model, picture: geometry.picture, isHidden: isHidden)
         }
         .background(Theme.background)
@@ -541,6 +543,7 @@ private struct PreviewSurface: UIViewRepresentable {
     let picture: CGRect
     let isHidden: Bool
     let isFrozen: Bool
+    let isVeiled: Bool
 
     func makeCoordinator() -> GestureCoordinator {
         GestureCoordinator(model: model, interaction: interaction)
@@ -554,8 +557,9 @@ private struct PreviewSurface: UIViewRepresentable {
         // At 16:9 the picture reaches past the screen's sides.
         view.clipsToBounds = true
         let interaction = self.interaction
-        view.onPreviewingChange = { [weak interaction] previewing in
+        view.onPreviewingChange = { [weak interaction, weak view] previewing in
             interaction?.previewingChanged(previewing)
+            if previewing { view?.openShutterOnce() }
         }
         view.attach(model.backend.makePreviewLayer())
         view.setPictureRect(picture, animated: false)
@@ -574,6 +578,7 @@ private struct PreviewSurface: UIViewRepresentable {
             uiView.isHidden = isHidden
         }
         uiView.setFrozen(isFrozen)
+        uiView.setVeiled(isVeiled && !isHidden)
     }
 }
 
@@ -604,6 +609,83 @@ private final class PreviewHostView: UIView {
                 snapshot.removeFromSuperview()
             }
         }
+    }
+
+    // MARK: Mode switch veil
+
+    /// The still under the blur while a mode changes, and the blur's ramp.
+    private var veil: ModeVeilView?
+
+    /// Covers the picture with a still of the last frame that blurs in, and fades it into the live picture when the
+    /// change is over. The still is a snapshot, so the blur never runs over the live layer, and the new mode's
+    /// first frames, often a jump of exposure or shape, arrive under it.
+    func setVeiled(_ veiled: Bool) {
+        if veiled {
+            guard veil == nil, window != nil, previewLayer != nil,
+                  let snapshot = snapshotView(afterScreenUpdates: false) else { return }
+            let cover = ModeVeilView(snapshot: snapshot, frame: bounds)
+            addSubview(cover)
+            veil = cover
+            cover.blurIn()
+        } else if let cover = veil {
+            veil = nil
+            cover.fadeAway()
+        }
+    }
+
+    // MARK: Launch
+
+    /// The picture has opened once since launch: later sessions (a return from the background, a reconfiguration)
+    /// come back without the flourish.
+    private static var hasOpened = false
+
+    /// The first live frame since launch opens out from a circle in the middle of the picture, like a shutter's
+    /// blades parting. Only drawn: the camera is ready and takes touches from the first frame, whether this runs or
+    /// not. With Reduce Motion the picture fades in.
+    func openShutterOnce() {
+        guard !Self.hasOpened, let previewLayer, window != nil, !isHidden else { return }
+        Self.hasOpened = true
+        let reduceMotion = UIAccessibility.isReduceMotionEnabled || AppearanceStore.shared.reduceMotion
+        let duration: CFTimeInterval = 0.3
+        let curve = CAMediaTimingFunction(name: .easeOut)
+        if reduceMotion {
+            let fade = CABasicAnimation(keyPath: "opacity")
+            fade.fromValue = 0
+            fade.toValue = 1
+            fade.duration = duration
+            fade.timingFunction = curve
+            previewLayer.add(fade, forKey: "launchFade")
+            return
+        }
+        let bounds = previewLayer.bounds
+        guard bounds.width > 1, bounds.height > 1 else { return }
+        let center = CGPoint(x: bounds.midX, y: bounds.midY)
+        // Far enough to clear the corners, so the last frame of the opening is the whole picture.
+        let full = hypot(bounds.width, bounds.height) / 2
+        let start = min(bounds.width, bounds.height) * 0.04
+        func circle(_ radius: CGFloat) -> CGPath {
+            CGPath(ellipseIn: CGRect(x: center.x - radius, y: center.y - radius, width: radius * 2, height: radius * 2),
+                   transform: nil)
+        }
+        let mask = CAShapeLayer()
+        mask.frame = bounds
+        mask.path = circle(full)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        previewLayer.mask = mask
+        CATransaction.commit()
+        CATransaction.begin()
+        CATransaction.setCompletionBlock { [weak previewLayer, weak mask] in
+            // Left on, a mask would make every frame of the picture pass through it.
+            if let previewLayer, previewLayer.mask === mask { previewLayer.mask = nil }
+        }
+        let open = CABasicAnimation(keyPath: "path")
+        open.fromValue = circle(start)
+        open.toValue = circle(full)
+        open.duration = duration
+        open.timingFunction = curve
+        mask.add(open, forKey: "open")
+        CATransaction.commit()
     }
 
     func attach(_ layer: CALayer) {
@@ -663,6 +745,101 @@ private final class PreviewHostView: UIView {
         CATransaction.setDisableActions(true)
         previewLayer.frame = target
         CATransaction.commit()
+    }
+}
+
+/// A still of the picture under a blur that ramps from none to a soft focus, for a change of mode. The system's
+/// blur only has its full strength, which smears the picture past recognising; a paused animator held part of the
+/// way gives a radius near 18 pt, and a short display link walks it there. The link runs only for the ramp, a
+/// quarter of a second per switch.
+@MainActor
+private final class ModeVeilView: UIView {
+    private let blur = UIVisualEffectView(effect: nil)
+    private let shade = UIView()
+    private var animator: UIViewPropertyAnimator?
+    private var link: CADisplayLink?
+    private var rampStart: CFTimeInterval = 0
+
+    /// How far along the system blur's strength the ramp stops.
+    private static let strength: CGFloat = 0.6
+    private static let rampDuration: CFTimeInterval = 0.25
+
+    // UIKit asserts when a paused animator is released, and a display link holds its target: both are let go as
+    // soon as the veil leaves the screen, however it leaves.
+    override func willMove(toWindow newWindow: UIWindow?) {
+        super.willMove(toWindow: newWindow)
+        guard newWindow == nil else { return }
+        link?.invalidate()
+        link = nil
+        animator?.stopAnimation(true)
+        animator = nil
+    }
+
+    init(snapshot: UIView, frame: CGRect) {
+        super.init(frame: frame)
+        isUserInteractionEnabled = false
+        autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        snapshot.frame = bounds
+        snapshot.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        addSubview(snapshot)
+        let reduceTransparency = UIAccessibility.isReduceTransparencyEnabled || AppearanceStore.shared.reduceTransparency
+        if !reduceTransparency {
+            blur.frame = bounds
+            blur.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            addSubview(blur)
+        }
+        // A little darker, as the old veil was, so the still reads as waiting rather than as the picture. Without
+        // the blur, darker still: the still alone looks like a frozen camera.
+        shade.frame = bounds
+        shade.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        shade.backgroundColor = UIColor.black.withAlphaComponent(reduceTransparency ? 0.45 : 0.2)
+        shade.alpha = 0
+        addSubview(shade)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func blurIn() {
+        UIView.animate(withDuration: Self.rampDuration, delay: 0, options: [.curveEaseOut]) {
+            self.shade.alpha = 1
+        }
+        guard blur.superview != nil else { return }
+        let animator = UIViewPropertyAnimator(duration: 1, curve: .linear) { [blur] in
+            blur.effect = UIBlurEffect(style: .dark)
+        }
+        animator.pausesOnCompletion = true
+        animator.pauseAnimation()
+        self.animator = animator
+        rampStart = CACurrentMediaTime()
+        let link = CADisplayLink(target: self, selector: #selector(step))
+        link.add(to: .main, forMode: .common)
+        self.link = link
+    }
+
+    @objc private func step() {
+        let t = min((CACurrentMediaTime() - rampStart) / Self.rampDuration, 1)
+        // Ease out, as the shade's fade does.
+        let eased = 1 - (1 - t) * (1 - t)
+        animator?.fractionComplete = Self.strength * CGFloat(eased)
+        if t >= 1 { stopLink() }
+    }
+
+    private func stopLink() {
+        link?.invalidate()
+        link = nil
+    }
+
+    /// Cross-fades into the live picture, then lets go of the animator, which UIKit requires to be stopped first.
+    func fadeAway() {
+        stopLink()
+        UIView.animate(withDuration: 0.3, delay: 0, options: [.curveEaseOut, .beginFromCurrentState]) {
+            self.alpha = 0
+        } completion: { _ in
+            self.animator?.stopAnimation(true)
+            self.animator = nil
+            self.removeFromSuperview()
+        }
     }
 }
 
@@ -1043,7 +1220,7 @@ private struct SunSliderGraphic: View {
                 .offset(x: x, y: down - lower / 2)
                 .opacity(showsTrack ? 1 : 0)
             Image(systemName: "sun.max.fill")
-                .font(.system(size: 17, weight: .semibold))
+                .font(.system(size: 17, weight: .regular))
                 .foregroundStyle(Theme.accent)
                 .offset(x: x, y: y)
             Text(EVFormat.label(bias))

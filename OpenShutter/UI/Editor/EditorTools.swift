@@ -348,7 +348,7 @@ private struct EditorValueHeader: View {
             VStack(spacing: 1) {
                 Text(title.uppercased())
                     .font(.system(size: 10 * Theme.labelScale, weight: .semibold))
-                    .tracking(0.8)
+                    .tracking(Theme.smallCapsTracking)
                     .foregroundStyle(Theme.secondaryText)
                 // Not animated per value: a scrub changes it many times a second.
                 Text(value)
@@ -438,9 +438,9 @@ private struct LookButton: View, Equatable {
                     }
                 }
                 .frame(width: Self.side, height: Self.side)
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.small, style: .continuous))
                 .overlay {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    RoundedRectangle(cornerRadius: Theme.Radius.small, style: .continuous)
                         .strokeBorder(isSelected ? Theme.accent : Color.clear, lineWidth: 2)
                 }
                 Text(look.title)
@@ -632,7 +632,7 @@ private struct StraightenHeader: View {
             VStack(spacing: 1) {
                 Text("STRAIGHTEN")
                     .font(.system(size: 10 * Theme.labelScale, weight: .semibold))
-                    .tracking(0.8)
+                    .tracking(Theme.smallCapsTracking)
                     .foregroundStyle(Theme.secondaryText)
                 Text(Self.degrees(recipe.straightenDegrees))
                     .font(Theme.valueFont)

@@ -377,7 +377,7 @@ final class MovieRecorder: NSObject, AVCaptureFileOutputRecordingDelegate, @unch
 
     private static func reason(for error: Error) -> String {
         let nsError = error as NSError
-        guard nsError.domain == AVFoundationErrorDomain else { return nsError.localizedDescription }
+        guard nsError.domain == AVFoundationErrorDomain else { return "Something went wrong while recording." }
         switch nsError.code {
         case AVError.Code.diskFull.rawValue:
             return "There isn't enough free storage to record."
@@ -386,7 +386,7 @@ final class MovieRecorder: NSObject, AVCaptureFileOutputRecordingDelegate, @unch
         case AVError.Code.mediaServicesWereReset.rawValue:
             return "The camera restarted while recording."
         default:
-            return nsError.localizedDescription
+            return "Something went wrong while recording."
         }
     }
 

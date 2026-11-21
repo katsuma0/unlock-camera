@@ -60,7 +60,7 @@ struct ShareProgressCard: View {
                 .font(.subheadline.weight(.semibold))
         }
         .padding(20)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous))
         .accessibilityElement(children: .contain)
     }
 }

@@ -5,6 +5,11 @@ struct PermissionView: View {
     @Bindable var model: CameraModel
     @State private var isShown = false
     @State private var isRequesting = false
+    /// The name comes in first and the ask a moment after, so the page reads top down rather than all at once.
+    @State private var heroShown = false
+    @State private var askShown = false
+
+    private var reduceMotion: Bool { AppearanceStore.shared.reduceMotion }
 
     var body: some View {
         let status = model.authorization
@@ -32,39 +37,62 @@ struct PermissionView: View {
                 guard !Task.isCancelled else { return }
             }
             withAnimation(.easeOut(duration: 0.3)) { isShown = true }
+            if reduceMotion {
+                // A plain fade with no rise and no wait.
+                heroShown = true
+                askShown = true
+                return
+            }
+            withAnimation(.easeOut(duration: 0.6)) { heroShown = true }
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            withAnimation(.easeOut(duration: 0.45)) { askShown = true }
         }
     }
 
     /// The column itself. Its spacers spread it over the screen where there is room and keep their minimum inside
-    /// the scroll view.
+    /// the scroll view. The app's name leads, as the camera's own screen would; the ask sits low, by the button.
     private func page(for status: CameraAuthorization) -> some View {
         VStack(spacing: 0) {
             Spacer(minLength: 24)
-            Image(systemName: "camera.aperture")
-                .font(.system(size: 64, weight: .light))
-                .foregroundStyle(Theme.accent)
-                .padding(.bottom, 28)
-                .accessibilityHidden(true)
-            Text(Self.title(for: status))
-                .font(.title2.weight(.semibold))
-                .foregroundStyle(Theme.primaryText)
+            VStack(spacing: 14) {
+                Image(systemName: "camera.aperture")
+                    .font(.system(size: 64, weight: .light))
+                    .foregroundStyle(Theme.accent)
+                    .accessibilityHidden(true)
+                Text("Open Shutter")
+                    .font(.largeTitle.weight(.semibold))
+                    .foregroundStyle(Theme.primaryText)
+                    .accessibilityAddTraits(.isHeader)
+                Text("Long exposures and full manual control.")
+                    .font(.body)
+                    .foregroundStyle(Theme.secondaryText)
+            }
+            .multilineTextAlignment(.center)
+            .fixedSize(horizontal: false, vertical: true)
+            .opacity(heroShown ? 1 : 0)
+            .offset(y: heroShown || reduceMotion ? 0 : 10)
+            Spacer(minLength: 32)
+            VStack(spacing: 14) {
+                VStack(spacing: 6) {
+                    Text(Self.title(for: status))
+                        .font(.headline)
+                        .foregroundStyle(Theme.primaryText)
+                    Text(Self.message(for: status))
+                        .font(.subheadline)
+                        .foregroundStyle(Theme.secondaryText)
+                }
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
-                .padding(.bottom, 12)
-                .accessibilityAddTraits(.isHeader)
-            Text(Self.message(for: status))
-                .font(.body)
-                .foregroundStyle(Theme.secondaryText)
-                .multilineTextAlignment(.center)
-                .fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: 24)
-            actionButton(for: status)
-                .padding(.bottom, 14)
-            Text(Self.footnote(for: status))
-                .font(.footnote)
-                .foregroundStyle(Theme.tertiaryText)
-                .multilineTextAlignment(.center)
-                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityElement(children: .combine)
+                actionButton(for: status)
+                    .padding(.top, 6)
+                Text(Self.footnote(for: status))
+                    .font(.footnote)
+                    .foregroundStyle(Theme.secondaryText)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .opacity(askShown ? 1 : 0)
         }
         .padding(.horizontal, 32)
         .padding(.bottom, 24)
@@ -89,12 +117,12 @@ struct PermissionView: View {
                         ProgressView()
                             .tint(Theme.onAccent)
                     }
-                    Text("Allow Camera")
+                    Text("Continue")
                 }
             }
             .buttonStyle(ProminentCapsuleStyle())
             .disabled(isRequesting)
-            .accessibilityLabel("Allow Camera")
+            .accessibilityLabel("Continue")
             .accessibilityHint("Shows the system request for camera access.")
         case .denied, .restricted:
             Button {
@@ -110,7 +138,7 @@ struct PermissionView: View {
 
     private static func title(for status: CameraAuthorization) -> String {
         switch status {
-        case .notDetermined, .authorized: return "Open Shutter needs the camera"
+        case .notDetermined, .authorized: return "Camera access"
         case .denied: return "Camera access is off"
         case .restricted: return "Camera access is restricted"
         }
@@ -119,7 +147,7 @@ struct PermissionView: View {
     private static func message(for status: CameraAuthorization) -> String {
         switch status {
         case .notDetermined, .authorized:
-            return "Allow camera access to take photos and videos."
+            return "Open Shutter uses the camera to take your photos and videos."
         case .denied:
             return "Turn on Camera for Open Shutter in Settings."
         case .restricted:
@@ -130,7 +158,7 @@ struct PermissionView: View {
     private static func footnote(for status: CameraAuthorization) -> String {
         switch status {
         case .notDetermined, .authorized:
-            return "Photos and videos go to your photo library. Location stays off until you turn it on."
+            return "They go to your photo library. Location stays off until you turn it on."
         case .denied:
             return "Settings > Privacy & Security > Camera"
         case .restricted:

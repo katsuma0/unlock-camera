@@ -3,6 +3,9 @@ import Photos
 import CoreLocation
 import UniformTypeIdentifiers
 import CameraCore
+import os
+
+private let saveLog = Logger(subsystem: "ca.katsuma.openshutter", category: "PhotoLibrary")
 
 enum PhotoLibrary {
     /// Every file of a capture is named "OpenShutter_20261114_221345_A1B2.HEIC" in Photos, so the app's own photos
@@ -53,7 +56,7 @@ enum PhotoLibrary {
                 identifier.set(request.placeholderForCreatedAsset?.localIdentifier)
             }
         } catch {
-            throw CameraError.saveFailed(error.localizedDescription)
+            throw saveFailure(error)
         }
         return identifier.value
     }
@@ -80,12 +83,30 @@ enum PhotoLibrary {
                 identifier.set(request.placeholderForCreatedAsset?.localIdentifier)
             }
         } catch {
-            throw CameraError.saveFailed(error.localizedDescription)
+            throw saveFailure(error)
         }
         return identifier.value
     }
 
     // MARK: - Helpers
+
+    /// Photos' own error text is written for developers ("PHPhotosErrorDomain error 3305"), so people get a plain
+    /// reason and the raw error goes to the log.
+    private static func saveFailure(_ error: Error) -> CameraError {
+        saveLog.error("Saving to Photos failed: \(error, privacy: .public)")
+        let ns = error as NSError
+        if ns.domain == PHPhotosErrorDomain {
+            switch PHPhotosError.Code(rawValue: ns.code) {
+            case .accessUserDenied, .accessRestricted:
+                return .saveFailed("Allow Open Shutter to add photos in Settings.")
+            case .notEnoughSpace:
+                return .saveFailed("The iPhone is out of space.")
+            default:
+                break
+            }
+        }
+        return .saveFailed("Try again.")
+    }
 
     /// UTType.rawImage is the generic camera RAW type; Photos wants the DNG type for the alternate resource.
     private static let rawTypeIdentifier = "com.adobe.raw-image"

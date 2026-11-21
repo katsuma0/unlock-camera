@@ -117,6 +117,15 @@ enum Theme {
     static let spring = Animation.spring(response: 0.32, dampingFraction: 0.86)
     static let snappy = Animation.spring(response: 0.22, dampingFraction: 0.9)
 
+    /// A capture flying from the picture into the thumbnail: Theme.spring's pace, critically damped, so the copy
+    /// settles into the square instead of overshooting its rim.
+    static let flight = Animation.spring(response: 0.35, dampingFraction: 1)
+
+    /// Every glass chip on the camera is this tall, with this much room either side of its text, so a row of chips
+    /// from different controls reads as one instrument.
+    static let chipHeight: CGFloat = 30
+    static let chipPadding: CGFloat = 10
+
     static let shutterSize: CGFloat = 76
     static let controlSize: CGFloat = 38
     static let smallControlSize: CGFloat = 30
@@ -220,7 +229,8 @@ struct GlassCircleButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         let pressed = configuration.isPressed || isPressed
         configuration.label
-            .font(.system(size: size * 0.42, weight: .semibold))
+            // Medium: glass-backed glyphs carry one weight, a touch heavier than the bare ones on the picture.
+            .font(.system(size: size * 0.42, weight: .medium))
             .foregroundStyle(isActive ? Theme.accent : Theme.primaryText)
             .frame(width: size, height: size)
             .cameraGlass(in: Circle())
@@ -241,8 +251,8 @@ struct GlassChipButtonStyle: ButtonStyle {
         configuration.label
             .font(Theme.chipFont)
             .foregroundStyle(isActive ? Theme.accent : Theme.primaryText)
-            .padding(.horizontal, 10)
-            .frame(height: 28)
+            .padding(.horizontal, Theme.chipPadding)
+            .frame(height: Theme.chipHeight)
             .cameraGlass(in: Capsule())
             .scaleEffect(pressed ? 0.94 : 1)
             .animation(Theme.snappy, value: pressed)
@@ -354,6 +364,16 @@ extension View {
         shadow(color: .black.opacity(0.5), radius: 3)
     }
 
+    /// A faint bloom in the accent round whatever is active: the chosen mode, the lens in use, a lit bar glyph, the
+    /// value an open dial turns. It sits beside legibleShadow, which still keeps the text apart from a white sky.
+    /// The colour fades rather than the shadow coming and going, so the change animates and the view keeps its
+    /// identity. Increase Contrast leaves it off: a crisp edge reads better there than a soft one.
+    @MainActor
+    func accentGlow(_ on: Bool) -> some View {
+        let shown = on && !AppearanceStore.shared.increaseContrast
+        return shadow(color: Theme.accent.opacity(shown ? 0.45 : 0), radius: 6)
+    }
+
     /// Thin lines and ticks drawn on the picture.
     func lineShadow() -> some View {
         shadow(color: .black.opacity(0.4), radius: 1.5)
@@ -390,6 +410,27 @@ extension View {
                 .opacity(isActive ? 1 : 0)
                 .accessibilityHidden(true)
         }
+    }
+}
+
+extension AnyTransition {
+    /// Controls that change with the mode come into focus where they stand, a blur clearing as they fade in, and
+    /// leave the same way, so a switch of modes reads as one change of focus instead of rows sliding about. With
+    /// Reduce Transparency they only fade: the blur would soften the glass they sit on.
+    @MainActor static var cameraFocus: AnyTransition {
+        AppearanceStore.shared.reduceTransparency
+            ? .opacity
+            : .modifier(active: CameraFocus(isOut: true), identity: CameraFocus(isOut: false))
+    }
+}
+
+private struct CameraFocus: ViewModifier {
+    let isOut: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .blur(radius: isOut ? 8 : 0)
+            .opacity(isOut ? 0 : 1)
     }
 }
 

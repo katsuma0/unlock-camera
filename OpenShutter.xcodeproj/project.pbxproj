@@ -279,6 +279,7 @@
 				INFOPLIST_FILE = OpenShutter/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "Open Shutter";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.photography";
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_NSCameraUsageDescription = "Open Shutter uses the camera to take photos and video.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Adds where a photo or video was taken to its details, only while location tags are on in Settings.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Records sound with your videos.";
@@ -318,6 +319,7 @@
 				INFOPLIST_FILE = OpenShutter/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "Open Shutter";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.photography";
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_NSCameraUsageDescription = "Open Shutter uses the camera to take photos and video.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Adds where a photo or video was taken to its details, only while location tags are on in Settings.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Records sound with your videos.";

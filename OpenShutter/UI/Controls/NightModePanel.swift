@@ -222,7 +222,7 @@ private struct PlanPillFace: View {
                 .contentTransition(.numericText())
             if opensMenu {
                 Image(systemName: "chevron.down")
-                    .font(.system(size: 8, weight: .bold))
+                    .font(.system(size: 8, weight: .semibold))
                     .opacity(0.6)
             }
         }
@@ -258,8 +258,8 @@ private struct NightChipStyle: ButtonStyle {
             .foregroundStyle(isActive ? Theme.accent : Theme.primaryText)
             .lineLimit(1)
             .fixedSize()
-            .padding(.horizontal, 10)
-            .frame(height: 30)
+            .padding(.horizontal, Theme.chipPadding)
+            .frame(height: Theme.chipHeight)
             .cameraGlass(in: Capsule())
             .scaleEffect(configuration.isPressed ? 0.94 : 1)
             .animation(Theme.snappy, value: configuration.isPressed)

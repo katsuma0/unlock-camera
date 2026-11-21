@@ -157,7 +157,7 @@ private struct FalseColorLegend: View {
                 }
             }
             .frame(height: 16)
-            .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.cell, style: .continuous))
             HStack {
                 Text("Black")
                 Spacer()

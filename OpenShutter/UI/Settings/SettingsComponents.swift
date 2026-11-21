@@ -146,7 +146,7 @@ extension View {
     /// write their labels.
     func settingsHeader() -> some View {
         font(.caption.weight(.semibold))
-            .tracking(1.2)
+            .tracking(Theme.smallCapsTracking)
             .textCase(.uppercase)
     }
 }
@@ -272,7 +272,8 @@ struct UnavailableFeatures {
             sentences.append("Needs iOS 27: \(ListFormatter.localizedString(byJoining: needsNewerSystem)).")
         }
         if !needsNewerBuild.isEmpty {
-            sentences.append("Needs an Xcode 27 build: \(ListFormatter.localizedString(byJoining: needsNewerBuild)).")
+            let names = ListFormatter.localizedString(byJoining: needsNewerBuild)
+            sentences.append("Needs a newer version of Open Shutter: \(names).")
         }
         return sentences.isEmpty ? nil : sentences.joined(separator: " ")
     }

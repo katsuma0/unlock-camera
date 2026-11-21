@@ -414,7 +414,16 @@ private struct LivePhotoCanvas: UIViewRepresentable {
         context.coordinator.infoDirection = infoSwipe
         context.coordinator.infoSwipe.onPhase = onInfoDrag
         if view.livePhoto !== livePhoto { view.livePhoto = livePhoto }
-        if !isCurrent { view.stopPlayback() }
+        let coordinator = context.coordinator
+        if !isCurrent {
+            view.stopPlayback()
+            coordinator.hasHinted = false
+        } else if !coordinator.hasHinted, livePhoto != nil {
+            // A short stir once a Live Photo comes to rest on screen, as Photos does, so it reads as live without a
+            // badge to explain it. Once per arrival: the sharper copy landing later must not play it again.
+            coordinator.hasHinted = true
+            if !AppearanceStore.shared.reduceMotion { view.startPlayback(with: .hint) }
+        }
     }
 
     @MainActor
@@ -422,6 +431,8 @@ private struct LivePhotoCanvas: UIViewRepresentable {
         var onTap: (() -> Void)?
         let infoSwipe = InfoSwipeRecognizer()
         var infoDirection: InfoSwipeDirection?
+        /// The hint has played since this page became the current one.
+        var hasHinted = false
 
         @objc func tapped() {
             onTap?()

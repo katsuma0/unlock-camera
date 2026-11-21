@@ -29,88 +29,94 @@ struct StackPreviewLayer: View {
     /// The whole camera image as the camera screen lays it out, in the coordinates of the screen this layer covers.
     let picture: CGRect
 
-    /// The last preview shown before the battery saver darkened the screen. Nobody sees newer ones under the black
-    /// layer, and leaving the picture as it was spares the drawing several times a second.
-    @State private var lastShown: CGImage?
+    /// The preview on top, fading in over the one before it, which stays opaque underneath until it is covered. Two
+    /// images both half faded would let the black through and dim the picture at every step. Set from onChange, never
+    /// read from the model in the body, so both move in one transaction and no frame shows a stale pair. Under the
+    /// battery saver's black layer they stop following the stack: nobody sees newer previews there, and leaving the
+    /// picture as it was spares the drawing several times a second.
+    @State private var over: CGImage?
+    @State private var under: CGImage?
+
+    /// How long each new preview takes to come up over the last: the shot develops rather than swaps.
+    private static let develop = Animation.easeOut(duration: 0.5)
 
     var body: some View {
-        let isDimmed = model.dimmer.isDimmed
-        let live = model.activity == .stacking ? model.stackProgress?.preview : nil
-        let preview = isDimmed ? lastShown : live
         ZStack {
-            if let preview {
-                Image(decorative: preview, scale: 1)
-                    .resizable()
-                    .interpolation(.medium)
-                    .aspectRatio(contentMode: .fit)
-                    .frame(width: picture.width, height: picture.height)
-                    .position(x: picture.midX, y: picture.midY)
+            if let under {
+                layer(under)
                     .transition(.opacity)
+            }
+            if let over {
+                layer(over)
+                    .id(ObjectIdentifier(over))
+                    // The old top stays put as the new one comes in, and leaves at once: by then it is the one
+                    // underneath.
+                    .transition(.asymmetric(insertion: .opacity, removal: .identity))
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .animation(.easeIn(duration: 0.4), value: preview != nil)
         .allowsHitTesting(false)
         .accessibilityHidden(true)
-        .onChange(of: live.map(ObjectIdentifier.init)) {
-            // Kept one step behind the live preview, so the frame the screen showed when it went dark stays.
-            if !model.dimmer.isDimmed { lastShown = live }
-        }
-    }
-}
-
-// MARK: - Capture blink
-
-/// Each time the backend fires the shutter, a thin frame line pulses at the photo frame's edges and closes in a
-/// little, like an iris, over a short dip of the picture, so timer, intervalometer and bracket shots show too. The dip
-/// is shallow: the line carries the signal, and the scene stays in view. It sits under the bands, inside the frame's
-/// cutout. Dim Flashing Lights drops the dip and keeps the line; Reduce motion keeps the line still and only fades it.
-struct ShutterBlink: View {
-    let model: CameraModel
-    /// The photo frame, in the coordinates of the screen this view covers.
-    let frame: CGRect
-    @State private var dip = 0.0
-    @State private var edge = 0.0
-    @State private var closed = false
-    @Environment(\.accessibilityDimFlashingLights) private var dimFlashingLights
-
-    /// How far the line closes in from the frame's edge.
-    private static let travel: CGFloat = 6
-
-    var body: some View {
-        ZStack(alignment: .topLeading) {
-            Rectangle()
-                .fill(Color.black)
-                .opacity(dip)
-            Rectangle()
-                .strokeBorder(Theme.primaryText, lineWidth: 1.5)
-                .lineShadow()
-                .frame(width: max(frame.width - 2 * inset, 0), height: max(frame.height - 2 * inset, 0))
-                .offset(x: frame.minX + inset, y: frame.minY + inset)
-                .opacity(edge)
-        }
-        .allowsHitTesting(false)
-        .accessibilityHidden(true)
-        .onChange(of: model.shutterCount) { _, _ in
-            let still = AppearanceStore.shared.reduceMotion
-            var reset = Transaction(animation: nil)
-            reset.disablesAnimations = true
-            withTransaction(reset) { closed = false }
-            // Two steps: a change and its reversal in one transaction would never reach the screen.
-            withAnimation(.easeIn(duration: 0.05)) {
-                dip = dimFlashingLights ? 0 : 0.4
-                edge = 1
-            } completion: {
-                withAnimation(.easeOut(duration: 0.28)) {
-                    dip = 0
-                    edge = 0
-                    if !still { closed = true }
+        .onChange(of: Self.live(model).map(ObjectIdentifier.init)) {
+            let next = Self.live(model)
+            if let next {
+                guard !model.dimmer.isDimmed else { return }
+                // The first preview of a stack comes up from the live picture as slowly as the later ones.
+                under = over
+                withAnimation(Self.develop) { over = next }
+            } else if over != nil || under != nil {
+                // The stack is over and its picture leaves for the thumbnail. The top image drops to the bottom
+                // first, where the same picture already shows, and that one fades from the next update on: the top's
+                // removal is instant, and fading both at once would show the older image through the newer.
+                under = over ?? under
+                over = nil
+                Task { @MainActor in
+                    withAnimation(.easeIn(duration: 0.4)) { under = nil }
                 }
             }
         }
     }
 
-    private var inset: CGFloat { closed ? Self.travel : 0 }
+    private static func live(_ model: CameraModel) -> CGImage? {
+        model.activity == .stacking ? model.stackProgress?.preview : nil
+    }
+
+    private func layer(_ image: CGImage) -> some View {
+        Image(decorative: image, scale: 1)
+            .resizable()
+            .interpolation(.medium)
+            .aspectRatio(contentMode: .fit)
+            .frame(width: picture.width, height: picture.height)
+            .position(x: picture.midX, y: picture.midY)
+    }
+}
+
+// MARK: - Capture blink
+
+/// The picture blinks black each time the backend fires the shutter, like Apple's Camera, so timer, intervalometer
+/// and bracket shots show too. It covers the picture only: the bands, the overlays and the controls sit above it.
+struct ShutterBlink: View {
+    let model: CameraModel
+    @State private var opacity = 0.0
+    @Environment(\.accessibilityDimFlashingLights) private var dimFlashingLights
+
+    var body: some View {
+        Rectangle()
+            .fill(Color.black)
+            .opacity(opacity)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+            .onChange(of: model.shutterCount) { _, _ in
+                // Dim Flashing Lights asks for softer flashes; half the darkness still says the shot was taken.
+                let peak = dimFlashingLights ? 0.5 : 1.0
+                // Two steps: a change and its reversal in one transaction would never reach the screen.
+                withAnimation(.easeIn(duration: 0.05)) {
+                    opacity = peak
+                } completion: {
+                    withAnimation(.easeOut(duration: 0.22)) { opacity = 0 }
+                }
+            }
+    }
 }
 
 // MARK: - Countdown
@@ -127,13 +133,9 @@ private struct CountdownLayer: View {
         let reduceMotion = systemReduceMotion || AppearanceStore.shared.reduceMotion
         ZStack {
             if let remaining {
-                CountdownNumber(model: model, remaining: remaining)
-                    .id(remaining)
-                    // Each second's numeral grows in and shrinks away; with Reduce Motion they only cross-fade.
-                    .transition(reduceMotion ? AnyTransition.opacity : .asymmetric(
-                        insertion: .scale(scale: 1.35).combined(with: .opacity),
-                        removal: .scale(scale: 0.7).combined(with: .opacity)
-                    ))
+                // One numeral for the whole count, rolling down a digit each second. With Reduce Motion it swaps.
+                CountdownNumber(model: model, remaining: remaining, rolls: !reduceMotion)
+                    .transition(.opacity)
             }
             // Only while the last second is held for a phone that still moves: the number stops there, and nothing
             // else on screen says why. A plain timer needs no words; the shutter's square stops it.
@@ -143,7 +145,8 @@ private struct CountdownLayer: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .animation(.easeOut(duration: 0.35), value: remaining)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.35), value: remaining)
+        .animation(Theme.fade, value: remaining != nil)
         .animation(Theme.fade, value: waiting)
         .allowsHitTesting(false)
     }
@@ -159,12 +162,19 @@ private struct CountdownLayer: View {
 private struct CountdownNumber: View {
     let model: CameraModel
     let remaining: Int
+    let rolls: Bool
+
+    /// The last seconds turn to the accent, the cue to keep still that the shot is about to go.
+    private static let finalSeconds = 3
 
     var body: some View {
+        let isFinal = remaining <= Self.finalSeconds
         Text("\(remaining)")
             .font(Theme.countdownFont)
-            .foregroundStyle(Theme.primaryText)
+            .foregroundStyle(isFinal ? Theme.accent : Theme.primaryText)
+            .contentTransition(rolls ? .numericText(countsDown: true) : .identity)
             .shadow(color: .black.opacity(0.45), radius: 16)
+            .accentGlow(isFinal)
             .uprightRotation(model.motion.iconRotationDegrees)
             .accessibilityLabel("\(remaining)")
             .accessibilityAddTraits(.updatesFrequently)

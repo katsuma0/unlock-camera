@@ -184,8 +184,11 @@ struct GalleryViewer: View {
             toggleFavorite(asset)
         } label: {
             Label(isFavorite ? "Unfavorite" : "Favorite", systemImage: isFavorite ? "heart.fill" : "heart")
+                // The bar's accent already colours it; the heart filling is the change, swapped crisply.
+                .contentTransition(AppearanceStore.shared.reduceMotion ? .identity : .symbolEffect(.replace))
         }
         .disabled(!(asset?.canPerform(.properties) ?? false))
+        .accessibilityLabel(isFavorite ? "Unfavorite" : "Favorite")
         if isPhoto {
             Spacer()
             Button {
@@ -259,7 +262,7 @@ struct GalleryViewer: View {
         let id = asset.localIdentifier
         let isOn = !(favorites[id] ?? asset.isFavorite)
         favorites[id] = isOn
-        Haptics.tap()
+        GalleryHaptics.favorite()
         Task {
             do {
                 try await library.setFavorite(asset, isOn)
@@ -328,6 +331,22 @@ private struct ViewerTitle: View {
         // Two lines have to fit the bar's height.
         .dynamicTypeSize(...DynamicTypeSize.xLarge)
         .accessibilityElement(children: .combine)
+    }
+}
+
+/// The gallery's own touch: a soft tap for a favorite, softer than the camera's controls, as a heart is not a
+/// setting. It keeps to the camera's haptics switch, its strength and its quiet during a stack.
+@MainActor
+enum GalleryHaptics {
+    private static let soft = UIImpactFeedbackGenerator(style: .soft)
+
+    static func favorite() {
+        guard Haptics.isEnabled, !Haptics.isSuppressed else { return }
+        switch Haptics.strength {
+        case .light: soft.impactOccurred(intensity: 0.5)
+        case .normal: soft.impactOccurred(intensity: 0.8)
+        case .strong: soft.impactOccurred(intensity: 1)
+        }
     }
 }
 
